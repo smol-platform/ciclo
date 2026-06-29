@@ -17,4 +17,6 @@ The first specification is [SPEC-CICLO-001: Agentic Babysitter Harness](/Users/z
 - Ciclo exposes an MCP control plane for Claude, Codex, and generic harnesses to query status, coordinate work, ask/answer questions, and report feedback to the operator session.
 - Remote sessions use Herdr remote attach over SSH (`herdr --remote ...`) with explicit registration, heartbeat, scoped access, and stale/lost detection.
 - Ciclo supports `single` mode without auth friction and `multiuser` mode with OAuth device-code login, scoped grants, and per-user authorization for work and commands.
+- Ciclo tracks context size, builds bounded context packs, and smart-compacts completed work into Beads so durable memory stays with the task.
+- Core coordination invariants are modeled with Quint under `formal/quint/`.
 - Benchmarks score Ciclo responses across simulated scenarios and multiple judge or driver models.

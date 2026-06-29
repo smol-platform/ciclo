@@ -146,11 +146,41 @@ Implementation should include:
 - Enforcement for work claim/update/close, command approval, question answer, remote registration, and admin actions.
 - Audit records for accepted, denied, delegated, and revoked actions without logging token material.
 
+### Context Engineering
+
+Ciclo must manage agent context as an explicit resource. Track context size per harness, loop, remote session, and Beads issue. Build bounded context packs from active task state, acceptance criteria, recent decisions, validation evidence, and durable Beads memory. After a Beads task is completed, blocked, or handed off, smart-compact the task context into Beads before dropping transcript history.
+
+Implementation should include:
+
+- Context budget estimates with warning, compact, and force-compact thresholds.
+- Context item classification: active, durable, stale, redundant, sensitive, and discardable.
+- Context pack assembly for Claude Code, Codex, and generic harness prompts.
+- Smart compaction output written to Beads notes/comments/metadata or child tasks.
+- Redaction before persisted memory.
+- Idempotency keys so repeated done events do not duplicate memory.
+- Benchmarks for threshold behavior, compaction after task completion, redaction, and force-compact dispatch blocking.
+
 ## Validation Expectations
 
 Early tasks should rely on fixture tests. Once a runnable package exists, every behavioral change should include the narrowest relevant command in the Beads completion note, such as unit tests, fixture tests, benchmark scenarios, or schema validation.
 
+For coordination-sensitive behavior, update and run the Quint model in `formal/quint/`. This is required for changes involving Beads claims, Beads remote DB health, multi-user grants, command approval, token handling, or Herdr remote session ownership.
+
+Baseline commands:
+
+```bash
+quint typecheck formal/quint/ciclo_core.qnt
+quint test formal/quint/ciclo_core.qnt --verbosity=1
+quint run formal/quint/ciclo_core.qnt --max-samples=1000 --max-steps=20 \
+  --invariants invClaimOwnerMatchesStatus invClosedWorkUnclaimed invNoIntruderOwnsWork \
+  invNoUnderScopedCommandApproval invRemoteLostDoesNotReleaseClaimedWork invTokenNeverLeaked \
+  --verbosity=1
+quint verify formal/quint/ciclo_core.qnt --max-steps=6 \
+  --invariants invClaimOwnerMatchesStatus invClosedWorkUnclaimed invNoIntruderOwnsWork \
+  invNoUnderScopedCommandApproval invRemoteLostDoesNotReleaseClaimedWork invTokenNeverLeaked \
+  --verbosity=1
+```
+
 ## Commit Guidance
 
 Use small commits tied to Beads tasks. Do not rewrite Beads history or Git history unless explicitly asked. When committing implementation work, include the Beads ID in the commit body when there is a concrete task ID.
-

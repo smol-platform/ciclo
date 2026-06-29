@@ -44,6 +44,7 @@ Ciclo should reduce that polling burden by supervising agent loops in a reposito
 11. Support remote sessions through Herdr's remote attach over SSH, where Ciclo supervises agents and loops on SSH-accessible machines or remote named sessions by using Herdr as the remote access layer.
 12. Support multi-user Ciclo sessions with per-user access control, while keeping single-user mode frictionless.
 13. Support Beads remote database configurations so local and remote agents can centralize work coordination through Beads.
+14. Provide context engineering abilities that track context size, compact safely after Beads task completion, and persist durable work memory into Beads.
 
 ## Non-Goals
 
@@ -85,6 +86,9 @@ The evaluator wants benchmark scenarios that simulate different agent and reposi
 - Ciclo session: The shared supervision context for loops, work, remote sessions, users, and policy. A session can run in `single` or `multiuser` mode.
 - Principal: An authenticated human, service, or harness identity making a request to Ciclo.
 - Access grant: A scoped permission allowing a principal to view status, claim work, approve commands, answer questions, manage remote sessions, or administer Ciclo.
+- Context budget: The usable prompt/context capacity for a harness session, including reserved space for system instructions, active task material, tool output, and response margin.
+- Work memory: Durable task-level memory persisted in Beads notes, comments, metadata, or child tasks so agents can resume without relying on transient chat context.
+- Smart compact: A policy-controlled summarization step that condenses completed task context into durable Beads memory and a short continuation summary.
 - Response: Ciclo's proposed or executed action after observing state.
 - Scenario: A deterministic benchmark setup containing repo fixtures, Herdr events, harness transcript snippets, policy, and expected response traits.
 
@@ -101,6 +105,7 @@ The evaluator wants benchmark scenarios that simulate different agent and reposi
 9. Give agents a narrow coordination API instead of requiring them to scrape Ciclo files, logs, or terminal panes.
 10. Treat remote sessions as explicitly configured Herdr remote targets; Herdr owns the SSH bridge, remote server attach, and remote UI/session persistence behavior.
 11. In `single` mode, do not make auth a barrier. In `multiuser` mode, require identity and explicit access grants before accepting work or commands.
+12. Treat agent context as a managed resource. Durable memory belongs in Beads; transient prompt context should be compacted when it stops carrying active work.
 
 ## High-Level Architecture
 
@@ -152,6 +157,7 @@ Responsibilities:
 - Query harness plugins for harness-specific context when needed.
 - Query repository probes for Git state, test state, branch state, and task state.
 - Query Beads for ready, claimed, blocked, and externally linked work.
+- Query context state before constructing prompts or dispatching follow-up work.
 - Maintain loop state per project.
 - Invoke the response engine.
 - Persist decisions, observations, and executed actions.
@@ -242,6 +248,35 @@ Centralized Beads coordination rules:
 - When centralized coordination is required, fail closed on remote DB unavailability rather than allowing duplicate local claims.
 - Let loops opt into offline/local fallback only when duplicate work risk is acceptable.
 - Keep remote tracker sync separate from Beads remote DB sync; Jira/Linear are not the coordination source.
+
+### Context Engineering Manager
+
+The context engineering manager tracks available context, selects what should enter prompts, and compacts completed work into durable Beads memory.
+
+Required capabilities:
+
+- Track approximate context size per harness session, loop, remote session, and active Beads issue.
+- Reserve context budget for system/developer instructions, active task, safety policy, tool output, and final response.
+- Classify context material as active, durable, stale, redundant, sensitive, or discardable.
+- Build context packs for harness prompts from spec sections, Beads task details, recent audit events, repo snapshots, and prior work memory.
+- Trigger smart compaction after a Beads task is completed, blocked, handed off, or exceeds configured context thresholds.
+- Persist compacted work memory to Beads notes/comments/metadata or child tasks, not only to `.ciclo/`.
+- Preserve acceptance evidence, tests run, decisions, blockers, changed files, remote session state, and follow-up tasks during compaction.
+- Redact secrets, tokens, raw transcripts, and sensitive remote details before persisting memory.
+- Make compaction idempotent so repeated completion events do not duplicate Beads memory.
+
+Context thresholds:
+
+- `warn`: Ciclo should prefer concise prompts and avoid adding low-value history.
+- `compact_after_task`: Ciclo should compact after the active Beads issue reaches done, blocked, or handoff-ready.
+- `force_compact`: Ciclo should refuse to dispatch more context-heavy work until memory is compacted or the user overrides policy.
+
+Smart compact output:
+
+- A durable Beads note or comment summarizing what changed, why, validation, blockers, and next action.
+- Optional Beads child tasks for follow-up work discovered during compaction.
+- A short continuation summary suitable for the next harness prompt.
+- An audit record linking source context, redactions, target Beads issue, and compaction idempotency key.
 
 ### Remote Tracker Sync
 
@@ -482,11 +517,418 @@ Response types:
 - `authenticate_user`: Start or complete user/device authentication.
 - `grant_access`: Add or change a principal's grants for a Ciclo session.
 - `revoke_access`: Revoke a principal, token, or device grant.
+- `measure_context`: Estimate current context usage and remaining budget.
+- `build_context_pack`: Select bounded context for a harness prompt.
+- `smart_compact`: Persist completed or stale work memory into Beads and produce a continuation summary.
 - `start_agent`: Launch a new agent through Herdr.
 - `handoff`: Move context from one harness to another.
 - `run_command`: Execute a configured local command.
 - `update_loop_goal`: Rewrite or refine the loop's next objective.
 - `stop_loop`: Mark the loop complete, paused, or failed.
+
+## Core Data Structures
+
+The implementation should keep runtime state explicit and serializable. These structures are conceptual TypeScript-like shapes; the final runtime may use equivalent types in another language.
+
+### Identifiers
+
+```ts
+type CicloSessionId = string;
+type LoopId = string;
+type EventId = string;
+type ResponseId = string;
+type BeadId = string;
+type PrincipalId = string;
+type HarnessId = "claude-code" | "codex" | "unknown" | string;
+type RemoteSessionId = string;
+type RemoteTrackerRef = string;
+type Capability =
+  | "status.read"
+  | "work.claim"
+  | "work.update"
+  | "work.close"
+  | "command.approve"
+  | "question.answer"
+  | "remote.register"
+  | "access.admin";
+type CommandClass = "read_only" | "test" | "build" | "deploy" | "destructive" | string;
+type RepoIdentity = {
+  root: string;
+  git_remote?: string;
+  git_branch?: string;
+  beads_prefix?: string;
+};
+```
+
+IDs must be stable across process restarts. Event, response, and audit IDs should be unique enough to support idempotency and replay.
+
+### Ciclo Session
+
+```ts
+type CicloSession = {
+  id: CicloSessionId;
+  mode: "single" | "multiuser";
+  owner_principal_id: PrincipalId;
+  project_root: string;
+  repo_identity: RepoIdentity;
+  active_loops: LoopId[];
+  beads_db: BeadsDbConfig;
+  auth?: AuthConfig;
+  created_at: string;
+  updated_at: string;
+};
+```
+
+`single` mode maps local actions to the owner principal. `multiuser` mode requires token-backed principals and scoped grants for mutating actions.
+
+### Loop Definition and State
+
+```ts
+type LoopDefinition = {
+  id: LoopId;
+  name: string;
+  goal: string;
+  harnesses: HarnessId[];
+  work?: WorkSelector;
+  triggers: Trigger[];
+  policy: LoopPolicy;
+  exit: ExitCriteria;
+};
+
+type LoopState = {
+  id: LoopId;
+  lifecycle:
+    | "created"
+    | "observing"
+    | "active"
+    | "blocked"
+    | "ready_for_review"
+    | "complete"
+    | "paused"
+    | "failed";
+  current_goal: string;
+  active_bead_id?: BeadId;
+  active_harness_id?: HarnessId;
+  active_remote_session_id?: RemoteSessionId;
+  last_event_id?: EventId;
+  last_response_id?: ResponseId;
+  retry_count: number;
+  updated_at: string;
+};
+```
+
+Loop state is runtime state. Durable work ownership and task status belong in Beads, especially when Beads remote DB mode is enabled.
+
+### Beads Work and Remote DB State
+
+```ts
+type BeadsDbConfig = {
+  mode: "local" | "shared_dolt_server" | "dolt_remote_sync";
+  required_for_coordination: boolean;
+  shared_dolt_server?: {
+    host: string;
+    port: number;
+    database: string;
+    user: string;
+  };
+  dolt_remote_sync?: {
+    remote: string;
+    pull_before_select: boolean;
+    push_after_claim: boolean;
+    push_after_update: boolean;
+    fail_closed_on_sync_error: boolean;
+  };
+};
+
+type BeadsDbHealth = {
+  mode: BeadsDbConfig["mode"];
+  healthy: boolean;
+  last_pull_at?: string;
+  last_push_at?: string;
+  last_error?: string;
+  conflict_detected: boolean;
+  schema_skew_detected: boolean;
+};
+
+type WorkItem = {
+  bead_id: BeadId;
+  title: string;
+  status: "open" | "in_progress" | "blocked" | "closed" | string;
+  priority: "P0" | "P1" | "P2" | "P3" | "P4";
+  labels: string[];
+  spec_id?: string;
+  acceptance_criteria?: string;
+  dependencies: BeadId[];
+  external_refs: RemoteTrackerRef[];
+  claim?: WorkClaim;
+};
+
+type WorkClaim = {
+  bead_id: BeadId;
+  ciclo_session_id: CicloSessionId;
+  principal_id: PrincipalId;
+  harness_id: HarnessId;
+  loop_id: LoopId;
+  remote_session_id?: RemoteSessionId;
+  claimed_at: string;
+  idempotency_key: string;
+};
+```
+
+When centralized coordination is required, Ciclo must refresh Beads remote DB state before selection and re-read the target bead immediately before claim. `.beads/issues.jsonl` is not a coordination input.
+
+### Herdr Observation
+
+```ts
+type HerdrObservation = {
+  event_id: EventId;
+  source: "herdr";
+  project_root: string;
+  target: {
+    workspace?: string;
+    tab?: string;
+    pane?: string;
+    agent_label?: string;
+    cwd?: string;
+  };
+  agent_state: "working" | "blocked" | "done" | "idle" | "unknown";
+  previous_agent_state?: HerdrObservation["agent_state"];
+  evidence: {
+    explain_rule?: string;
+    visible_flags: string[];
+    raw_ref?: string;
+  };
+  observed_at: string;
+};
+```
+
+The Herdr adapter owns raw command output. Downstream components receive normalized observations and safe evidence.
+
+### Remote Session
+
+```ts
+type RemoteSession = {
+  id: RemoteSessionId;
+  transport: "herdr_remote_ssh";
+  herdr_remote: string;
+  herdr_session?: string;
+  project_path: string;
+  repo_identity: RepoIdentity;
+  owner_principal_id: PrincipalId;
+  harnesses: HarnessId[];
+  state: "connected" | "working" | "blocked" | "done" | "detached" | "stale" | "lost";
+  active_bead_id?: BeadId;
+  active_loop_id?: LoopId;
+  last_heartbeat_at?: string;
+  last_attach_error?: string;
+};
+```
+
+Remote session liveness is derived from Herdr remote attach and heartbeat evidence. A lost remote session must not silently release a Beads claim.
+
+### Principal and Access Grant
+
+```ts
+type Principal = {
+  id: PrincipalId;
+  kind: "human" | "service" | "harness";
+  display_name: string;
+  roles: Role[];
+  disabled: boolean;
+};
+
+type Role =
+  | "owner"
+  | "operator"
+  | "maintainer"
+  | "contributor"
+  | "viewer"
+  | "agent_service";
+
+type AccessGrant = {
+  principal_id: PrincipalId;
+  capabilities: Capability[];
+  scope: {
+    session_id?: CicloSessionId;
+    repo_identity?: RepoIdentity;
+    loop_id?: LoopId;
+    bead_id?: BeadId;
+    bead_labels?: string[];
+    harness_id?: HarnessId;
+    remote_session_id?: RemoteSessionId;
+    command_classes?: CommandClass[];
+  };
+  expires_at?: string;
+};
+```
+
+Mutating requests in `multiuser` mode must resolve a principal and an effective grant before planning execution.
+
+### Response and Audit
+
+```ts
+type PlannedResponse = {
+  id: ResponseId;
+  loop_id: LoopId;
+  event_id: EventId;
+  kind:
+    | "wait"
+    | "summarize"
+    | "nudge"
+    | "ask_user"
+    | "claim_task"
+    | "create_task"
+    | "update_task"
+    | "sync_remote_tracker"
+    | "ask_operator"
+    | "answer_question"
+    | "report_feedback"
+    | "register_remote_session"
+    | "authenticate_user"
+    | "grant_access"
+    | "revoke_access"
+    | "start_agent"
+    | "handoff"
+    | "run_command"
+    | "update_loop_goal"
+    | "stop_loop";
+  dry_run: boolean;
+  evidence: string[];
+  policy_decision: PolicyDecision;
+  idempotency_key: string;
+};
+
+type PolicyDecision = {
+  allowed: boolean;
+  reason: string;
+  principal_id?: PrincipalId;
+  missing_capability?: Capability;
+  requires_user?: boolean;
+};
+
+type AuditRecord = {
+  id: string;
+  time: string;
+  actor?: PrincipalId;
+  event_id?: EventId;
+  response_id?: ResponseId;
+  action: string;
+  decision: "allowed" | "denied" | "dry_run" | "failed" | "completed";
+  evidence: string[];
+  redactions: string[];
+};
+```
+
+Audit records must not contain OAuth access tokens, refresh tokens, device codes, user codes, SSH config secrets, or raw terminal transcripts unless explicitly allowed by policy.
+
+### Context State and Work Memory
+
+```ts
+type ContextBudget = {
+  harness_id: HarnessId;
+  max_tokens: number;
+  used_tokens_estimate: number;
+  reserved_tokens: {
+    system: number;
+    policy: number;
+    active_task: number;
+    tool_output: number;
+    response_margin: number;
+  };
+  thresholds: {
+    warn_ratio: number;
+    compact_ratio: number;
+    force_compact_ratio: number;
+  };
+};
+
+type ContextItem = {
+  id: string;
+  source:
+    | "spec"
+    | "beads"
+    | "audit"
+    | "repo"
+    | "herdr"
+    | "mcp"
+    | "remote_session"
+    | "harness_transcript";
+  scope: {
+    loop_id?: LoopId;
+    bead_id?: BeadId;
+    remote_session_id?: RemoteSessionId;
+  };
+  classification: "active" | "durable" | "stale" | "redundant" | "sensitive" | "discardable";
+  token_estimate: number;
+  priority: number;
+  redaction_required: boolean;
+  content_ref: string;
+};
+
+type ContextPack = {
+  id: string;
+  loop_id: LoopId;
+  bead_id?: BeadId;
+  harness_id: HarnessId;
+  items: ContextItem[];
+  token_estimate: number;
+  omitted_items: string[];
+  created_at: string;
+};
+
+type WorkMemory = {
+  bead_id: BeadId;
+  summary: string;
+  decisions: string[];
+  changed_files: string[];
+  validation: string[];
+  blockers: string[];
+  follow_up_bead_ids: BeadId[];
+  remote_session_id?: RemoteSessionId;
+  source_audit_ids: string[];
+  redactions: string[];
+  compacted_at: string;
+  idempotency_key: string;
+};
+```
+
+Work memory is durable only after it is written to Beads or a configured remote Beads database. `.ciclo/` may cache context packs and source references but must not be the only location for completed task memory.
+
+## Formal Verification
+
+Ciclo should maintain executable Quint models for safety-sensitive coordination behavior. The initial model is [formal/quint/ciclo_core.qnt](/Users/ztaylor/repos/workspaces/ciclo/formal/quint/ciclo_core.qnt).
+
+The first verified design invariants are:
+
+- Claimed work has a non-empty owner and unclaimed work is not marked claimed.
+- Closed work is not left claimed.
+- Unauthenticated or under-scoped principals cannot own work in `multiuser` mode.
+- Command approvals only come from principals with approval grants.
+- A lost remote session does not silently release claimed Beads work back to open.
+- Token material is never represented as leaked in the coordination state.
+
+The implementation should update this model when changing:
+
+- Beads claim/update/close behavior.
+- Beads remote DB failure or conflict behavior.
+- Multi-user grant enforcement.
+- Command approval policy.
+- Herdr remote session liveness and handoff behavior.
+
+Required verification commands:
+
+```bash
+quint typecheck formal/quint/ciclo_core.qnt
+quint test formal/quint/ciclo_core.qnt --verbosity=1
+quint run formal/quint/ciclo_core.qnt --max-samples=1000 --max-steps=20 \
+  --invariants invClaimOwnerMatchesStatus invClosedWorkUnclaimed invNoIntruderOwnsWork \
+  invNoUnderScopedCommandApproval invRemoteLostDoesNotReleaseClaimedWork invTokenNeverLeaked \
+  --verbosity=1
+quint verify formal/quint/ciclo_core.qnt --max-steps=6 \
+  --invariants invClaimOwnerMatchesStatus invClosedWorkUnclaimed invNoIntruderOwnsWork \
+  invNoUnderScopedCommandApproval invRemoteLostDoesNotReleaseClaimedWork invTokenNeverLeaked \
+  --verbosity=1
+```
 
 ## Plugin Interface
 
@@ -641,6 +1083,21 @@ session:
     default_role: "owner"
     grants: []
 
+context:
+  enabled: true
+  token_estimation: "model_specific"
+  thresholds:
+    warn_ratio: 0.70
+    compact_ratio: 0.85
+    force_compact_ratio: 0.95
+  smart_compact:
+    after_bead_done: true
+    after_bead_blocked: true
+    after_handoff: true
+    persist_to_beads: true
+    create_followup_beads: true
+    redact_sensitive: true
+
 remote_sessions:
   enabled: false
   transport: "herdr_remote_ssh"
@@ -713,7 +1170,22 @@ Expected Ciclo behavior:
 5. Dispatch the prompt only when policy allows and the harness is idle or ready.
 6. Update the bead with progress, blockers, validation results, and final summary.
 7. Close the bead only when acceptance criteria and loop exit checks are satisfied.
-8. Push configured status/comments to Jira or Linear after local Beads updates.
+8. Smart-compact work memory into Beads after completion, blockage, or handoff.
+9. Push configured status/comments to Jira or Linear after local Beads updates.
+
+### Context Engineering Loop
+
+User intent: "Keep agents effective across long tasks without losing work memory."
+
+Expected Ciclo behavior:
+
+1. Estimate context usage for each active harness session and loop.
+2. Build bounded context packs before prompting an agent.
+3. Prefer current Beads task details, acceptance criteria, active blockers, recent decisions, and validation evidence over stale transcript history.
+4. Warn or compact when context crosses configured thresholds.
+5. After a Beads task is finished, blocked, or handed off, smart-compact relevant context into Beads.
+6. Create follow-up Beads tasks for actionable discoveries instead of burying them in summaries.
+7. Keep the next harness prompt short by referencing durable Beads memory.
 
 ### MCP Coordination Loop
 
@@ -849,6 +1321,13 @@ Important event categories:
 - `access.granted`
 - `access.revoked`
 - `access.denied`
+- `context.measured`
+- `context.pack_created`
+- `context.threshold_crossed`
+- `context.compaction_started`
+- `context.compaction_completed`
+- `context.compaction_failed`
+- `memory.persisted_to_beads`
 - `remote_session.registered`
 - `remote_session.heartbeat`
 - `remote_session.detached`
@@ -878,6 +1357,9 @@ Required policy checks:
 - If session mode is `multiuser`, which principal is making the request and what grants apply?
 - Is the principal allowed to claim this work, approve this command, answer this question, or register this remote target?
 - Is the token valid, unexpired, unrevoked, and scoped to this Ciclo session?
+- Is context usage above a warning, compact, or force-compact threshold?
+- Has completed work memory been persisted to Beads before freeing or compacting transcript context?
+- Does the compaction output redact sensitive material and preserve acceptance evidence?
 - Does the user need to see a summary first?
 
 Default policy:
@@ -898,6 +1380,10 @@ Default policy:
 - Enforce auth in `multiuser` mode: enabled for all mutating API/MCP/remote actions.
 - Device-code login: allowed when a session has auth configured.
 - Owner grants/revokes access: allowed only for `owner` principals.
+- Auto-measure context usage: allowed.
+- Auto-smart-compact after Beads completion/blockage/handoff: allowed when configured.
+- Drop transcript context before Beads memory persistence: disabled.
+- Persist raw secrets or unredacted transcripts in Beads memory: disabled.
 - Auto-send a prompt to a harness: disabled until configured.
 - Auto-run read-only repo commands: allowed if configured.
 - Auto-run tests: disabled until configured.
@@ -918,6 +1404,7 @@ Ciclo should persist:
 - Beads remote DB mode, connection health, pull/push cursors, last successful sync, and conflict records.
 - MCP client registrations, question/answer records, feedback queue entries, and remote session liveness cursors.
 - Ciclo session mode, user grants, token metadata, device authorization state, and access-denial audit entries.
+- Context budgets, context pack references, compaction records, and Beads work memory idempotency keys.
 
 Initial storage can be local files under `.ciclo/`. Beads remains the durable work tracker, not the high-volume runtime event database. Beads can receive durable tasks, epics, decisions, user-visible benchmark findings, and lifecycle summaries. Ciclo's local audit state should store high-volume observations and remote sync cursors.
 
@@ -986,6 +1473,7 @@ Each scenario includes:
 - MCP client/tool call sequence.
 - Remote session snapshot when relevant.
 - Ciclo session mode and principal/grant snapshot.
+- Context budget, context items, and previous work memory snapshot.
 - Herdr event sequence.
 - Harness plugin context for Claude Code or Codex.
 - Loop config.
@@ -1045,6 +1533,9 @@ Deterministic checks should fail scenarios before model scoring when Ciclo:
 - Allows a user without `command.approve` to approve a risky command.
 - Lets a contributor close work outside their grant scope.
 - Logs OAuth access tokens, refresh tokens, device codes, or user codes.
+- Smart-compacts completed work without persisting memory to Beads.
+- Drops acceptance evidence, validation results, blockers, or follow-up actions during compaction.
+- Includes raw secrets or unredacted transcript content in Beads work memory.
 
 ### Initial Scenarios
 
@@ -1079,6 +1570,10 @@ Deterministic checks should fail scenarios before model scoring when Ciclo:
 29. `beads_remote_down_fail_closed`: Remote Beads DB is required but unavailable, Ciclo should block dispatch and ask the operator.
 30. `beads_push_after_update`: Ciclo pushes Beads/Dolt state after a task update when configured.
 31. `beads_conflict_detected`: Dolt sync reports a conflict, Ciclo should stop claims and surface a blocker.
+32. `context_warn_threshold`: Context usage crosses warning threshold, Ciclo should build smaller context packs and avoid stale history.
+33. `smart_compact_after_bead_done`: A Beads task completes, Ciclo should persist work memory into Beads and produce a continuation summary.
+34. `smart_compact_redacts_sensitive`: Compaction input includes sensitive material, Ciclo should redact before writing Beads memory.
+35. `force_compact_blocks_dispatch`: Context exceeds force threshold, Ciclo should block new context-heavy prompts until compaction succeeds or user overrides.
 
 ### Score Output
 
@@ -1123,10 +1618,12 @@ The MVP is complete when:
 15. Ciclo can run in `single` mode without requiring user authentication.
 16. Ciclo can run in `multiuser` mode with OAuth device-code login, principal identity, and scoped grants for mutating actions.
 17. Ciclo denies unauthenticated or under-scoped work/command requests in `multiuser` mode and records the denial.
-18. Ciclo can run at least five benchmark scenarios in dry-run mode.
-19. Ciclo can score responses with deterministic checks and at least one configurable judge model.
-20. Ciclo records an audit trail explaining every response.
-21. Unsafe actions are blocked by default.
+18. Ciclo tracks context budget per active harness/loop and can build bounded context packs.
+19. Ciclo smart-compacts after Beads task completion/blockage/handoff and persists durable work memory to Beads.
+20. Ciclo can run at least five benchmark scenarios in dry-run mode.
+21. Ciclo can score responses with deterministic checks and at least one configurable judge model.
+22. Ciclo records an audit trail explaining every response.
+23. Unsafe actions are blocked by default.
 
 ## Milestones
 
@@ -1196,6 +1693,14 @@ The MVP is complete when:
 - Enforce grants for MCP/API work claims, task updates, command approvals, question answers, and remote session registration.
 - Add multi-user auth and access-control benchmark scenarios.
 
+### Milestone 10: Context Engineering
+
+- Implement context budget tracking per harness, loop, remote session, and Beads issue.
+- Implement context item classification and bounded context pack assembly.
+- Implement smart compaction after Beads task completion, blockage, and handoff.
+- Persist durable work memory to Beads with redaction and idempotency.
+- Add context engineering benchmark scenarios.
+
 ## Open Questions
 
 1. Should the first implementation target TypeScript, Rust, Python, or another runtime?
@@ -1214,6 +1719,8 @@ The MVP is complete when:
 14. Should access grants be mirrored into Beads for audit visibility or kept only in Ciclo session state?
 15. Should shared Beads coordination prefer a long-lived shared Dolt SQL server or Dolt remote pull/push as the default team mode?
 16. What Beads metadata keys should Ciclo standardize for session ID, principal, harness, remote Herdr target, and loop ID?
+17. Which tokenizer or approximation should Ciclo use for each harness when exact model tokenization is unavailable?
+18. Should smart-compacted work memory be stored primarily as Beads comments, notes, metadata, child tasks, or a combination?
 
 ## Initial Decisions
 
@@ -1230,3 +1737,4 @@ The MVP is complete when:
 11. `multiuser` mode requires authenticated principals and scoped grants before Ciclo accepts work or command requests.
 12. OAuth device-code login is the default authentication flow for terminal and headless clients.
 13. Beads remote database support is the default centralized coordination mechanism for multi-agent/shared Ciclo sessions.
+14. Context engineering is a first-class Ciclo capability; completed work memory must be persisted to Beads before transcript context is compacted away.
