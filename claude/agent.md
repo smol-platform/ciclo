@@ -105,7 +105,7 @@ Implementation should include:
 
 ### `ciclo-ns5.7` Beads Work Queue and Remote Tracker Sync
 
-Beads is the durable work queue and coordination source. Ciclo must support local Beads, a shared Beads/Dolt SQL server, and Dolt remote pull/push coordination. Jira and Linear are outbound sync targets, not the work source for MVP.
+Beads is the durable work queue and coordination source. Ciclo must support local Beads, a shared Beads/Dolt SQL server, and Dolt remote pull/push coordination. Jira and Linear are outbound sync targets through Beads-native integrations, not Ciclo-owned provider implementations and not the work source for MVP.
 
 Implementation should include:
 
@@ -116,7 +116,7 @@ Implementation should include:
 - Push-after-claim/update/close when configured.
 - Conflict/degraded health handling that blocks dispatch when centralized coordination is required.
 - Standard Ciclo metadata on claims: session ID, principal, harness, loop ID, and remote Herdr session.
-- Redacted outbound sync to Jira/Linear when configured.
+- Triggering and auditing Beads-native Jira/Linear sync when configured.
 
 ### `ciclo-ns5.8` MCP Control Plane and Remote Sessions
 

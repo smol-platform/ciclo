@@ -13,7 +13,7 @@ The first specification is [SPEC-CICLO-001: Agentic Babysitter Harness](/Users/z
 - Every implementation task should link back to a spec ID.
 - Harness support is plugin-based; Claude Code and Codex are the first plugins.
 - Beads is the durable work queue; Ciclo can use local Beads or a configured Beads remote database so agents centralize ready work, claims, progress, and closures through Beads.
-- Jira and Linear are optional outbound sync targets when configured.
+- Jira and Linear are optional outbound sync targets through Beads-native integrations when configured.
 - Ciclo exposes an MCP control plane for Claude, Codex, and generic harnesses to query status, coordinate work, ask/answer questions, and report feedback to the operator session.
 - Remote sessions use Herdr remote attach over SSH (`herdr --remote ...`) with explicit registration, heartbeat, scoped access, and stale/lost detection.
 - Ciclo supports `single` mode without auth friction and `multiuser` mode with OAuth device-code login, scoped grants, and per-user authorization for work and commands.

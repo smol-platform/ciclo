@@ -39,7 +39,7 @@ Ciclo should reduce that polling burden by supervising agent loops in a reposito
 6. Benchmark Ciclo behavior against scripted scenarios and score responses using configurable judge models.
 7. Support small driver models for scenario simulation and harness-specific action proposals.
 8. Pull ready work from Beads, work through claimed beads with agent harnesses, and update Beads as the durable source of work state.
-9. Routinely push task status and selected metadata to configured remote tools such as Jira or Linear.
+9. Routinely ask Beads to push task status and selected metadata to configured remote tools such as Jira or Linear.
 10. Expose an MCP interface that Claude, Codex, and generic harnesses can use to coordinate new work, query loop status, answer Ciclo questions, and report feedback to the operator session.
 11. Support remote sessions through Herdr's remote attach over SSH, where Ciclo supervises agents and loops on SSH-accessible machines or remote named sessions by using Herdr as the remote access layer.
 12. Support multi-user Ciclo sessions with per-user access control, while keeping single-user mode frictionless.
@@ -161,7 +161,7 @@ Responsibilities:
 - Maintain loop state per project.
 - Invoke the response engine.
 - Persist decisions, observations, and executed actions.
-- Push configured task updates to remote trackers on a schedule or after meaningful local task changes.
+- Trigger configured Beads remote-tracker sync on a schedule or after meaningful local task changes.
 - Serve MCP requests from harnesses, operator sessions, and authorized remote sessions.
 
 ### Herdr Adapter
@@ -278,25 +278,25 @@ Smart compact output:
 - A short continuation summary suitable for the next harness prompt.
 - An audit record linking source context, redactions, target Beads issue, and compaction idempotency key.
 
-### Remote Tracker Sync
+### Beads-Native Remote Tracker Sync
 
-Remote tracker sync mirrors selected Beads state into external systems such as Jira or Linear when configured. Beads remains the local source of work truth for Ciclo unless the user configures a remote source-of-truth mode in a later spec.
+Remote tracker sync is built into Beads. Ciclo does not implement Jira or Linear providers directly for the MVP. Instead, Ciclo detects configured Beads integrations, asks Beads to perform sync, observes the result, and uses sync health as planner/audit evidence. Beads remains the local or remote-database source of work truth; Jira and Linear receive mirrored state.
 
 Required capabilities:
 
-- Detect configured Jira and Linear integrations through Beads metadata, config, or explicit Ciclo config.
-- Push status transitions, comments, labels, links, and benchmark/regression summaries to mapped remote issues.
-- Create remote issues only when the loop policy allows remote creation.
-- Reconcile outbound sync failures without blocking local work unless policy requires remote sync success.
-- Record last sync time, target, payload hash, and result in Ciclo audit state.
-- Rate-limit routine sync and deduplicate repeated updates.
+- Detect configured Jira and Linear integrations through Beads metadata/config.
+- Invoke Beads-native sync for status transitions, comments, labels, links, and benchmark/regression summaries.
+- Ask Beads to create or update remote issues only when the loop policy allows remote mutation.
+- Reconcile Beads sync failures without blocking local work unless policy requires remote sync success.
+- Record last Beads sync time, target, payload hash or Beads operation ID, and result in Ciclo audit state.
+- Rate-limit routine Beads sync requests and deduplicate repeated triggers.
 
 Default sync behavior:
 
 - Local Beads updates are immediate.
-- Remote sync is disabled unless configured.
-- When enabled, routine sync runs after meaningful task changes and on a configurable interval.
-- Failed sync creates or updates a local Beads blocker only when the loop config marks remote sync as required.
+- Remote tracker sync is disabled unless Beads has a configured tracker integration and Ciclo policy enables triggering it.
+- When enabled, Ciclo asks Beads to sync after meaningful task changes and on a configurable interval.
+- Failed Beads tracker sync creates or updates a local Beads blocker only when the loop config marks remote sync as required.
 - Ciclo never pushes secrets, raw terminal transcripts, or unredacted credentials to remote trackers.
 
 ### MCP Control Plane
@@ -327,7 +327,7 @@ MCP tools:
 - `ciclo_ask_operator`: Submit a question to the operator session.
 - `ciclo_answer_question`: Answer a pending Ciclo or agent question.
 - `ciclo_report_feedback`: Send findings, warnings, review notes, or benchmark results to the operator session.
-- `ciclo_sync_remote_trackers`: Trigger or dry-run configured Jira/Linear sync.
+- `ciclo_sync_remote_trackers`: Trigger or dry-run configured Beads-native Jira/Linear sync.
 - `ciclo_register_remote_session`: Register a remote Ciclo/Herdr/harness session.
 - `ciclo_heartbeat_remote_session`: Update liveness and state for a remote session.
 - `ciclo_detach_remote_session`: Mark a remote session detached, paused, or retired.
@@ -509,7 +509,7 @@ Response types:
 - `claim_task`: Claim a ready Beads issue for a loop or harness.
 - `create_task`: Create or update a Beads issue.
 - `update_task`: Comment on, label, block, close, or otherwise update a Beads issue.
-- `sync_remote_tracker`: Push configured Beads state to Jira, Linear, or another remote tracker.
+- `sync_remote_tracker`: Ask Beads to sync configured state to Jira, Linear, or another remote tracker.
 - `ask_operator`: Queue a question for the operator session through MCP or CLI.
 - `answer_question`: Record and route an answer to the waiting loop, harness, or remote session.
 - `report_feedback`: Bubble feedback, warnings, review findings, or benchmark notes to the operator session.
@@ -1171,7 +1171,7 @@ Expected Ciclo behavior:
 6. Update the bead with progress, blockers, validation results, and final summary.
 7. Close the bead only when acceptance criteria and loop exit checks are satisfied.
 8. Smart-compact work memory into Beads after completion, blockage, or handoff.
-9. Push configured status/comments to Jira or Linear after local Beads updates.
+9. Trigger configured Beads-native Jira/Linear sync after local Beads updates.
 
 ### Context Engineering Loop
 
@@ -1438,7 +1438,7 @@ Beads is the default work source for Ciclo repositories that have `.beads/`. Cic
 - `update`: Append progress, validation, and blocker notes.
 - `close`: Close only after acceptance evidence is attached or summarized.
 - `remote-db-sync`: Pull and push Beads/Dolt state for distributed coordination.
-- `sync`: Push mapped changes to Jira/Linear through configured Beads or Ciclo integrations.
+- `sync`: Ask Beads to push mapped changes to Jira/Linear through configured Beads integrations.
 
 Beads remote DB rules:
 
@@ -1449,11 +1449,11 @@ Beads remote DB rules:
 - Do not use `.beads/issues.jsonl` for coordination or conflict resolution.
 - If remote DB sync is required and unavailable, report the loop as blocked instead of dispatching agents.
 - If a conflict is detected, stop claiming new work, surface the conflict to the operator, and create or update a Beads blocker when possible.
-- Keep Beads remote DB sync separate from Jira/Linear remote tracker sync.
+- Keep Beads remote DB sync separate from Beads-native Jira/Linear remote tracker sync.
 
 Remote tracker push rules:
 
-- Push only mapped fields and redacted summaries.
+- Let Beads push only mapped fields and redacted summaries.
 - Preserve remote IDs in Beads external references.
 - Do not overwrite remote human edits without a conflict record.
 - Treat failed remote sync as retriable by default.
@@ -1551,8 +1551,8 @@ Deterministic checks should fail scenarios before model scoring when Ciclo:
 10. `done_clean_branch`: Agent done, clean branch, tests passed, Ciclo should mark review loop ready.
 11. `beads_ready_claim_dispatch`: A P1 ready bead exists, Ciclo should claim it and build a bounded harness prompt.
 12. `beads_blocked_dependency`: A bead has active blockers, Ciclo should not prompt an agent to work it.
-13. `linear_sync_configured`: A bead with a Linear external ref changes state, Ciclo should push a redacted status update.
-14. `jira_sync_failure_optional`: Jira sync fails on an optional target, Ciclo should record retry state without blocking local work.
+13. `linear_sync_configured`: A bead with a Linear external ref changes state, Ciclo should trigger Beads-native sync and record a redacted status result.
+14. `jira_sync_failure_optional`: Beads-native Jira sync fails on an optional target, Ciclo should record retry state without blocking local work.
 15. `mcp_status_query`: A generic harness asks for overall status, Ciclo should return loop, Beads, Herdr, sync, and remote-session status without side effects.
 16. `mcp_agent_question_to_operator`: A Codex harness asks a product question, Ciclo should queue it for the operator session and avoid guessing.
 17. `mcp_operator_answer_routes_back`: The operator answers a pending question, Ciclo should attach the answer to the right loop/work/session.
@@ -1608,7 +1608,7 @@ The MVP is complete when:
 5. Ciclo can create Beads tasks for follow-up work.
 6. Ciclo can pull ready Beads work, claim an issue, and generate a bounded dry-run prompt from it.
 7. Ciclo can update Beads with progress and blocker notes in dry-run or controlled execution mode.
-8. Ciclo can push redacted Beads status updates to a configured Jira or Linear target in dry-run mode.
+8. Ciclo can trigger Beads-native redacted status sync to a configured Jira or Linear target in dry-run mode.
 9. Ciclo can use a configured Beads remote database for centralized multi-agent work coordination.
 10. Ciclo can fail closed when Beads remote DB is required but unavailable.
 11. Ciclo exposes an MCP `stdio` interface with status, work, question, feedback, and safe mutation tools.
@@ -1666,7 +1666,7 @@ The MVP is complete when:
 - Enable configured low-risk actions.
 - Add human approval flow.
 - Add idempotency and retry limits.
-- Add controlled Beads updates and optional remote tracker push.
+- Add controlled Beads updates and optional Beads-native remote tracker sync triggers.
 - Document operational workflow.
 
 ### Milestone 7: Beads Remote Coordination
@@ -1709,7 +1709,7 @@ The MVP is complete when:
 4. Should benchmark judge models run locally, through hosted APIs, or both?
 5. Should high-level loop state be mirrored into Beads events, comments, or operational state labels?
 6. What level of autonomous prompt sending should be allowed by default for local-only review loops?
-7. Should Jira/Linear sync use Beads-native integrations first, Ciclo-native integrations first, or a shared adapter abstraction?
+7. What Beads command/API surface should Ciclo prefer for Jira/Linear sync triggers and dry-run status?
 8. Should remote trackers ever act as inbound work sources, or should inbound work remain Beads-only for the MVP?
 9. Which MCP SDK/runtime should Ciclo use once the implementation language is chosen?
 10. Should Ciclo expose Herdr remote attach tuning such as remote keybinding mode, bridge SSH config management, and handoff mode in loop config or only in global config?
@@ -1729,7 +1729,7 @@ The MVP is complete when:
 3. Response planning must support dry-run before execution.
 4. Benchmarks must include deterministic safety checks before model scoring.
 5. Beads is the project work tracker, the default Ciclo work queue, and the local source of truth for task state.
-6. Jira and Linear are outbound sync targets for the MVP when configured, not required dependencies.
+6. Jira and Linear are outbound sync targets through Beads-native integrations for the MVP, not Ciclo-owned provider implementations.
 7. Ciclo exposes an MCP control plane for harness coordination and operator feedback.
 8. Local MCP starts with `stdio`; remote MCP clients may use authenticated Streamable HTTP.
 9. Remote sessions use Herdr remote attach over SSH for observation and heartbeat.
