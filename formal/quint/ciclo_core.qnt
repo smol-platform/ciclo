@@ -55,7 +55,13 @@ module ciclo_core {
   var remoteRegisterGrant: Principal -> bool
   var remoteStatus: str -> RemoteStatus
   var remoteWork: str -> Issue
+  var remoteRegisteredBy: str -> Principal
   var commandApproved: CommandClass -> Principal
+  var contextHasTranscript: Issue -> bool
+  var contextHasSensitive: Issue -> bool
+  var workMemoryPersisted: Issue -> bool
+  var workMemoryRedacted: Issue -> bool
+  var transcriptDropped: Issue -> bool
   var tokenLeaked: bool
   var lastDenied: bool
 
@@ -72,7 +78,13 @@ module ciclo_core {
     remoteRegisterGrant' = Principals.mapBy(p => p == owner or p == maintainer),
     remoteStatus' = Remotes.mapBy(_ => connected),
     remoteWork' = Remotes.mapBy(_ => issueA),
+    remoteRegisteredBy' = Remotes.mapBy(_ => none),
     commandApproved' = Commands.mapBy(_ => none),
+    contextHasTranscript' = Issues.mapBy(_ => true),
+    contextHasSensitive' = Issues.mapBy(i => i == issueA),
+    workMemoryPersisted' = Issues.mapBy(_ => false),
+    workMemoryRedacted' = Issues.mapBy(_ => false),
+    transcriptDropped' = Issues.mapBy(_ => false),
     tokenLeaked' = false,
     lastDenied' = false,
   }
@@ -92,6 +104,11 @@ module ciclo_core {
   def canRegisterRemote(p: Principal): bool =
     isAuthed(p) and remoteRegisterGrant.get(p)
 
+  def canCompactContext(p: Principal, i: Issue): bool =
+    isAuthed(p)
+      and workUpdateGrant.get(p)
+      and (claimOwner.get(i) == p or p == owner or p == maintainer or workStatus.get(i) == closed)
+
   def remoteCoordinationOk(): bool =
     not(remoteDbRequired) or remoteDbHealthy
 
@@ -108,7 +125,13 @@ module ciclo_core {
     remoteRegisterGrant' = remoteRegisterGrant,
     remoteStatus' = remoteStatus,
     remoteWork' = remoteWork,
+    remoteRegisteredBy' = remoteRegisteredBy,
     commandApproved' = commandApproved,
+    contextHasTranscript' = contextHasTranscript,
+    contextHasSensitive' = contextHasSensitive,
+    workMemoryPersisted' = workMemoryPersisted,
+    workMemoryRedacted' = workMemoryRedacted,
+    transcriptDropped' = transcriptDropped,
     tokenLeaked' = tokenLeaked,
     lastDenied' = true,
   }
@@ -130,7 +153,13 @@ module ciclo_core {
     remoteRegisterGrant' = remoteRegisterGrant,
     remoteStatus' = remoteStatus,
     remoteWork' = remoteWork,
+    remoteRegisteredBy' = remoteRegisteredBy,
     commandApproved' = commandApproved,
+    contextHasTranscript' = contextHasTranscript,
+    contextHasSensitive' = contextHasSensitive,
+    workMemoryPersisted' = workMemoryPersisted,
+    workMemoryRedacted' = workMemoryRedacted,
+    transcriptDropped' = transcriptDropped,
     tokenLeaked' = tokenLeaked,
     lastDenied' = false,
   }
@@ -151,7 +180,13 @@ module ciclo_core {
     remoteRegisterGrant' = remoteRegisterGrant,
     remoteStatus' = remoteStatus,
     remoteWork' = remoteWork,
+    remoteRegisteredBy' = remoteRegisteredBy,
     commandApproved' = commandApproved,
+    contextHasTranscript' = contextHasTranscript,
+    contextHasSensitive' = contextHasSensitive,
+    workMemoryPersisted' = workMemoryPersisted,
+    workMemoryRedacted' = workMemoryRedacted,
+    transcriptDropped' = transcriptDropped,
     tokenLeaked' = tokenLeaked,
     lastDenied' = false,
   }
@@ -172,7 +207,13 @@ module ciclo_core {
     remoteRegisterGrant' = remoteRegisterGrant,
     remoteStatus' = remoteStatus,
     remoteWork' = remoteWork,
+    remoteRegisteredBy' = remoteRegisteredBy,
     commandApproved' = commandApproved,
+    contextHasTranscript' = contextHasTranscript,
+    contextHasSensitive' = contextHasSensitive,
+    workMemoryPersisted' = workMemoryPersisted,
+    workMemoryRedacted' = workMemoryRedacted,
+    transcriptDropped' = transcriptDropped,
     tokenLeaked' = tokenLeaked,
     lastDenied' = false,
   }
@@ -191,7 +232,13 @@ module ciclo_core {
     remoteRegisterGrant' = remoteRegisterGrant,
     remoteStatus' = remoteStatus,
     remoteWork' = remoteWork,
+    remoteRegisteredBy' = remoteRegisteredBy,
     commandApproved' = commandApproved.set(c, p),
+    contextHasTranscript' = contextHasTranscript,
+    contextHasSensitive' = contextHasSensitive,
+    workMemoryPersisted' = workMemoryPersisted,
+    workMemoryRedacted' = workMemoryRedacted,
+    transcriptDropped' = transcriptDropped,
     tokenLeaked' = tokenLeaked,
     lastDenied' = false,
   }
@@ -210,7 +257,13 @@ module ciclo_core {
     remoteRegisterGrant' = remoteRegisterGrant,
     remoteStatus' = remoteStatus.set(r, connected),
     remoteWork' = remoteWork,
+    remoteRegisteredBy' = remoteRegisteredBy.set(r, p),
     commandApproved' = commandApproved,
+    contextHasTranscript' = contextHasTranscript,
+    contextHasSensitive' = contextHasSensitive,
+    workMemoryPersisted' = workMemoryPersisted,
+    workMemoryRedacted' = workMemoryRedacted,
+    transcriptDropped' = transcriptDropped,
     tokenLeaked' = tokenLeaked,
     lastDenied' = false,
   }
@@ -228,7 +281,13 @@ module ciclo_core {
     remoteRegisterGrant' = remoteRegisterGrant,
     remoteStatus' = remoteStatus.set(r, lost),
     remoteWork' = remoteWork,
+    remoteRegisteredBy' = remoteRegisteredBy,
     commandApproved' = commandApproved,
+    contextHasTranscript' = contextHasTranscript,
+    contextHasSensitive' = contextHasSensitive,
+    workMemoryPersisted' = workMemoryPersisted,
+    workMemoryRedacted' = workMemoryRedacted,
+    transcriptDropped' = transcriptDropped,
     tokenLeaked' = tokenLeaked,
     lastDenied' = false,
   }
@@ -246,7 +305,91 @@ module ciclo_core {
     remoteRegisterGrant' = remoteRegisterGrant,
     remoteStatus' = remoteStatus,
     remoteWork' = remoteWork,
+    remoteRegisteredBy' = remoteRegisteredBy,
     commandApproved' = commandApproved,
+    contextHasTranscript' = contextHasTranscript,
+    contextHasSensitive' = contextHasSensitive,
+    workMemoryPersisted' = workMemoryPersisted,
+    workMemoryRedacted' = workMemoryRedacted,
+    transcriptDropped' = transcriptDropped,
+    tokenLeaked' = tokenLeaked,
+    lastDenied' = false,
+  }
+
+  action setMode(nextMode: AuthMode): bool = all {
+    mode' = nextMode,
+    remoteDbHealthy' = remoteDbHealthy,
+    remoteDbRequired' = remoteDbRequired,
+    workStatus' = workStatus,
+    claimOwner' = claimOwner,
+    authenticated' = authenticated,
+    workClaimGrant' = workClaimGrant,
+    workUpdateGrant' = workUpdateGrant,
+    commandApproveGrant' = commandApproveGrant,
+    remoteRegisterGrant' = remoteRegisterGrant,
+    remoteStatus' = remoteStatus,
+    remoteWork' = remoteWork,
+    remoteRegisteredBy' = remoteRegisteredBy,
+    commandApproved' = commandApproved,
+    contextHasTranscript' = contextHasTranscript,
+    contextHasSensitive' = contextHasSensitive,
+    workMemoryPersisted' = workMemoryPersisted,
+    workMemoryRedacted' = workMemoryRedacted,
+    transcriptDropped' = transcriptDropped,
+    tokenLeaked' = tokenLeaked,
+    lastDenied' = false,
+  }
+
+  action compactContext(p: Principal, i: Issue): bool = all {
+    canCompactContext(p, i),
+    workStatus.get(i) != open,
+    mode' = mode,
+    remoteDbHealthy' = remoteDbHealthy,
+    remoteDbRequired' = remoteDbRequired,
+    workStatus' = workStatus,
+    claimOwner' = claimOwner,
+    authenticated' = authenticated,
+    workClaimGrant' = workClaimGrant,
+    workUpdateGrant' = workUpdateGrant,
+    commandApproveGrant' = commandApproveGrant,
+    remoteRegisterGrant' = remoteRegisterGrant,
+    remoteStatus' = remoteStatus,
+    remoteWork' = remoteWork,
+    remoteRegisteredBy' = remoteRegisteredBy,
+    commandApproved' = commandApproved,
+    contextHasTranscript' = contextHasTranscript,
+    contextHasSensitive' = contextHasSensitive,
+    workMemoryPersisted' = workMemoryPersisted.set(i, true),
+    workMemoryRedacted' = workMemoryRedacted.set(i, true),
+    transcriptDropped' = transcriptDropped,
+    tokenLeaked' = tokenLeaked,
+    lastDenied' = false,
+  }
+
+  action dropTranscriptContext(p: Principal, i: Issue): bool = all {
+    canCompactContext(p, i),
+    contextHasTranscript.get(i),
+    workMemoryPersisted.get(i),
+    not(contextHasSensitive.get(i)) or workMemoryRedacted.get(i),
+    mode' = mode,
+    remoteDbHealthy' = remoteDbHealthy,
+    remoteDbRequired' = remoteDbRequired,
+    workStatus' = workStatus,
+    claimOwner' = claimOwner,
+    authenticated' = authenticated,
+    workClaimGrant' = workClaimGrant,
+    workUpdateGrant' = workUpdateGrant,
+    commandApproveGrant' = commandApproveGrant,
+    remoteRegisterGrant' = remoteRegisterGrant,
+    remoteStatus' = remoteStatus,
+    remoteWork' = remoteWork,
+    remoteRegisteredBy' = remoteRegisteredBy,
+    commandApproved' = commandApproved,
+    contextHasTranscript' = contextHasTranscript.set(i, false),
+    contextHasSensitive' = contextHasSensitive,
+    workMemoryPersisted' = workMemoryPersisted,
+    workMemoryRedacted' = workMemoryRedacted,
+    transcriptDropped' = transcriptDropped.set(i, true),
     tokenLeaked' = tokenLeaked,
     lastDenied' = false,
   }
@@ -275,8 +418,18 @@ module ciclo_core {
     nondet r = oneOf(Remotes)
     loseRemote(r),
 
+    nondet p = oneOf(Principals)
+    nondet i = oneOf(Issues)
+    compactContext(p, i),
+
+    nondet p = oneOf(Principals)
+    nondet i = oneOf(Issues)
+    dropTranscriptContext(p, i),
+
     setRemoteDbHealth(true),
     setRemoteDbHealth(false),
+    setMode(single),
+    setMode(multiuser),
     deny,
   }
 
@@ -297,6 +450,10 @@ module ciclo_core {
     Commands.forall(c =>
       commandApproved.get(c) == none or commandApproveGrant.get(commandApproved.get(c)))
 
+  val invNoUnderScopedRemoteRegistration =
+    Remotes.forall(r =>
+      remoteRegisteredBy.get(r) == none or remoteRegisterGrant.get(remoteRegisteredBy.get(r)))
+
   val invRemoteLostDoesNotReleaseClaimedWork =
     Remotes.forall(r =>
       remoteStatus.get(r) == lost and claimOwner.get(remoteWork.get(r)) != none
@@ -305,9 +462,36 @@ module ciclo_core {
   val invTokenNeverLeaked =
     not(tokenLeaked)
 
+  val invTranscriptDroppedOnlyAfterMemoryPersisted =
+    Issues.forall(i =>
+      transcriptDropped.get(i) implies workMemoryPersisted.get(i))
+
+  val invSensitiveContextMemoryPersistedRedacted =
+    Issues.forall(i =>
+      workMemoryPersisted.get(i) and contextHasSensitive.get(i) implies workMemoryRedacted.get(i))
+
+  val invDroppedSensitiveTranscriptHadRedactedMemory =
+    Issues.forall(i =>
+      transcriptDropped.get(i) and contextHasSensitive.get(i) implies workMemoryRedacted.get(i))
+
   // Regression tests for exact scenarios that matter to Ciclo.
   run unauthorizedClaimDenied = init.then(claimWork(intruder, issueA)).expect(not(workStatus.get(issueA) == claimed))
+  run singleModeOwnerCanClaim = init.then(setMode(single)).then(claimWork(owner, issueA)).expect(workStatus.get(issueA) == claimed)
   run remoteDbDownBlocksClaim = init.then(setRemoteDbHealth(false)).then(claimWork(owner, issueA)).expect(not(workStatus.get(issueA) == claimed))
   run maintainerCanApproveDeploy = init.then(approveCommand(maintainer, deploy)).expect(commandApproved.get(deploy) == maintainer)
   run contributorCannotApproveDeploy = init.then(approveCommand(contributor, deploy)).expect(commandApproved.get(deploy) != contributor)
+  run maintainerCanRegisterRemote = init.then(registerRemote(maintainer, remoteA)).expect(remoteRegisteredBy.get(remoteA) == maintainer)
+  run contributorCannotRegisterRemote = init.then(registerRemote(contributor, remoteA)).expect(remoteRegisteredBy.get(remoteA) != contributor)
+  run closeThenCompactThenDropTranscript =
+    init
+      .then(claimWork(owner, issueA))
+      .then(closeWork(owner, issueA))
+      .then(compactContext(owner, issueA))
+      .then(dropTranscriptContext(owner, issueA))
+      .expect(workMemoryPersisted.get(issueA) and workMemoryRedacted.get(issueA) and transcriptDropped.get(issueA))
+  run cannotDropTranscriptBeforeMemory =
+    init
+      .then(claimWork(owner, issueA))
+      .then(dropTranscriptContext(owner, issueA))
+      .expect(not(transcriptDropped.get(issueA)))
 }

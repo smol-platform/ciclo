@@ -12,6 +12,18 @@
         "matcher": "manual|auto"
       }
     ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/agent-gate.py\" PreToolUse",
+            "statusMessage": "Checking Ciclo guardrails",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|apply_patch|Edit|Write"
+      }
+    ],
     "PreCompact": [
       {
         "hooks": [
@@ -31,6 +43,11 @@
             "command": "bd codex-hook SessionStart",
             "statusMessage": "Loading Beads context",
             "type": "command"
+          },
+          {
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/agent-gate.py\" SessionStart",
+            "statusMessage": "Loading Ciclo guardrails",
+            "type": "command"
           }
         ],
         "matcher": "startup|resume|clear"
@@ -42,6 +59,11 @@
           {
             "command": "bd codex-hook UserPromptSubmit",
             "statusMessage": "Refreshing Beads context",
+            "type": "command"
+          },
+          {
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/agent-gate.py\" UserPromptSubmit",
+            "statusMessage": "Refreshing Ciclo guardrails",
             "type": "command"
           }
         ]

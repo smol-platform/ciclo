@@ -4,9 +4,11 @@ This file is the working brief for Claude, Codex, and generic agents implementin
 
 ## Product Goal
 
-Ciclo is a Pimono wrapper around Herdr that acts as an agentic babysitter. It watches Claude Code, Codex, and future harnesses through Herdr, coordinates project loops, pulls work from Beads, routes questions and feedback through MCP, supports remote Herdr sessions, and enforces policy before accepting risky work or commands.
+Ciclo is a standalone TypeScript orchestrator agent for coding work. It uses Pi under the covers as one internal brain provider, watches Claude Code, Codex, Pi-backed agents, and future AI cloud harnesses through Herdr and harness plugins, coordinates project loops, pulls work from Beads, routes questions and feedback through MCP, supports remote Herdr sessions, and enforces policy before accepting risky work or commands.
 
 Primary spec: `docs/specs/SPEC-CICLO-001-agentic-babysitter.md`.
+
+Operator workflow runbook: `docs/operator-workflows.md`.
 
 ## Agent Workflow
 
@@ -17,6 +19,26 @@ Primary spec: `docs/specs/SPEC-CICLO-001-agentic-babysitter.md`.
 5. Add or update tests/fixtures with every behavior change.
 6. Update Beads with blockers, discovered follow-up tasks, or completion evidence.
 7. Do not close a bead unless acceptance criteria are met and validation is recorded.
+8. Run `just check` before handoff when behavior, hooks, specs, formal models, or build setup changed.
+
+## Ground Rules Enforced By Hooks
+
+Claude and Codex project hooks invoke `scripts/agent-gate.py`. Treat the hook as an executable expression of repository policy, not as a substitute for judgment.
+
+The gate currently blocks:
+
+- Unapproved `git commit`, `git push`, and Beads remote sync.
+- Direct edits to protected state such as `.env*`, `.git/`, `.devenv/`, `_apalache-out/`, `.beads/issues.jsonl`, and Beads internal storage.
+- Destructive Git/shell commands, interactive Beads commands, normal-workflow Beads import, shell redirection writes, and `bd close` without `--reason`.
+
+Approved exceptions must be scoped to the single command by setting the hook's requested environment variable, for example `CICLO_ALLOW_GIT_COMMIT=1 git commit ...`.
+
+Validation for gate changes:
+
+```bash
+just hooks
+just check
+```
 
 ## Architecture Map
 
@@ -35,6 +57,16 @@ Herdr observations -> normalized events -> loop state -> policy -> response plan
 ### `ciclo-ns5.1` Spec-Driven Product Foundation
 
 Choose the implementation runtime and package shape before building features. The first runtime should make CLI execution, MCP server support, JSON/YAML schema validation, subprocess management, and test fixtures straightforward. Deliver typed schemas for loop config, normalized events, responses, policy decisions, Beads work snapshots, remote session state, and auth grants.
+
+Current runtime decision:
+
+- Standalone TypeScript Ciclo orchestrator agent declared in `package.json`.
+- Ciclo CLI entrypoint: `src/cli.ts`.
+- Pi brain adapter entrypoint: `src/pi-extension.ts`.
+- Demo entrypoint: `npm run demo`, exposed after build as `ciclo-demo`.
+- Transitional Python entrypoint: `ciclo.cli:main`, retained only until Herdr/config fixtures move to TypeScript.
+- Future entrypoints should fill the TypeScript package roots for MCP stdio/HTTP and benchmark running instead of adding parallel top-level tools.
+- Keep external integrations behind adapters and keep planner code pure enough for fixture tests.
 
 Implementation should include:
 
@@ -127,10 +159,18 @@ Implementation should include:
 - MCP stdio server for local clients.
 - Optional authenticated Streamable HTTP for remote MCP clients.
 - Tools/resources/prompts for status, loop detail, ready work, claims, updates, questions, feedback, auth, and remote sessions.
+- Keep the tool/resource/prompt contract catalog in `src/mcp-contract.ts`; every entry must include schemas, permission/capability mapping, side effects, and audit/redaction requirements before server code binds it.
 - Question routing from harness to operator and answer routing back to the correct loop/work/session.
 - Herdr remote attach adapter using `herdr --remote <target>` and optional `--session <name>`.
 - Remote heartbeat, stale/lost detection, handoff summaries, and duplicate Beads claim prevention.
 - Remote attach setup blockers for missing remote Herdr binary, unsupported platform, project mismatch, or attach failure.
+
+Remote implementation rules:
+
+- Herdr owns SSH attach and remote session persistence. Ciclo may configure and invoke Herdr remote attach but must not infer liveness by scraping raw SSH terminals.
+- Remote workers must identify the repo path, Ciclo session ID, Beads issue, harness, and principal before mutating work.
+- When Beads remote DB coordination is required, remote agents must pull/re-read before claim and push after approved state changes.
+- Lost remote sessions preserve Beads ownership until an operator or policy-controlled recovery path resolves the claim.
 
 ### `ciclo-ns5.9` Multi-User Ciclo Sessions and Access Control
 
@@ -164,23 +204,37 @@ Implementation should include:
 
 Early tasks should rely on fixture tests. Once a runnable package exists, every behavioral change should include the narrowest relevant command in the Beads completion note, such as unit tests, fixture tests, benchmark scenarios, or schema validation.
 
-For coordination-sensitive behavior, update and run the Quint model in `formal/quint/`. This is required for changes involving Beads claims, Beads remote DB health, multi-user grants, command approval, token handling, or Herdr remote session ownership.
+For coordination-sensitive behavior, update and run the Quint model in `formal/quint/`. This is required for changes involving Beads claims, Beads remote DB health, multi-user grants, command approval, token handling, Herdr remote session ownership, or context compaction.
 
 Baseline commands:
 
 ```bash
+just hooks
+just check
 quint typecheck formal/quint/ciclo_core.qnt
 quint test formal/quint/ciclo_core.qnt --verbosity=1
 quint run formal/quint/ciclo_core.qnt --max-samples=1000 --max-steps=20 \
   --invariants invClaimOwnerMatchesStatus invClosedWorkUnclaimed invNoIntruderOwnsWork \
   invNoUnderScopedCommandApproval invRemoteLostDoesNotReleaseClaimedWork invTokenNeverLeaked \
+  invTranscriptDroppedOnlyAfterMemoryPersisted invSensitiveContextMemoryPersistedRedacted \
+  invDroppedSensitiveTranscriptHadRedactedMemory \
   --verbosity=1
 quint verify formal/quint/ciclo_core.qnt --max-steps=6 \
   --invariants invClaimOwnerMatchesStatus invClosedWorkUnclaimed invNoIntruderOwnsWork \
   invNoUnderScopedCommandApproval invRemoteLostDoesNotReleaseClaimedWork invTokenNeverLeaked \
+  invTranscriptDroppedOnlyAfterMemoryPersisted invSensitiveContextMemoryPersistedRedacted \
+  invDroppedSensitiveTranscriptHadRedactedMemory \
   --verbosity=1
 ```
 
 ## Commit Guidance
 
 Use small commits tied to Beads tasks. Do not rewrite Beads history or Git history unless explicitly asked. When committing implementation work, include the Beads ID in the commit body when there is a concrete task ID.
+
+The hook blocks commits by default. For a user-approved commit, run the specific command with:
+
+```bash
+CICLO_ALLOW_GIT_COMMIT=1 git commit -m "subject"
+```
+
+Use `CICLO_ALLOW_GIT_PUSH=1` only for an explicitly approved push. Use `CICLO_ALLOW_BEADS_REMOTE_SYNC=1` only for explicitly approved Beads remote database sync.

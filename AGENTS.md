@@ -23,6 +23,36 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads data to remote
 ```
 
+## Build & Test
+
+Use the repository `devenv` shell for all build and validation work.
+
+```bash
+devenv shell
+ciclo-check
+```
+
+From outside the shell, use `just check`.
+
+Useful narrower gates:
+
+```bash
+just hooks
+just typescript
+just python
+just quint
+```
+
+## Project Gates
+
+Project hooks for Claude and Codex call `scripts/agent-gate.py`. The gate injects Ciclo ground rules and blocks high-risk commands before they run.
+
+Do not try to bypass the gate. If a blocked operation is actually needed, ask the user to approve the operation and run it with the specific opt-in environment variable shown by the hook, such as `CICLO_ALLOW_GIT_COMMIT=1`, `CICLO_ALLOW_GIT_PUSH=1`, or `CICLO_ALLOW_BEADS_REMOTE_SYNC=1`.
+
+Use `just hooks` after changing `.claude/settings.json`, `.codex/hooks.json`, or files under `scripts/` that participate in gate behavior.
+
+For human-facing loop operation, approvals, remote session recovery, and task closeout, use [docs/operator-workflows.md](/Users/ztaylor/repos/workspaces/ciclo/docs/operator-workflows.md).
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.

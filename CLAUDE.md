@@ -60,18 +60,75 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+Use the repository `devenv` shell for all build and validation work.
 
 ```bash
-# Example:
-# npm install
-# npm test
+devenv shell
+ciclo-check
+```
+
+From outside the shell, use `just check`.
+
+Useful narrower gates:
+
+```bash
+just hooks
+just python
+just typescript
+just quint
 ```
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Ciclo is a spec-first agent supervisor. The intended runtime shape is:
+
+```text
+Herdr observations -> normalized events -> loop state -> policy -> response planner
+                             |                 |             |
+                             v                 v             v
+                       harness plugins   Beads work DB   MCP/API/audit
+                             |                 |             |
+                             v                 v             v
+                       Claude/Codex     remote DB sync   operator feedback
+```
+
+Read [docs/specs/SPEC-CICLO-001-agentic-babysitter.md](/Users/ztaylor/repos/workspaces/ciclo/docs/specs/SPEC-CICLO-001-agentic-babysitter.md) before implementing behavior. [claude/agent.md](/Users/ztaylor/repos/workspaces/ciclo/claude/agent.md) has the epic-by-epic implementation guide.
+
+Use [docs/operator-workflows.md](/Users/ztaylor/repos/workspaces/ciclo/docs/operator-workflows.md) when changing or exercising review, deploy, benchmark, approval, remote, multi-user, recovery, or task closeout behavior.
+
+The primary runtime decision is a standalone TypeScript Ciclo orchestrator agent declared in [package.json](/Users/ztaylor/repos/workspaces/ciclo/package.json). [cli.ts](/Users/ztaylor/repos/workspaces/ciclo/src/cli.ts) is the first Ciclo CLI surface; [pi-extension.ts](/Users/ztaylor/repos/workspaces/ciclo/src/pi-extension.ts) is an internal Pi brain adapter, not the product boundary. The Python package under `src/ciclo` is transitional support for Herdr/config fixtures while the TypeScript adapters are built out.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- Specs come first. Link implementation work to `SPEC-CICLO-001` and the active Beads issue.
+- Beads is the durable work source. Do not treat `.beads/issues.jsonl` as coordination state and do not use `bd import` during normal work.
+- Herdr is the observation layer for local and remote sessions. Remote supervision must go through Herdr remote attach, not raw SSH polling.
+- Ciclo is default-deny for mutating work, deploys, destructive commands, auto-close, remote registration, and external sync.
+- Jira/Linear sync is Beads-native. Ciclo should trigger and audit Beads sync, not implement tracker providers in the MVP.
+- Keep context durable by writing completion summaries, blockers, validation evidence, and follow-up work back to Beads.
+- Update the Quint model when work touches Beads claims, multi-user auth, command approval, token handling, or remote-session ownership.
+
+## Project Gates
+
+Claude hooks in [.claude/settings.json](/Users/ztaylor/repos/workspaces/ciclo/.claude/settings.json) and Codex hooks in [.codex/hooks.json](/Users/ztaylor/repos/workspaces/ciclo/.codex/hooks.json) call [scripts/agent-gate.py](/Users/ztaylor/repos/workspaces/ciclo/scripts/agent-gate.py).
+
+The gate blocks risky tool calls before they run:
+
+- `git commit` unless `CICLO_ALLOW_GIT_COMMIT=1` is set for an explicitly approved commit command.
+- `git push` unless `CICLO_ALLOW_GIT_PUSH=1` is set for an explicitly approved push command.
+- `bd dolt pull` or `bd dolt push` unless `CICLO_ALLOW_BEADS_REMOTE_SYNC=1` is set for approved remote sync.
+- Direct writes to `.env*`, `.git/`, `.devenv/`, `_apalache-out/`, `.beads/issues.jsonl`, and Beads internal storage.
+- `bd edit`, `bd import`, dangerous Git reset/clean/checkout commands, shell redirection writes, and `bd close` without `--reason`.
+
+Run `just hooks` after hook edits and `just check` before handoff.
+
+## Remote Work
+
+Codex remote setup scripts are versioned in the repository:
+
+```bash
+scripts/codex-remote-setup.sh
+scripts/codex-remote-maintenance.sh
+```
+
+The remote setup installs or verifies Nix, `devenv`, Beads, and Herdr, then runs `ciclo-doctor`. Use [README.md](/Users/ztaylor/repos/workspaces/ciclo/.codex/remote/README.md) under `.codex/remote/` for Codex environment configuration.

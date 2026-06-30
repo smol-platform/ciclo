@@ -7,7 +7,7 @@ Spec ID: SPEC-CICLO-001
 
 ## Summary
 
-Ciclo is an agentic babysitter for coding-agent workspaces. It wraps Herdr through a small orchestration layer, called Pimono in this spec, and uses Herdr's agent state detection to monitor whether agents are working, idle, blocked, or done. Ciclo then coordinates project-specific loops such as review loops, deploy loops, triage loops, benchmark loops, Beads-backed work queues, and remote sessions.
+Ciclo is a standalone orchestrator agent for coding-agent workspaces. It uses Pi under the covers as one internal brain provider, uses Herdr's agent state detection to monitor whether agents are working, idle, blocked, or done, and coordinates across available harnesses and AI clouds. Ciclo then coordinates project-specific loops such as review loops, deploy loops, triage loops, benchmark loops, Beads-backed work queues, and remote sessions.
 
 The key product idea is not simply "restart idle agents." Ciclo should maintain an explicit model of the user's intended loop, the current repository state, the agent state reported by Herdr, the Beads work queue, remote session state, and the last meaningful project event. From that model it chooses a conservative next action: wait, summarize, nudge, claim a ready bead, update a task, request user input, answer or route a question, start a harness action, sync external trackers, or evolve the loop goal.
 
@@ -71,12 +71,12 @@ The evaluator wants benchmark scenarios that simulate different agent and reposi
 
 ## Glossary
 
-- Agent: A coding assistant process running inside Herdr, such as Claude Code or Codex.
+- Agent: A coding assistant process running inside Herdr, such as Pi, Claude Code, or Codex.
 - Harness: The CLI and behavioral surface used to run an agent.
 - Harness plugin: Ciclo adapter for a specific harness.
 - Herdr event: A state or pane observation from Herdr.
 - Loop: A named workflow with goal, policy, triggers, and response strategy.
-- Pimono: The thin wrapper layer that connects Ciclo's loop engine to Herdr, harness plugins, repository state, and benchmark drivers.
+- Ciclo orchestrator agent: The standalone TypeScript runtime that connects Ciclo's loop engine to Pi brain providers, Herdr, harness plugins, repository state, Beads, MCP, AI cloud adapters, and benchmark drivers.
 - Work queue: The ordered set of ready, claimed, blocked, or in-progress Beads issues Ciclo may act on.
 - Beads remote database: A Beads/Dolt database reached through a configured Dolt SQL server or synchronized through a Dolt remote, used as shared work state across agents and sessions.
 - Remote tracker: An external task system such as Jira or Linear receiving mirrored state from Beads.
@@ -116,7 +116,7 @@ The evaluator wants benchmark scenarios that simulate different agent and reposi
                            |
                            v
 +--------+       +---------+----------+       +----------------+
-| Herdr  +------>| Pimono supervisor |------>| Response engine |
+| Herdr  +------>| Ciclo supervisor  |------>| Response engine |
 +--------+       +---------+----------+       +-------+--------+
                            |                          |
               +------------+-------------+            v
@@ -146,7 +146,7 @@ The evaluator wants benchmark scenarios that simulate different agent and reposi
 
 ## Core Runtime Components
 
-### Pimono Supervisor
+### Ciclo Supervisor
 
 The supervisor owns event ingestion, deduplication, loop selection, state snapshots, and response planning.
 
@@ -358,6 +358,15 @@ MCP prompts:
 - `ciclo_deploy_gate`: Prompt template for deploy-gated work.
 - `ciclo_answer_operator_question`: Prompt template for answering pending questions with evidence.
 - `ciclo_report_feedback`: Prompt template for structured feedback to the operator session.
+
+MCP contract schema source:
+
+- The implementation source of truth is `src/mcp-contract.ts`.
+- Every tool must define `name`, `description`, JSON-like input schema, JSON-like output schema, permission action, required capability, side effects, and audit requirements.
+- Every resource must define URI template, output schema, read permission, cache policy, and audit event.
+- Every prompt must define name, argument schema, output purpose, read permission, and audit event.
+- Mutating tools must not be marked read-only and must declare side effects. Sensitive values such as prompts, messages, answers, device codes, token sets, remote targets, repo paths, final summaries, and acceptance evidence must be listed in audit redaction fields.
+- Local `single` mode may accept local stdio read-only calls without login. Mutating calls, HTTP MCP calls, remote workers, and all `multiuser` mode mutations must resolve a principal and pass access enforcement before policy evaluation.
 
 Question and feedback routing:
 
@@ -914,6 +923,7 @@ The implementation should update this model when changing:
 - Multi-user grant enforcement.
 - Command approval policy.
 - Herdr remote session liveness and handoff behavior.
+- Context compaction, durable Beads memory, and redaction behavior.
 
 Required verification commands:
 
@@ -923,10 +933,14 @@ quint test formal/quint/ciclo_core.qnt --verbosity=1
 quint run formal/quint/ciclo_core.qnt --max-samples=1000 --max-steps=20 \
   --invariants invClaimOwnerMatchesStatus invClosedWorkUnclaimed invNoIntruderOwnsWork \
   invNoUnderScopedCommandApproval invRemoteLostDoesNotReleaseClaimedWork invTokenNeverLeaked \
+  invTranscriptDroppedOnlyAfterMemoryPersisted invSensitiveContextMemoryPersistedRedacted \
+  invDroppedSensitiveTranscriptHadRedactedMemory \
   --verbosity=1
 quint verify formal/quint/ciclo_core.qnt --max-steps=6 \
   --invariants invClaimOwnerMatchesStatus invClosedWorkUnclaimed invNoIntruderOwnsWork \
   invNoUnderScopedCommandApproval invRemoteLostDoesNotReleaseClaimedWork invTokenNeverLeaked \
+  invTranscriptDroppedOnlyAfterMemoryPersisted invSensitiveContextMemoryPersistedRedacted \
+  invDroppedSensitiveTranscriptHadRedactedMemory \
   --verbosity=1
 ```
 
@@ -1481,6 +1495,24 @@ Each scenario includes:
 - Expected response traits.
 - Disallowed response traits.
 
+### Scenario Fixture Schema
+
+The MVP fixture format is JSON object syntax with `schema_version: 1`. YAML can be added later as an alternate syntax, but it must normalize to the same schema.
+
+Required top-level fields:
+
+- `id`, `title`, `description`, and `tags`.
+- `repo`: synthetic repo snapshot with git state, dirty/staged files, Beads presence, configured checks, and probe errors.
+- `beads`: `ready`, `claimed`, and `blocked` task snapshots plus optional `remote_db` and `tracker_sync` snapshots.
+- `herdr_events`: ordered normalized Herdr observations.
+- `harness_context`: harness-specific transcript excerpts, prompts, and artifacts for Claude Code, Codex, Pi, or generic unknown harnesses.
+- `loop`: loop id, kind, goal, harnesses, and dry-run mode.
+- `policy`: mode, approval requirements, and allowlisted commands.
+- `mcp_calls`, `remote_sessions`, optional `auth`, and optional `context` snapshots for coordination scenarios.
+- `expected`: required response kinds, evidence fragments, and actions.
+- `disallowed`: forbidden response kinds, text fragments, and actions.
+- `drivers` and `judges`: deterministic or model-backed driver and judge configuration.
+
 ### Driver Models
 
 Driver models simulate agents, users, or noisy event streams. They should be replaceable by configuration.
@@ -1703,8 +1735,8 @@ The MVP is complete when:
 
 ## Open Questions
 
-1. Should the first implementation target TypeScript, Rust, Python, or another runtime?
-2. Is "Pimono" the intended name for the Herdr wrapper layer, or should the project use another package name?
+1. Resolved: the first implementation targets TypeScript because Ciclo is intended to extend `earendil-works/pi`.
+2. Resolved: Ciclo is a standalone TypeScript orchestrator agent. Pi is an internal brain provider used under the covers; "Pimono" is not a separate harness or package.
 3. Should Ciclo use Herdr's socket API first, or start with CLI polling for portability?
 4. Should benchmark judge models run locally, through hosted APIs, or both?
 5. Should high-level loop state be mirrored into Beads events, comments, or operational state labels?
