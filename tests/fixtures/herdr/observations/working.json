@@ -1,0 +1,10 @@
+{
+  "target": "pane-working",
+  "agent": {
+    "label": "Claude Code",
+    "state": "working"
+  },
+  "cwd": "/workspace/review-service",
+  "summary": "Claude Code is running the review loop.",
+  "evidence": ["command still active", "terminal output changed recently"]
+}

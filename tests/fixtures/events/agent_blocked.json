@@ -1,0 +1,15 @@
+{
+  "kind": "agent.blocked",
+  "source": "herdr",
+  "normalized_event": {
+    "source": "herdr",
+    "state": "blocked",
+    "harness": "claude-code",
+    "target": "pane-2",
+    "evidence": ["herdr:needs input"]
+  },
+  "evidence": ["herdr:needs input"],
+  "payload": {
+    "question": "Need deploy target"
+  }
+}

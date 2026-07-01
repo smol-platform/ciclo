@@ -1,0 +1,9 @@
+{
+  "kind": "repo.changed",
+  "source": "repo",
+  "evidence": ["git:2 modified files"],
+  "payload": {
+    "dirty": true,
+    "branch": "main"
+  }
+}

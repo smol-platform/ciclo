@@ -1,0 +1,10 @@
+{
+  "target": "pane-unknown",
+  "agent": {
+    "label": "terminal",
+    "state": "gathering-context"
+  },
+  "cwd": "/workspace/unknown",
+  "summary": "Herdr cannot classify the current terminal contents.",
+  "evidence": ["no known agent marker", "state token is not recognized"]
+}

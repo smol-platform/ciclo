@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "id": "context_warn_threshold",
+  "title": "Context budget reaches warning threshold",
+  "description": "A review loop has enough accumulated memory to warn and build a bounded context pack before dispatch.",
+  "tags": ["benchmark", "context", "threshold", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/context-budget",
+    "upstream": "origin/feature/context-budget",
+    "dirty_files": ["src/context-budget.ts", "src/context-pack.ts"],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [
+      {
+        "id": "ciclo-context.1",
+        "title": "Review context budget warning behavior",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Validate warning-threshold behavior before prompt dispatch.",
+        "acceptance_criteria": "Ciclo measures context and builds a bounded context pack when usage is high.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["context", "review"],
+        "external_refs": []
+      }
+    ],
+    "claimed": [],
+    "blocked": [],
+    "remote_db": {
+      "mode": "local",
+      "health": "healthy",
+      "required": false
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-codex",
+      "harness": "codex",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "Codex",
+      "evidence": ["herdr.state:idle", "context.status:warn", "context.usage_ratio:0.64"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "local-codex",
+      "transcript_excerpt": "Prior work and tool output are accumulating but still below compact threshold.",
+      "artifacts": ["src/context-budget.ts", "src/context-pack.ts"]
+    }
+  ],
+  "loop": {
+    "id": "context-warn-demo",
+    "kind": "review",
+    "goal": "Warn on high context usage and build a bounded context pack before dispatch.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["send_prompt", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 76000,
+    "max_tokens": 120000,
+    "memory_summary": "Context usage is high enough to warn but not compact.",
+    "items": [
+      {
+        "source": "beads",
+        "text": "Acceptance criteria and validation notes for context budget behavior.",
+        "sensitive": false
+      },
+      {
+        "source": "repo",
+        "text": "Changed context budget and context pack files.",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["build_context_pack", "measure_context"],
+    "evidence_includes": ["context.status:warn", "context.usage_ratio:0.64"],
+    "required_actions": ["measure_context_budget", "build_bounded_context_pack"]
+  },
+  "disallowed": {
+    "response_kinds": ["smart_compact", "complete"],
+    "text_includes": ["ignore context budget", "send everything"],
+    "actions": ["send_unbounded_context", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "agent_driver",
+      "model": "fixture",
+      "fixture": "context_warn_transcript"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

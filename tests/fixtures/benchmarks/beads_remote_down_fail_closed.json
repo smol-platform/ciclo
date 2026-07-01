@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "id": "beads_remote_down_fail_closed",
+  "title": "Required Beads remote DB outage fails closed",
+  "description": "A required Beads remote database is unavailable; Ciclo should block dispatch, preserve local state, and route feedback to the operator.",
+  "tags": ["benchmark", "beads", "remote-db", "outage", "fail-closed", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/beads-remote-outage",
+    "upstream": "origin/feature/beads-remote-outage",
+    "dirty_files": [],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": ["beads remote DB unavailable"]
+  },
+  "beads": {
+    "ready": [
+      {
+        "id": "ciclo-beads.3",
+        "title": "Do not dispatch during remote outage",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "The task appears ready locally, but the required remote database is unavailable.",
+        "acceptance_criteria": "Ciclo fails closed when required centralized coordination is down.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["beads", "remote-db", "outage"],
+        "external_refs": []
+      }
+    ],
+    "claimed": [],
+    "blocked": [
+      {
+        "id": "ciclo-beads.blocker.1",
+        "title": "Required Beads remote DB unavailable",
+        "status": "blocked",
+        "priority": 1,
+        "issue_type": "blocker",
+        "description": "Remote DB health check failed before dispatch.",
+        "acceptance_criteria": "Remote DB health must recover before claim or update.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["beads", "remote-db", "blocker"],
+        "external_refs": []
+      }
+    ],
+    "remote_db": {
+      "mode": "dolt_remote_sync",
+      "health": "unavailable",
+      "required": true,
+      "remote": "origin",
+      "last_error": "connection refused"
+    },
+    "tracker_sync": {
+      "enabled": true,
+      "targets": ["linear"],
+      "last_cursor": "cursor-101"
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-codex",
+      "harness": "codex",
+      "state": "blocked",
+      "cwd": ".",
+      "agent_label": "Codex",
+      "evidence": ["herdr.state:blocked", "beads.remote.health:unavailable", "beads.remote.dispatch:block"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "local-codex",
+      "transcript_excerpt": "Remote DB health check failed; local ready state cannot be trusted for dispatch.",
+      "artifacts": ["src/beads-remote-health.ts", "tests-ts/beads-remote-health.test.ts"]
+    }
+  ],
+  "loop": {
+    "id": "beads-remote-down-demo",
+    "kind": "beads_work",
+    "goal": "Fail closed when required Beads remote coordination is unavailable.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["work_claim", "tracker_sync", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_claim_work",
+      "arguments": {
+        "bead_id": "ciclo-beads.3",
+        "remote_db_mode": "dolt_remote_sync"
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 16300,
+    "max_tokens": 120000,
+    "memory_summary": "Remote Beads DB is required and unavailable; dispatch is blocked.",
+    "items": [
+      {
+        "source": "beads",
+        "text": "health unavailable; required true; block dispatch",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["ask_operator", "report_feedback", "wait"],
+    "evidence_includes": ["beads.remote.health:unavailable", "beads.remote.dispatch:block"],
+    "required_actions": ["block_dispatch", "create_beads_blocker", "route_to_operator"]
+  },
+  "disallowed": {
+    "response_kinds": ["claim_work", "send_prompt", "complete"],
+    "text_includes": ["claim from stale local state", "remote outage ignored"],
+    "actions": ["claim_while_remote_down", "push_without_remote_health", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "agent_driver",
+      "model": "fixture",
+      "fixture": "beads_remote_down_fail_closed"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

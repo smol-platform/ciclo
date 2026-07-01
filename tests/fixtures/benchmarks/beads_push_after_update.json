@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "id": "beads_push_after_update",
+  "title": "Beads remote sync pushes after progress update",
+  "description": "A claimed Beads task receives a progress update; Ciclo should persist the work note, push remote DB state, and audit the push result.",
+  "tags": ["benchmark", "beads", "remote-db", "dolt-remote-sync", "progress", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/beads-push-update",
+    "upstream": "origin/feature/beads-push-update",
+    "dirty_files": ["src/beads-work-queue.ts"],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [],
+    "claimed": [
+      {
+        "id": "ciclo-beads.4",
+        "title": "Push progress update",
+        "status": "in_progress",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "The current agent has produced a progress note that must be centralized.",
+        "acceptance_criteria": "Ciclo pushes Beads state after every accepted remote DB update.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["beads", "dolt", "progress"],
+        "external_refs": []
+      }
+    ],
+    "blocked": [],
+    "remote_db": {
+      "mode": "dolt_remote_sync",
+      "health": "healthy",
+      "required": true,
+      "remote": "origin",
+      "last_push": "2026-06-29T22:33:00Z"
+    },
+    "tracker_sync": {
+      "enabled": true,
+      "targets": ["jira", "linear"],
+      "last_cursor": "cursor-118",
+      "redacted": true
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-codex",
+      "harness": "codex",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "Codex",
+      "evidence": ["herdr.state:idle", "bd.update:progress_note", "bd.dolt.push:after_update", "bd.dolt.push:ok"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "local-codex",
+      "transcript_excerpt": "Progress note was accepted and remote Dolt push succeeded.",
+      "artifacts": ["src/beads-work-queue.ts", "tests-ts/beads-dolt-sync.test.ts", "tests-ts/beads-tracker-sync.test.ts"]
+    }
+  ],
+  "loop": {
+    "id": "beads-push-after-update-demo",
+    "kind": "beads_work",
+    "goal": "Persist progress updates to Beads and push centralized state after mutation.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["tracker_sync", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_update_work",
+      "arguments": {
+        "bead_id": "ciclo-beads.4",
+        "status_note": "Implemented remote DB progress update path."
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 22200,
+    "max_tokens": 120000,
+    "memory_summary": "A progress note was written and the Dolt push must be audited.",
+    "items": [
+      {
+        "source": "beads",
+        "text": "progress note accepted for ciclo-beads.4",
+        "sensitive": false
+      },
+      {
+        "source": "tracker_sync",
+        "text": "Jira and Linear status sync configured through Beads with redaction",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["update_work", "report_status"],
+    "evidence_includes": ["bd.update:progress_note", "bd.dolt.push:after_update", "bd.dolt.push:ok"],
+    "required_actions": ["record_progress_note", "push_after_update", "audit_push_result"]
+  },
+  "disallowed": {
+    "response_kinds": ["claim_work", "complete", "send_prompt"],
+    "text_includes": ["progress stayed local", "skip push after update"],
+    "actions": ["update_without_remote_push", "sync_raw_secret_to_tracker", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "agent_driver",
+      "model": "fixture",
+      "fixture": "beads_push_after_update"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

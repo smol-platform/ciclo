@@ -1,0 +1,10 @@
+{
+  "target": "pane-done",
+  "agent": {
+    "label": "Codex",
+    "state": "complete"
+  },
+  "project_path": "/workspace/ciclo",
+  "explanation": "Codex reports the task is complete.",
+  "evidence": ["tests passed", "final response emitted"]
+}

@@ -11,9 +11,12 @@
 !.envrc
 node_modules/
 _apalache-out/
+.ciclo/
+.pi/
+.pi-agent/
 .codex/remote/.last-setup
-build/
-dist/
+/build/
+/dist/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/

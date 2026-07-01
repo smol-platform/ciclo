@@ -1,0 +1,711 @@
+import type { AccessCapability } from "./access-grants.js";
+import type { SessionAccessAction } from "./session-access.js";
+
+export type McpSideEffect =
+  | "none"
+  | "beads_note"
+  | "beads_claim"
+  | "beads_close"
+  | "beads_sync"
+  | "question_queue"
+  | "feedback_queue"
+  | "remote_session_update"
+  | "remote_runner_update"
+  | "worker_session_update"
+  | "auth_token_issue"
+  | "access_grant_update"
+  | "harness_dispatch";
+
+export interface McpSchema {
+  readonly type: "object" | "array" | "string" | "number" | "boolean" | "null";
+  readonly required?: readonly string[];
+  readonly properties?: Readonly<Record<string, McpSchema>>;
+  readonly items?: McpSchema;
+  readonly enum?: readonly string[];
+  readonly description?: string;
+}
+
+export interface McpPermission {
+  readonly readOnly: boolean;
+  readonly action: SessionAccessAction;
+  readonly capability: AccessCapability;
+  readonly authentication: "none_in_single_mode" | "principal_required" | "bearer_token_required";
+}
+
+export interface McpAuditRequirement {
+  readonly event: string;
+  readonly includeFields: readonly string[];
+  readonly redactFields: readonly string[];
+}
+
+export interface McpToolContract {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: McpSchema;
+  readonly outputSchema: McpSchema;
+  readonly permission: McpPermission;
+  readonly sideEffects: readonly McpSideEffect[];
+  readonly audit: McpAuditRequirement;
+}
+
+export interface McpResourceContract {
+  readonly uriTemplate: string;
+  readonly description: string;
+  readonly outputSchema: McpSchema;
+  readonly permission: McpPermission;
+  readonly cachePolicy: "no_store" | "short_poll" | "event_driven";
+  readonly audit: McpAuditRequirement;
+}
+
+export interface McpPromptContract {
+  readonly name: string;
+  readonly description: string;
+  readonly argumentsSchema: McpSchema;
+  readonly outputPurpose: string;
+  readonly permission: McpPermission;
+  readonly audit: McpAuditRequirement;
+}
+
+const stringSchema = (description: string): McpSchema => ({ type: "string", description });
+const booleanSchema = (description: string): McpSchema => ({ type: "boolean", description });
+const arrayOfStrings = (description: string): McpSchema => ({
+  type: "array",
+  description,
+  items: { type: "string" }
+});
+const objectSchema = (
+  description: string,
+  properties: Readonly<Record<string, McpSchema>>,
+  required: readonly string[] = []
+): McpSchema => ({ type: "object", description, properties, required });
+
+function permission(
+  action: SessionAccessAction,
+  capability: AccessCapability,
+  readOnly = false,
+  authentication: McpPermission["authentication"] = readOnly ? "none_in_single_mode" : "principal_required"
+): McpPermission {
+  return { action, capability, readOnly, authentication };
+}
+
+function audit(
+  event: string,
+  includeFields: readonly string[],
+  redactFields: readonly string[] = []
+): McpAuditRequirement {
+  return { event, includeFields, redactFields };
+}
+
+const loopId = stringSchema("Ciclo loop id.");
+const beadId = stringSchema("Beads issue id.");
+const harnessId = stringSchema("Harness id such as codex or claude-code.");
+const remoteSessionId = stringSchema("Ciclo remote session id.");
+const remoteRunnerId = stringSchema("Ciclo remote runner id.");
+
+export const cicloMcpTools: readonly McpToolContract[] = [
+  {
+    name: "ciclo_status",
+    description: "Return overall loop, Beads, Herdr, sync, access, and remote-session status.",
+    inputSchema: objectSchema("Optional status filter.", { include_remote: booleanSchema("Include remote sessions.") }),
+    outputSchema: objectSchema("Overall Ciclo status.", {
+      loops: { type: "array", items: { type: "object" } },
+      beads: { type: "object" },
+      remotes: { type: "array", items: { type: "object" } },
+      access: { type: "object" }
+    }),
+    permission: permission("read_status", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.status_read", ["principal_id", "session_id"])
+  },
+  {
+    name: "ciclo_loop_status",
+    description: "Return detailed loop state, goal, policy, current work, and recent evidence.",
+    inputSchema: objectSchema("Loop status request.", { loop_id: loopId }, ["loop_id"]),
+    outputSchema: objectSchema("Loop detail.", {
+      loop: { type: "object" },
+      goal: stringSchema("Current loop goal."),
+      policy: { type: "object" },
+      evidence: arrayOfStrings("Recent evidence.")
+    }),
+    permission: permission("read_loop", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.loop_read", ["principal_id", "loop_id"])
+  },
+  {
+    name: "ciclo_list_ready_work",
+    description: "Return eligible Beads work for a loop, labels, spec, issue type, or harness.",
+    inputSchema: objectSchema("Ready work filter.", {
+      loop_id: loopId,
+      harness_id: harnessId,
+      labels: arrayOfStrings("Required labels."),
+      spec_id: stringSchema("Spec id filter."),
+      limit: { type: "number", description: "Maximum number of Beads issues." }
+    }),
+    outputSchema: objectSchema("Ready work selection.", {
+      selected: { type: "object" },
+      skipped: { type: "array", items: { type: "object" } },
+      evidence: arrayOfStrings("Selection evidence.")
+    }),
+    permission: permission("read_ready_work", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.ready_work_read", ["principal_id", "loop_id", "harness_id"])
+  },
+  {
+    name: "ciclo_claim_work",
+    description: "Claim a Beads issue for a loop and harness after re-read, policy, and access checks.",
+    inputSchema: objectSchema("Work claim request.", {
+      loop_id: loopId,
+      bead_id: beadId,
+      harness_id: harnessId
+    }, ["loop_id", "bead_id", "harness_id"]),
+    outputSchema: objectSchema("Claim result.", {
+      claimed: { type: "boolean" },
+      before: { type: "object" },
+      after: { type: "object" },
+      evidence: arrayOfStrings("Claim evidence.")
+    }),
+    permission: permission("claim_beads_task", "work.claim"),
+    sideEffects: ["beads_claim", "beads_note"],
+    audit: audit("mcp.work_claimed", ["principal_id", "loop_id", "bead_id", "harness_id"])
+  },
+  {
+    name: "ciclo_start_work",
+    description: "Build or propose a bounded harness prompt for a claimed Beads issue.",
+    inputSchema: objectSchema("Harness start request.", {
+      loop_id: loopId,
+      bead_id: beadId,
+      harness_id: harnessId,
+      dry_run: booleanSchema("When true, return prompt without dispatch.")
+    }, ["loop_id", "bead_id", "harness_id"]),
+    outputSchema: objectSchema("Harness start plan.", {
+      prompt: stringSchema("Bounded prompt."),
+      dispatched: { type: "boolean" },
+      evidence: arrayOfStrings("Prompt and policy evidence.")
+    }),
+    permission: permission("send_prompt", "work.update"),
+    sideEffects: ["harness_dispatch"],
+    audit: audit("mcp.work_started", ["principal_id", "loop_id", "bead_id", "harness_id"], ["prompt"])
+  },
+  {
+    name: "ciclo_update_work",
+    description: "Append progress, validation, blocker, or final-summary memory to Beads.",
+    inputSchema: objectSchema("Work update request.", {
+      bead_id: beadId,
+      kind: { type: "string", enum: ["progress", "blocker", "validation", "final_summary"] },
+      message: stringSchema("Progress message."),
+      validation_command: stringSchema("Validation command, when kind is validation."),
+      validation_passed: booleanSchema("Validation result.")
+    }, ["bead_id", "kind", "message"]),
+    outputSchema: objectSchema("Update result.", {
+      mutated: { type: "boolean" },
+      pushed: { type: "boolean" },
+      evidence: arrayOfStrings("Policy, access, and persistence evidence.")
+    }),
+    permission: permission("update_beads_progress", "work.update"),
+    sideEffects: ["beads_note", "beads_sync"],
+    audit: audit("mcp.work_updated", ["principal_id", "bead_id", "kind"], ["message"])
+  },
+  {
+    name: "ciclo_close_work",
+    description: "Close a Beads issue only with acceptance evidence, passing validation, policy, and access.",
+    inputSchema: objectSchema("Work close request.", {
+      bead_id: beadId,
+      final_summary: stringSchema("Final summary."),
+      acceptance_evidence: arrayOfStrings("Acceptance evidence."),
+      validation_evidence: { type: "array", items: { type: "object" } }
+    }, ["bead_id", "final_summary", "acceptance_evidence", "validation_evidence"]),
+    outputSchema: objectSchema("Close result.", {
+      mutated: { type: "boolean" },
+      task: { type: "object" },
+      evidence: arrayOfStrings("Close evidence.")
+    }),
+    permission: permission("close_beads_task", "work.close"),
+    sideEffects: ["beads_note", "beads_close", "beads_sync"],
+    audit: audit("mcp.work_closed", ["principal_id", "bead_id"], ["final_summary", "acceptance_evidence"])
+  },
+  {
+    name: "ciclo_ask_operator",
+    description: "Submit a question from a harness or remote worker to the operator session.",
+    inputSchema: objectSchema("Question request.", {
+      loop_id: loopId,
+      bead_id: beadId,
+      question: stringSchema("Question text."),
+      urgency: { type: "string", enum: ["low", "normal", "high", "blocking"] }
+    }, ["question"]),
+    outputSchema: objectSchema("Question record.", {
+      question_id: stringSchema("Question id."),
+      queued: { type: "boolean" },
+      evidence: arrayOfStrings("Routing evidence.")
+    }),
+    permission: permission("answer_agent_question", "question.answer"),
+    sideEffects: ["question_queue"],
+    audit: audit("mcp.question_asked", ["principal_id", "loop_id", "bead_id", "urgency"], ["question"])
+  },
+  {
+    name: "ciclo_answer_question",
+    description: "Answer a pending Ciclo or agent question and route it to the waiting context.",
+    inputSchema: objectSchema("Answer request.", {
+      question_id: stringSchema("Question id."),
+      answer: stringSchema("Operator or authorized agent answer."),
+      evidence: arrayOfStrings("Answer evidence.")
+    }, ["question_id", "answer"]),
+    outputSchema: objectSchema("Answer routing result.", {
+      answered: { type: "boolean" },
+      routed_to: { type: "object" },
+      evidence: arrayOfStrings("Routing evidence.")
+    }),
+    permission: permission("answer_agent_question", "question.answer"),
+    sideEffects: ["question_queue", "beads_note"],
+    audit: audit("mcp.question_answered", ["principal_id", "question_id"], ["answer"])
+  },
+  {
+    name: "ciclo_report_feedback",
+    description: "Queue findings, warnings, review notes, or benchmark results for the operator session.",
+    inputSchema: objectSchema("Feedback request.", {
+      loop_id: loopId,
+      bead_id: beadId,
+      severity: { type: "string", enum: ["info", "warning", "error", "critical"] },
+      message: stringSchema("Feedback message."),
+      evidence: arrayOfStrings("Feedback evidence.")
+    }, ["severity", "message"]),
+    outputSchema: objectSchema("Feedback result.", {
+      feedback_id: stringSchema("Feedback id."),
+      deduplicated: { type: "boolean" },
+      evidence: arrayOfStrings("Queue evidence.")
+    }),
+    permission: permission("answer_agent_question", "question.answer"),
+    sideEffects: ["feedback_queue"],
+    audit: audit("mcp.feedback_reported", ["principal_id", "loop_id", "bead_id", "severity"], ["message"])
+  },
+  {
+    name: "ciclo_sync_remote_trackers",
+    description: "Trigger or dry-run configured Beads-native Jira/Linear tracker sync.",
+    inputSchema: objectSchema("Remote tracker sync request.", {
+      dry_run: booleanSchema("Preview sync without mutation."),
+      force: booleanSchema("Bypass sync idempotency for an intentional retry."),
+      loop_id: loopId,
+      bead_id: beadId,
+      idempotency_key: stringSchema("Stable idempotency key for this tracker sync request.")
+    }),
+    outputSchema: objectSchema("Sync result.", {
+      synced: { type: "boolean" },
+      provider: stringSchema("Tracker provider."),
+      required_failed: { type: "boolean" },
+      targets: { type: "array", items: { type: "object" } },
+      evidence: arrayOfStrings("Sync evidence.")
+    }),
+    permission: permission("remote_tracker_sync", "access.admin"),
+    sideEffects: ["beads_sync"],
+    audit: audit("mcp.remote_trackers_synced", ["principal_id", "bead_id", "dry_run"])
+  },
+  {
+    name: "ciclo_register_remote_session",
+    description: "Register a remote Ciclo, Herdr, or harness session observed through Herdr remote attach over SSH.",
+    inputSchema: objectSchema("Remote session registration.", {
+      remote_session_id: remoteSessionId,
+      herdr_target: stringSchema("Herdr remote target alias or SSH target."),
+      repo_path: stringSchema("Remote repository path."),
+      harness_id: harnessId,
+      bead_id: beadId
+    }, ["remote_session_id", "herdr_target", "repo_path", "harness_id"]),
+    outputSchema: objectSchema("Remote registration result.", {
+      registered: { type: "boolean" },
+      evidence: arrayOfStrings("Registration evidence.")
+    }),
+    permission: permission("register_remote_session", "remote.register"),
+    sideEffects: ["remote_session_update"],
+    audit: audit("mcp.remote_registered", ["principal_id", "remote_session_id", "harness_id"], ["herdr_target", "repo_path"])
+  },
+  {
+    name: "ciclo_heartbeat_remote_session",
+    description: "Update liveness and state for a registered remote session.",
+    inputSchema: objectSchema("Remote heartbeat.", {
+      remote_session_id: remoteSessionId,
+      state: { type: "string", enum: ["working", "blocked", "done", "idle", "unknown"] },
+      evidence: arrayOfStrings("Remote liveness evidence.")
+    }, ["remote_session_id", "state"]),
+    outputSchema: objectSchema("Heartbeat result.", {
+      accepted: { type: "boolean" },
+      stale: { type: "boolean" },
+      evidence: arrayOfStrings("Heartbeat evidence.")
+    }),
+    permission: permission("register_remote_session", "remote.register"),
+    sideEffects: ["remote_session_update"],
+    audit: audit("mcp.remote_heartbeat", ["principal_id", "remote_session_id", "state"], ["evidence"])
+  },
+  {
+    name: "ciclo_detach_remote_session",
+    description: "Mark a remote session detached, paused, lost, or retired without stealing Beads ownership.",
+    inputSchema: objectSchema("Remote detach request.", {
+      remote_session_id: remoteSessionId,
+      reason: stringSchema("Detach reason."),
+      status: { type: "string", enum: ["detached", "paused", "lost", "retired"] }
+    }, ["remote_session_id", "reason", "status"]),
+    outputSchema: objectSchema("Remote detach result.", {
+      detached: { type: "boolean" },
+      evidence: arrayOfStrings("Detach evidence.")
+    }),
+    permission: permission("register_remote_session", "remote.register"),
+    sideEffects: ["remote_session_update", "beads_note"],
+    audit: audit("mcp.remote_detached", ["principal_id", "remote_session_id", "status"], ["reason"])
+  },
+  {
+    name: "ciclo_launch_remote_runner",
+    description: "Plan a Herdr-reachable remote runner on Kubernetes, AWS Lambda MicroVM, or Cloudflare with WireGuard tunnel setup.",
+    inputSchema: objectSchema("Remote runner launch request.", {
+      runner_kind: stringSchema("Remote runner kind registered by a built-in or third-party plugin."),
+      runner_id: remoteRunnerId,
+      loop_id: loopId,
+      bead_id: beadId,
+      harness_id: harnessId,
+      image: stringSchema("Runner image containing Ciclo harness dependencies."),
+      repo_url: stringSchema("Repository URL to clone or mount."),
+      repo_path: stringSchema("Repository path inside the runner."),
+      prompt: stringSchema("Bounded worker prompt."),
+      herdr_session: stringSchema("Herdr session name, defaults to the repository session name."),
+      ssh_user: stringSchema("SSH user exposed over the WireGuard tunnel."),
+      wireguard: { type: "object" },
+      environment: { type: "object" },
+      kubernetes: { type: "object" },
+      aws_lambda: { type: "object", description: "AWS Lambda MicroVM options such as microvm_image_name, microvm_image_identifier, microvm_name, source_s3_uri, base_image_arn, build_role_arn, execution_role_arn, memory_mb, and vcpu_count." },
+      cloudflare: { type: "object" },
+      dry_run: booleanSchema("Plan without invoking a provider executor.")
+    }, ["runner_kind", "loop_id", "harness_id", "image", "repo_path", "prompt"]),
+    outputSchema: objectSchema("Remote runner launch plan.", {
+      runner_id: remoteRunnerId,
+      runner_kind: stringSchema("Runner provider kind."),
+      provider_name: stringSchema("Remote runner plugin name."),
+      execution_model: stringSchema("Provider execution model."),
+      state: stringSchema("Runner lifecycle state."),
+      herdr_remote_target: stringSchema("Herdr remote target reachable over WireGuard."),
+      attach: { type: "object" },
+      wireguard: { type: "object" },
+      commands: arrayOfStrings("Provider commands to apply the plan."),
+      artifacts: { type: "array", items: { type: "object" } },
+      warnings: arrayOfStrings("Provider limitations or operator warnings."),
+      evidence: arrayOfStrings("Launch planning evidence.")
+    }),
+    permission: permission("register_remote_session", "remote.register"),
+    sideEffects: ["remote_runner_update", "remote_session_update"],
+    audit: audit("mcp.remote_runner_launched", ["principal_id", "runner_id", "runner_kind", "loop_id", "harness_id"], ["prompt", "wireguard", "environment"])
+  },
+  {
+    name: "ciclo_list_remote_runners",
+    description: "List remote runner launch plans and their Herdr/WireGuard attach state.",
+    inputSchema: objectSchema("Remote runner list request.", {}),
+    outputSchema: objectSchema("Remote runners.", {
+      remote_runners: { type: "array", items: { type: "object" } }
+    }),
+    permission: permission("read_status", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.remote_runners_read", ["principal_id", "session_id"])
+  },
+  {
+    name: "ciclo_attach_plan",
+    description: "Build the Herdr command for attaching to the overall Ciclo session or a specific agent target.",
+    inputSchema: objectSchema("Ciclo attach request.", {
+      herdr_target: stringSchema("Optional Herdr remote target."),
+      herdr_session: stringSchema("Herdr session name, defaults to the repository session name."),
+      agent_target: stringSchema("Optional Herdr agent target inside the session.")
+    }),
+    outputSchema: objectSchema("Ciclo attach plan.", {
+      command: stringSchema("Executable."),
+      args: arrayOfStrings("Executable arguments."),
+      session: stringSchema("Herdr session name."),
+      mode: stringSchema("overview or agent."),
+      evidence: arrayOfStrings("Attach planning evidence.")
+    }),
+    permission: permission("read_status", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.ciclo_attach_planned", ["principal_id", "herdr_session"])
+  },
+  {
+    name: "ciclo_launch_worker_session",
+    description: "Launch or dry-run a Ciclo-managed Claude Code or Codex worker session with model and runtime parameters.",
+    inputSchema: objectSchema("Worker session launch request.", {
+      harness_id: { type: "string", enum: ["claude-code", "codex"] },
+      loop_id: loopId,
+      bead_id: beadId,
+      prompt: stringSchema("Bounded worker prompt."),
+      model: stringSchema("Harness model id."),
+      effort: stringSchema("Reasoning or effort level."),
+      cwd: stringSchema("Worker cwd."),
+      session_name: stringSchema("Human-readable worker session name."),
+      dry_run: booleanSchema("Plan the launch without starting the process."),
+      permission_mode: stringSchema("Claude permission mode."),
+      sandbox: stringSchema("Codex sandbox mode."),
+      approval_policy: stringSchema("Codex approval policy.")
+    }, ["harness_id", "loop_id", "prompt"]),
+    outputSchema: objectSchema("Worker session launch result.", {
+      session_id: stringSchema("Ciclo worker session id."),
+      state: stringSchema("Worker lifecycle state."),
+      command: stringSchema("Executable."),
+      args: arrayOfStrings("Executable arguments."),
+      pid: { type: "number", description: "Process id when launched." },
+      evidence: arrayOfStrings("Launch evidence.")
+    }),
+    permission: permission("send_prompt", "work.update"),
+    sideEffects: ["worker_session_update", "harness_dispatch"],
+    audit: audit("mcp.worker_session_launched", ["principal_id", "loop_id", "bead_id", "harness_id"], ["prompt"])
+  },
+  {
+    name: "ciclo_list_worker_sessions",
+    description: "List Ciclo-managed Claude Code and Codex worker sessions.",
+    inputSchema: objectSchema("Worker session list request.", {}),
+    outputSchema: objectSchema("Worker sessions.", {
+      worker_sessions: { type: "array", items: { type: "object" } }
+    }),
+    permission: permission("read_status", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.worker_sessions_read", ["principal_id", "session_id"])
+  },
+  {
+    name: "ciclo_stop_worker_session",
+    description: "Stop and clean up a Ciclo-managed worker session.",
+    inputSchema: objectSchema("Worker session stop request.", {
+      worker_session_id: stringSchema("Ciclo worker session id."),
+      reason: stringSchema("Cleanup reason."),
+      signal: stringSchema("Process signal, default SIGTERM.")
+    }, ["worker_session_id", "reason"]),
+    outputSchema: objectSchema("Worker session stop result.", {
+      session_id: stringSchema("Ciclo worker session id."),
+      state: stringSchema("Worker lifecycle state."),
+      cleanup_reason: stringSchema("Cleanup reason."),
+      evidence: arrayOfStrings("Cleanup evidence.")
+    }),
+    permission: permission("send_prompt", "work.update"),
+    sideEffects: ["worker_session_update"],
+    audit: audit("mcp.worker_session_stopped", ["principal_id", "worker_session_id"], ["reason"])
+  },
+  {
+    name: "ciclo_auth_device_start",
+    description: "Start OAuth-style device login for a CLI, MCP HTTP client, or remote worker.",
+    inputSchema: objectSchema("Device authorization request.", {
+      client_id: stringSchema("Client id."),
+      client_kind: { type: "string", enum: ["cli", "mcp_http", "remote_worker"] },
+      requested_scopes: arrayOfStrings("Requested scopes.")
+    }, ["client_id", "client_kind"]),
+    outputSchema: objectSchema("Device authorization response.", {
+      device_code: stringSchema("Opaque device code."),
+      user_code: stringSchema("Short user code."),
+      verification_uri: stringSchema("User verification URI."),
+      interval_seconds: { type: "number" }
+    }),
+    permission: permission("read_status", "status.read", true, "none_in_single_mode"),
+    sideEffects: ["auth_token_issue"],
+    audit: audit("mcp.auth_device_started", ["client_id", "client_kind"], ["device_code", "user_code"])
+  },
+  {
+    name: "ciclo_auth_device_poll",
+    description: "Poll device authorization status and receive token material only after approval.",
+    inputSchema: objectSchema("Device poll request.", {
+      device_code: stringSchema("Opaque device code.")
+    }, ["device_code"]),
+    outputSchema: objectSchema("Device poll response.", {
+      status: { type: "string", enum: ["authorization_pending", "slow_down", "approved", "denied", "expired"] },
+      token_set: { type: "object" }
+    }),
+    permission: permission("read_status", "status.read", true, "none_in_single_mode"),
+    sideEffects: ["auth_token_issue"],
+    audit: audit("mcp.auth_device_polled", ["client_id"], ["device_code", "token_set"])
+  },
+  {
+    name: "ciclo_whoami",
+    description: "Return current principal, session mode, token expiry, and effective capabilities.",
+    inputSchema: objectSchema("Whoami request.", {}),
+    outputSchema: objectSchema("Principal status.", {
+      principal_id: stringSchema("Current principal id."),
+      session_mode: stringSchema("single or multiuser."),
+      capabilities: arrayOfStrings("Effective capabilities."),
+      expires_at: stringSchema("Token expiry.")
+    }),
+    permission: permission("read_status", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.whoami_read", ["principal_id", "session_id"])
+  },
+  {
+    name: "ciclo_grant_access",
+    description: "Grant scoped access to a user or service principal.",
+    inputSchema: objectSchema("Grant request.", {
+      principal_id: stringSchema("Principal receiving access."),
+      role: { type: "string", enum: ["owner", "operator", "agent", "viewer"] },
+      capabilities: arrayOfStrings("Additional capabilities."),
+      scope: { type: "object" },
+      expires_at: stringSchema("Grant expiry.")
+    }, ["principal_id", "role", "scope"]),
+    outputSchema: objectSchema("Grant result.", {
+      granted: { type: "boolean" },
+      grant_id: stringSchema("Grant id."),
+      evidence: arrayOfStrings("Grant evidence.")
+    }),
+    permission: permission("grant_access", "access.admin"),
+    sideEffects: ["access_grant_update"],
+    audit: audit("mcp.access_granted", ["actor_principal_id", "principal_id", "role", "scope"])
+  },
+  {
+    name: "ciclo_revoke_access",
+    description: "Revoke an access grant or device token.",
+    inputSchema: objectSchema("Revoke request.", {
+      principal_id: stringSchema("Principal id."),
+      grant_id: stringSchema("Grant id."),
+      token_id: stringSchema("Token id.")
+    }),
+    outputSchema: objectSchema("Revoke result.", {
+      revoked: { type: "boolean" },
+      evidence: arrayOfStrings("Revocation evidence.")
+    }),
+    permission: permission("revoke_access", "access.admin"),
+    sideEffects: ["access_grant_update"],
+    audit: audit("mcp.access_revoked", ["actor_principal_id", "principal_id", "grant_id", "token_id"])
+  }
+];
+
+export const cicloMcpResources: readonly McpResourceContract[] = [
+  {
+    uriTemplate: "ciclo://status",
+    description: "Overall system status with loops, Beads, Herdr, remotes, and sync.",
+    outputSchema: objectSchema("Overall status.", { status: { type: "object" } }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.status", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://loops",
+    description: "Loop summary list.",
+    outputSchema: objectSchema("Loop summaries.", { loops: { type: "array", items: { type: "object" } } }),
+    permission: permission("read_loop", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.loops", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://loops/{loop_id}",
+    description: "Detailed loop state, current goal, policy, and evidence.",
+    outputSchema: objectSchema("Loop detail.", { loop: { type: "object" }, evidence: arrayOfStrings("Evidence.") }),
+    permission: permission("read_loop", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.loop", ["principal_id", "loop_id"])
+  },
+  {
+    uriTemplate: "ciclo://work/ready",
+    description: "Ready Beads work view.",
+    outputSchema: objectSchema("Ready work.", { work: { type: "array", items: { type: "object" } } }),
+    permission: permission("read_ready_work", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.ready_work", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://work/{bead_id}",
+    description: "Bead-derived work context and Ciclo audit state.",
+    outputSchema: objectSchema("Work context.", { bead: { type: "object" }, audit: { type: "array", items: { type: "object" } } }),
+    permission: permission("read_ready_work", "status.read", true),
+    cachePolicy: "event_driven",
+    audit: audit("mcp.resource.work", ["principal_id", "bead_id"])
+  },
+  {
+    uriTemplate: "ciclo://questions",
+    description: "Pending questions awaiting operator or agent response.",
+    outputSchema: objectSchema("Question queue.", { questions: { type: "array", items: { type: "object" } } }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "event_driven",
+    audit: audit("mcp.resource.questions", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://feedback",
+    description: "Feedback queue for the operator session.",
+    outputSchema: objectSchema("Feedback queue.", { feedback: { type: "array", items: { type: "object" } } }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "event_driven",
+    audit: audit("mcp.resource.feedback", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://remote-sessions",
+    description: "Registered remote sessions and liveness state.",
+    outputSchema: objectSchema("Remote sessions.", { remote_sessions: { type: "array", items: { type: "object" } } }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.remote_sessions", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://remote-runners",
+    description: "Remote runner launch plans with WireGuard and Herdr attach details.",
+    outputSchema: objectSchema("Remote runners.", { remote_runners: { type: "array", items: { type: "object" } } }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.remote_runners", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://worker-sessions",
+    description: "Ciclo-managed Claude Code and Codex worker sessions.",
+    outputSchema: objectSchema("Worker sessions.", { worker_sessions: { type: "array", items: { type: "object" } } }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.worker_sessions", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://session/access",
+    description: "Effective access mode, current principal, and caller-visible grants.",
+    outputSchema: objectSchema("Access status.", { access: { type: "object" } }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "no_store",
+    audit: audit("mcp.resource.session_access", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://users/me",
+    description: "Current principal and token expiry.",
+    outputSchema: objectSchema("Current user.", { principal: { type: "object" } }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "no_store",
+    audit: audit("mcp.resource.users_me", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://benchmarks/latest",
+    description: "Latest benchmark results and regressions.",
+    outputSchema: objectSchema("Latest benchmark summary.", { benchmarks: { type: "object" } }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.benchmarks_latest", ["principal_id"])
+  }
+];
+
+export const cicloMcpPrompts: readonly McpPromptContract[] = [
+  {
+    name: "ciclo_continue_work",
+    description: "Continue a claimed Beads task with bounded context, validation commands, and stop conditions.",
+    argumentsSchema: objectSchema("Continue work prompt args.", { bead_id: beadId, harness_id: harnessId }, ["bead_id", "harness_id"]),
+    outputPurpose: "Harness implementation prompt.",
+    permission: permission("read_ready_work", "status.read", true),
+    audit: audit("mcp.prompt.continue_work", ["principal_id", "bead_id", "harness_id"])
+  },
+  {
+    name: "ciclo_review_loop",
+    description: "Review loop prompt with repo state, Beads context, policy, and feedback format.",
+    argumentsSchema: objectSchema("Review loop args.", { loop_id: loopId, bead_id: beadId }, ["loop_id"]),
+    outputPurpose: "Harness review prompt.",
+    permission: permission("read_loop", "status.read", true),
+    audit: audit("mcp.prompt.review_loop", ["principal_id", "loop_id", "bead_id"])
+  },
+  {
+    name: "ciclo_deploy_gate",
+    description: "Deploy gate prompt requiring validation, policy, rollback, and operator approval evidence.",
+    argumentsSchema: objectSchema("Deploy gate args.", { loop_id: loopId, bead_id: beadId }, ["loop_id"]),
+    outputPurpose: "Deploy readiness prompt.",
+    permission: permission("read_loop", "status.read", true),
+    audit: audit("mcp.prompt.deploy_gate", ["principal_id", "loop_id", "bead_id"])
+  },
+  {
+    name: "ciclo_answer_operator_question",
+    description: "Prompt for answering a pending question with evidence and uncertainty boundaries.",
+    argumentsSchema: objectSchema("Question answer args.", { question_id: stringSchema("Question id.") }, ["question_id"]),
+    outputPurpose: "Question answer prompt.",
+    permission: permission("read_status", "status.read", true),
+    audit: audit("mcp.prompt.answer_operator_question", ["principal_id", "question_id"])
+  },
+  {
+    name: "ciclo_report_feedback",
+    description: "Prompt for reporting structured findings, benchmark results, or review notes to the operator.",
+    argumentsSchema: objectSchema("Feedback prompt args.", { loop_id: loopId, bead_id: beadId }, ["loop_id"]),
+    outputPurpose: "Structured feedback prompt.",
+    permission: permission("read_loop", "status.read", true),
+    audit: audit("mcp.prompt.report_feedback", ["principal_id", "loop_id", "bead_id"])
+  }
+];

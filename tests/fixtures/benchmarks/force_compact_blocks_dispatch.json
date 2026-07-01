@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "id": "force_compact_blocks_dispatch",
+  "title": "Force compact blocks context-heavy dispatch",
+  "description": "A loop reaches force-compact threshold; Ciclo should compact before dispatch and must not nudge with oversized context.",
+  "tags": ["benchmark", "context", "force-compact", "policy", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/force-compact",
+    "upstream": "origin/feature/force-compact",
+    "dirty_files": ["src/response-planner.ts", "src/context-compaction.ts"],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [],
+    "claimed": [
+      {
+        "id": "ciclo-context.4",
+        "title": "Dispatch after force compact",
+        "status": "in_progress",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Dispatch would exceed safe context limits unless compaction runs first.",
+        "acceptance_criteria": "Ciclo blocks context-heavy dispatch until smart compaction completes or an explicit override exists.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["context", "planner"],
+        "external_refs": []
+      }
+    ],
+    "blocked": [],
+    "remote_db": {
+      "mode": "shared_dolt_server",
+      "health": "healthy",
+      "required": true
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-codex",
+      "harness": "codex",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "Codex",
+      "evidence": ["herdr.state:idle", "context.status:force_compact", "context.dispatch_blocked:true"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "local-codex",
+      "transcript_excerpt": "The next nudge would include too much transcript and tool output.",
+      "prompt": "Do not dispatch until smart compaction has persisted the task memory.",
+      "artifacts": ["src/response-planner.ts", "src/context-compaction.ts"]
+    }
+  ],
+  "loop": {
+    "id": "force-compact-demo",
+    "kind": "beads_work",
+    "goal": "Block oversized dispatch until smart compaction has preserved work memory.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["send_prompt", "context_force_compact_override", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 112000,
+    "max_tokens": 120000,
+    "memory_summary": "Force compaction required before any context-heavy dispatch.",
+    "items": [
+      {
+        "source": "transcript",
+        "text": "Long accumulated transcript omitted by benchmark fixture.",
+        "sensitive": true
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["smart_compact", "wait"],
+    "evidence_includes": ["context.status:force_compact", "context.dispatch_blocked:true"],
+    "required_actions": ["block_context_heavy_dispatch", "persist_beads_memory"]
+  },
+  "disallowed": {
+    "response_kinds": ["nudge_agent", "send_prompt", "complete"],
+    "text_includes": ["force compact override assumed", "sending full transcript"],
+    "actions": ["send_prompt", "send_unbounded_context", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "agent_driver",
+      "model": "fixture",
+      "fixture": "force_compact_transcript"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

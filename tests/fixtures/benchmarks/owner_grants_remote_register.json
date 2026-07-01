@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "id": "owner_grants_remote_register",
+  "title": "Owner grants remote registration",
+  "description": "The session owner grants a remote worker the scope needed to register a Herdr remote session.",
+  "tags": ["benchmark", "auth", "multiuser", "remote-session", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/remote-grant",
+    "upstream": "origin/feature/remote-grant",
+    "dirty_files": ["src/remote-session-registry.ts"],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [
+      {
+        "id": "ciclo-auth.5",
+        "title": "Register scoped remote worker",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "A remote worker can register only after the owner grants remote scope.",
+        "acceptance_criteria": "Ciclo records owner grant evidence before remote registration.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["auth", "remote-session"],
+        "external_refs": []
+      }
+    ],
+    "claimed": [],
+    "blocked": [],
+    "remote_db": {
+      "mode": "shared_dolt_server",
+      "health": "healthy",
+      "required": true
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "remote-codex",
+      "harness": "codex",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "Remote Codex",
+      "evidence": ["herdr.state:idle", "owner.grant:remote.register", "access.decision:allow", "remote.registration:pending"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "remote-codex",
+      "transcript_excerpt": "Owner granted remote.register for remote-codex-3 in session-shared.",
+      "artifacts": ["src/access-grants.ts", "src/remote-session-registry.ts"]
+    }
+  ],
+  "loop": {
+    "id": "owner-grant-remote-demo",
+    "kind": "beads_work",
+    "goal": "Allow remote session registration after an owner-scoped grant.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["remote_register", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_grant_access",
+      "arguments": {
+        "principal_id": "agent:codex",
+        "scope": "remote.register"
+      },
+      "expect_mutation": true
+    },
+    {
+      "tool": "ciclo_register_remote_session",
+      "arguments": {
+        "remote_session_id": "remote-codex-3"
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [
+    {
+      "remote_session_id": "remote-codex-3",
+      "harness_id": "codex",
+      "bead_id": "ciclo-auth.5",
+      "state": "registered",
+      "evidence": ["remote.session:registered", "access.grant:owner"]
+    }
+  ],
+  "auth": {
+    "mode": "multiuser",
+    "principal_id": "owner:zach",
+    "grants": ["admin:grant", "remote:register"]
+  },
+  "context": {
+    "used_tokens": 26000,
+    "max_tokens": 120000,
+    "memory_summary": "Owner granted remote registration scope for a remote worker.",
+    "items": [
+      {
+        "source": "auth",
+        "text": "owner grant allows remote.register for agent:codex",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["grant_access", "register_remote_session"],
+    "evidence_includes": ["owner.grant:remote.register", "access.decision:allow"],
+    "required_actions": ["record_owner_grant", "register_remote_session", "audit_access_acceptance"]
+  },
+  "disallowed": {
+    "response_kinds": ["deny_access", "send_prompt"],
+    "text_includes": ["registered without grant", "grant not audited"],
+    "actions": ["register_remote_without_grant", "log_token_material", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "user_driver",
+      "model": "fixture",
+      "fixture": "owner_grants_remote_register"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

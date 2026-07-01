@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "id": "worker_launch_codex_session",
+  "title": "Ciclo launches Codex worker session",
+  "description": "Ready work and an idle Codex harness should lead Ciclo to plan a managed Codex worker through the MCP worker-session tool with model params and bounded prompt.",
+  "tags": ["benchmark", "worker-session", "codex", "mcp", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/worker-session-launch",
+    "upstream": "origin/feature/worker-session-launch",
+    "dirty_files": [],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [
+      {
+        "id": "ciclo-worker.1",
+        "title": "Implement worker session launch",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Ciclo should start a Codex worker under supervisor control.",
+        "acceptance_criteria": "Launch plan records model, cwd, prompt, and cleanup state.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["worker-session", "codex"],
+        "external_refs": []
+      }
+    ],
+    "claimed": [],
+    "blocked": [],
+    "remote_db": {
+      "mode": "local",
+      "health": "healthy",
+      "required": false
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-codex",
+      "harness": "codex",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "Codex",
+      "evidence": ["herdr.state:idle", "worker.session.request:codex", "worker.session.model:gpt-5.5"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "local-codex",
+      "transcript_excerpt": "Operator asked Ciclo to launch Codex for the claimed worker-session task.",
+      "artifacts": ["src/worker-session-supervisor.ts", "src/mcp-stdio.ts"]
+    }
+  ],
+  "loop": {
+    "id": "worker-launch-demo",
+    "kind": "beads_work",
+    "goal": "Launch a supervised Codex worker through Ciclo.",
+    "harnesses": ["codex"],
+    "dry_run": false
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["worker_launch", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_launch_worker_session",
+      "arguments": {
+        "harness_id": "codex",
+        "loop_id": "worker-launch-demo",
+        "bead_id": "ciclo-worker.1",
+        "model": "gpt-5.5",
+        "prompt": "Use Ciclo MCP as the control plane and report progress back through Ciclo.",
+        "dry_run": true
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [],
+  "worker_sessions": [
+    {
+      "worker_session_id": "worker-codex-1",
+      "harness_id": "codex",
+      "bead_id": "ciclo-worker.1",
+      "loop_id": "worker-launch-demo",
+      "state": "planned",
+      "model": "gpt-5.5",
+      "effort": "high",
+      "evidence": [
+        "worker.session.plan:worker-codex-1",
+        "worker.session.harness:codex",
+        "worker.session.launch:planned",
+        "worker.session.model:gpt-5.5"
+      ]
+    }
+  ],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 18000,
+    "max_tokens": 120000,
+    "memory_summary": "Ciclo should own worker launch lifecycle.",
+    "items": [
+      {
+        "source": "worker_session",
+        "text": "Codex worker launch requested with GPT-5.5 and dry-run plan.",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["launch_worker_session", "report_status"],
+    "evidence_includes": ["worker.session.launch:planned", "worker.session.harness:codex"],
+    "required_actions": ["build_worker_launch_plan", "record_worker_session", "require_ciclo_mcp_callback"]
+  },
+  "disallowed": {
+    "response_kinds": ["send_prompt", "wait"],
+    "text_includes": ["start codex manually", "untracked worker"],
+    "actions": ["launch_untracked_process", "bypass_ciclo_mcp", "omit_cleanup_tracking"]
+  },
+  "drivers": [
+    {
+      "role": "user_driver",
+      "model": "fixture",
+      "fixture": "worker_launch_codex_session"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

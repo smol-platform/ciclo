@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "id": "beads_shared_dolt_server_ready",
+  "title": "Shared Dolt server ready work dispatch",
+  "description": "A healthy shared Dolt-backed Beads server has ready work; Ciclo should verify the server, re-read the task, and allow a scoped claim.",
+  "tags": ["benchmark", "beads", "remote-db", "shared-dolt-server", "work-queue", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/beads-shared-server",
+    "upstream": "origin/feature/beads-shared-server",
+    "dirty_files": [],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [
+      {
+        "id": "ciclo-beads.1",
+        "title": "Run shared server ready work",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "The task is ready in the centralized Beads server.",
+        "acceptance_criteria": "Ciclo claims work only after shared server health and task re-read pass.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["beads", "remote-db", "shared-server"],
+        "external_refs": []
+      }
+    ],
+    "claimed": [],
+    "blocked": [],
+    "remote_db": {
+      "mode": "shared_dolt_server",
+      "health": "healthy",
+      "required": true,
+      "server_url": "http://127.0.0.1:3306/ciclo_beads",
+      "schema_version": "beads-v1",
+      "last_health_check": "2026-06-29T22:30:00Z"
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-codex",
+      "harness": "codex",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "Codex",
+      "evidence": ["herdr.state:idle", "beads.shared.health:healthy", "beads.remote.dispatch:allow"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "local-codex",
+      "transcript_excerpt": "The shared Dolt Beads server is healthy and reports ciclo-beads.1 as ready.",
+      "artifacts": ["src/beads-shared-server.ts", "tests-ts/beads-shared-server.test.ts"]
+    }
+  ],
+  "loop": {
+    "id": "beads-shared-server-demo",
+    "kind": "beads_work",
+    "goal": "Dispatch ready Beads work from a healthy shared Dolt server.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["work_claim", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_claim_work",
+      "arguments": {
+        "bead_id": "ciclo-beads.1",
+        "remote_db_mode": "shared_dolt_server"
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 14400,
+    "max_tokens": 120000,
+    "memory_summary": "Shared server health is green and one Beads task is ready.",
+    "items": [
+      {
+        "source": "beads",
+        "text": "shared_dolt_server health healthy; ciclo-beads.1 ready",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["claim_work", "report_status"],
+    "evidence_includes": ["beads.shared.health:healthy", "beads.remote.dispatch:allow"],
+    "required_actions": ["check_shared_server_health", "list_ready_work", "claim_after_recheck"]
+  },
+  "disallowed": {
+    "response_kinds": ["ask_operator", "complete", "send_prompt"],
+    "text_includes": ["claim without health check", "skip shared server re-read"],
+    "actions": ["claim_without_remote_health", "claim_without_recheck", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "agent_driver",
+      "model": "fixture",
+      "fixture": "beads_shared_dolt_server_ready"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

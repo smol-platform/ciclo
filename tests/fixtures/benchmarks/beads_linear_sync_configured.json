@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "id": "beads_linear_sync_configured",
+  "title": "Beads-native Linear sync configured",
+  "description": "Beads is configured to sync status to Linear; Ciclo should trigger the Beads-native sync path and audit redacted results.",
+  "tags": ["benchmark", "beads", "linear", "tracker-sync", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/beads-linear-sync",
+    "upstream": "origin/feature/beads-linear-sync",
+    "dirty_files": ["src/beads-tracker-sync.ts"],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [],
+    "claimed": [
+      {
+        "id": "ciclo-sync.3",
+        "title": "Sync progress to Linear",
+        "status": "in_progress",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Progress is ready to be reflected in Linear through Beads-native sync.",
+        "acceptance_criteria": "Ciclo uses Beads sync and does not implement Linear provider logic directly.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["beads", "linear"],
+        "external_refs": ["linear:CIC-123"]
+      }
+    ],
+    "blocked": [],
+    "remote_db": {
+      "mode": "dolt_remote_sync",
+      "health": "healthy",
+      "required": true
+    },
+    "tracker_sync": {
+      "enabled": true,
+      "targets": ["linear"],
+      "last_cursor": "linear-cursor-22",
+      "redacted": true
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-codex",
+      "harness": "codex",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "Codex",
+      "evidence": ["herdr.state:idle", "tracker.linear.configured:true", "beads.tracker_sync.trigger:linear"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "local-codex",
+      "transcript_excerpt": "Linear external ref is configured; Beads-native tracker sync should be triggered.",
+      "artifacts": ["src/beads-tracker-sync.ts", "tests-ts/beads-tracker-sync.test.ts"]
+    }
+  ],
+  "loop": {
+    "id": "beads-linear-sync-demo",
+    "kind": "beads_work",
+    "goal": "Trigger Beads-native Linear sync for redacted task status.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["tracker_sync", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_sync_remote_trackers",
+      "arguments": {
+        "bead_id": "ciclo-sync.3",
+        "targets": ["linear"]
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 17600,
+    "max_tokens": 120000,
+    "memory_summary": "Linear sync is configured through Beads.",
+    "items": [
+      {
+        "source": "tracker_sync",
+        "text": "linear target enabled with redacted Beads status",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["sync_tracker", "report_status"],
+    "evidence_includes": ["tracker.linear.configured:true", "beads.tracker_sync.trigger:linear"],
+    "required_actions": ["trigger_beads_native_sync", "redact_status_payload", "audit_tracker_result"]
+  },
+  "disallowed": {
+    "response_kinds": ["claim_work", "complete", "send_prompt"],
+    "text_includes": ["call Linear API directly", "raw transcript"],
+    "actions": ["direct_linear_provider_call", "sync_without_redaction", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "agent_driver",
+      "model": "fixture",
+      "fixture": "beads_linear_sync_configured"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

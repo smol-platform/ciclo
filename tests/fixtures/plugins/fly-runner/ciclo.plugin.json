@@ -1,0 +1,15 @@
+{
+  "schema": "ciclo.plugin.v1",
+  "name": "@example/ciclo-runner-fly",
+  "displayName": "Example Fly Runner",
+  "version": "1.0.0",
+  "cicloApi": "^0.1",
+  "entrypoint": "./dist/index.js",
+  "capabilities": ["remote-runner"],
+  "runnerKinds": ["fly"],
+  "permissions": {
+    "commands": ["fly"],
+    "network": true,
+    "secrets": ["FLY_API_TOKEN"]
+  }
+}

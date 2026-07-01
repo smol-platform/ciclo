@@ -1,0 +1,7 @@
+{
+  "args": ["herdr", "agent", "explain", "pane-missing", "--json"],
+  "code": 127,
+  "returncode": 127,
+  "stdout": "",
+  "stderr": "herdr binary not found"
+}

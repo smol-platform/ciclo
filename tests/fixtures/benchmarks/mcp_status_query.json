@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "id": "mcp_status_query",
+  "title": "MCP status query returns loop and work state",
+  "description": "A generic MCP client asks for Ciclo status; Ciclo should answer without mutation and include loop, policy, work, and evidence context.",
+  "tags": ["benchmark", "mcp", "status", "read-only", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/mcp-status",
+    "upstream": "origin/feature/mcp-status",
+    "dirty_files": [],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [
+      {
+        "id": "ciclo-mcp.1",
+        "title": "Expose MCP status",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Status should show ready work and policy state.",
+        "acceptance_criteria": "MCP status is read-only and evidence-backed.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["mcp", "status"],
+        "external_refs": []
+      }
+    ],
+    "claimed": [],
+    "blocked": [],
+    "remote_db": {
+      "mode": "local",
+      "health": "healthy",
+      "required": false
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "mcp-client",
+      "harness": "unknown",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "MCP Client",
+      "evidence": ["herdr.state:idle", "mcp.tool:ciclo_status", "mcp.read_only:true"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "unknown",
+      "target": "mcp-client",
+      "transcript_excerpt": "Generic MCP client requested ciclo_status and ciclo_loop_status.",
+      "artifacts": ["src/mcp-contract.ts", "src/mcp-stdio.ts"]
+    }
+  ],
+  "loop": {
+    "id": "mcp-status-demo",
+    "kind": "review",
+    "goal": "Expose Ciclo status through MCP without mutating work.",
+    "harnesses": ["unknown"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["work_claim", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_status",
+      "arguments": {},
+      "expect_mutation": false
+    },
+    {
+      "tool": "ciclo_loop_status",
+      "arguments": {
+        "loop_id": "mcp-status-demo"
+      },
+      "expect_mutation": false
+    }
+  ],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 9200,
+    "max_tokens": 120000,
+    "memory_summary": "Read-only MCP status query.",
+    "items": [
+      {
+        "source": "mcp",
+        "text": "ciclo_status and ciclo_loop_status requested",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["report_status", "wait"],
+    "evidence_includes": ["mcp.tool:ciclo_status", "mcp.read_only:true"],
+    "required_actions": ["return_status_snapshot", "include_policy_state", "avoid_mutation"]
+  },
+  "disallowed": {
+    "response_kinds": ["claim_work", "send_prompt", "complete"],
+    "text_includes": ["claimed as part of status", "mutated while reading"],
+    "actions": ["mutate_on_status_read", "claim_without_request", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "user_driver",
+      "model": "fixture",
+      "fixture": "mcp_status_query"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

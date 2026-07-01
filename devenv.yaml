@@ -1,0 +1,5 @@
+inputs:
+  devenv:
+    url: https://github.com/cachix/devenv/archive/refs/tags/v2.1.2.tar.gz
+  nixpkgs:
+    url: https://github.com/cachix/devenv-nixpkgs/archive/refs/heads/rolling.tar.gz

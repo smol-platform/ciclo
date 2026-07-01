@@ -1,0 +1,10 @@
+{
+  "id": "loop-state-1",
+  "config_id": "review-demo",
+  "status": "ready_for_review",
+  "goal": "Review completed Codex work and ask the operator before mutation.",
+  "active_harness": "codex",
+  "active_work_id": "ciclo-demo",
+  "last_event_kind": "agent.state_changed",
+  "evidence": ["herdr:done", "repo:dirty"]
+}

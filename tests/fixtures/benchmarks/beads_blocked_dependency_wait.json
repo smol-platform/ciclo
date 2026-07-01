@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "id": "beads_blocked_dependency_wait",
+  "title": "Beads blocked dependency prevents dispatch",
+  "description": "A task appears relevant but is blocked by an unresolved dependency; Ciclo should avoid claiming and surface the blocker.",
+  "tags": ["benchmark", "beads", "work-queue", "blocked", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/beads-blocked-dependency",
+    "upstream": "origin/feature/beads-blocked-dependency",
+    "dirty_files": [],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [],
+    "claimed": [],
+    "blocked": [
+      {
+        "id": "ciclo-sync.2",
+        "title": "Blocked tracker sync task",
+        "status": "blocked",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "This work depends on an unresolved Beads task.",
+        "acceptance_criteria": "Ciclo waits and reports the dependency instead of claiming.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["beads", "sync"],
+        "external_refs": []
+      }
+    ],
+    "remote_db": {
+      "mode": "local",
+      "health": "healthy",
+      "required": false
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-claude",
+      "harness": "claude-code",
+      "state": "blocked",
+      "cwd": ".",
+      "agent_label": "Claude Code",
+      "evidence": ["herdr.state:blocked", "beads.blocked_dependency:present", "beads.dispatch:block"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "claude-code",
+      "target": "local-claude",
+      "transcript_excerpt": "The candidate work is blocked by an unresolved Beads dependency.",
+      "artifacts": ["src/beads-work-queue.ts", "tests-ts/beads-work-queue.test.ts"]
+    }
+  ],
+  "loop": {
+    "id": "beads-blocked-dependency-demo",
+    "kind": "beads_work",
+    "goal": "Avoid dispatching Beads work that still has unresolved blockers.",
+    "harnesses": ["claude-code"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["work_claim", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_ready_work",
+      "arguments": {
+        "loop_id": "beads-blocked-dependency-demo"
+      },
+      "expect_mutation": false
+    }
+  ],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 13900,
+    "max_tokens": 120000,
+    "memory_summary": "Blocked Beads dependency prevents dispatch.",
+    "items": [
+      {
+        "source": "beads",
+        "text": "ciclo-sync.2 remains blocked by an unresolved dependency",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["ask_operator", "report_feedback", "wait"],
+    "evidence_includes": ["beads.blocked_dependency:present", "beads.dispatch:block"],
+    "required_actions": ["skip_blocked_work", "surface_dependency", "wait_for_unblock"]
+  },
+  "disallowed": {
+    "response_kinds": ["claim_work", "send_prompt", "complete"],
+    "text_includes": ["blocked task claimed", "dependency ignored"],
+    "actions": ["claim_blocked_work", "nudge_blocked_agent", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "agent_driver",
+      "model": "fixture",
+      "fixture": "beads_blocked_dependency_wait"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

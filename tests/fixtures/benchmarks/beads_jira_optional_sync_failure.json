@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "id": "beads_jira_optional_sync_failure",
+  "title": "Optional Jira sync failure does not block Beads progress",
+  "description": "Jira sync is configured as optional and fails; Ciclo should record retry state and continue local Beads progress without direct provider calls.",
+  "tags": ["benchmark", "beads", "jira", "tracker-sync", "optional-failure", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/beads-jira-optional",
+    "upstream": "origin/feature/beads-jira-optional",
+    "dirty_files": ["src/beads-tracker-sync.ts"],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [],
+    "claimed": [
+      {
+        "id": "ciclo-sync.4",
+        "title": "Handle optional Jira failure",
+        "status": "in_progress",
+        "priority": 2,
+        "issue_type": "task",
+        "description": "Optional Jira sync failed after Beads accepted a progress update.",
+        "acceptance_criteria": "Optional tracker sync failures are audited and retried without blocking Beads work.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["beads", "jira"],
+        "external_refs": ["jira:CIC-456"]
+      }
+    ],
+    "blocked": [],
+    "remote_db": {
+      "mode": "local",
+      "health": "healthy",
+      "required": false
+    },
+    "tracker_sync": {
+      "enabled": true,
+      "targets": ["jira"],
+      "required_targets": [],
+      "optional_targets": ["jira"],
+      "last_cursor": "jira-cursor-8",
+      "last_error": "rate limited",
+      "retry_count": 1
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-codex",
+      "harness": "codex",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "Codex",
+      "evidence": ["herdr.state:idle", "tracker.jira.optional:true", "tracker.jira.sync:failed", "beads.progress:continue"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "local-codex",
+      "transcript_excerpt": "Beads progress update succeeded; optional Jira sync failed with rate limiting.",
+      "artifacts": ["src/beads-tracker-sync.ts", "tests-ts/beads-tracker-sync.test.ts"]
+    }
+  ],
+  "loop": {
+    "id": "beads-jira-optional-demo",
+    "kind": "beads_work",
+    "goal": "Audit optional Jira sync failure while continuing Beads progress.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["tracker_sync", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_sync_remote_trackers",
+      "arguments": {
+        "bead_id": "ciclo-sync.4",
+        "targets": ["jira"]
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 18100,
+    "max_tokens": 120000,
+    "memory_summary": "Optional Jira sync failed and retry state was recorded.",
+    "items": [
+      {
+        "source": "tracker_sync",
+        "text": "jira optional failure recorded; Beads progress remains accepted",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["report_feedback", "update_work"],
+    "evidence_includes": ["tracker.jira.optional:true", "tracker.jira.sync:failed", "beads.progress:continue"],
+    "required_actions": ["record_optional_sync_failure", "increment_retry_state", "continue_beads_progress"]
+  },
+  "disallowed": {
+    "response_kinds": ["ask_operator", "complete", "send_prompt"],
+    "text_includes": ["block all Beads work", "call Jira API directly"],
+    "actions": ["block_on_optional_tracker", "direct_jira_provider_call", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "repo_driver",
+      "model": "fixture",
+      "fixture": "beads_jira_optional_sync_failure"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

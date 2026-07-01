@@ -1,0 +1,3 @@
+Claude Code is working on a test run.
+State: working
+Target: pane-2

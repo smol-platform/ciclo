@@ -1,0 +1,28 @@
+id: deploy-demo
+kind: deploy
+goal: Gate deployment on tests, review, and explicit operator approval.
+harnesses:
+  - claude-code
+  - codex
+dry_run: true
+triggers:
+  - event: agent.state_changed
+    when: state == done
+  - event: repo.changed
+    when: branch == main
+policy:
+  mode: supervised
+  require_approval_for:
+    - deploy
+    - remote_sync
+    - git_push
+  allow_commands:
+    - pytest
+    - just check
+exit_criteria:
+  success:
+    - tests passed
+    - deploy approved
+  failure:
+    - tests failed
+    - approval denied

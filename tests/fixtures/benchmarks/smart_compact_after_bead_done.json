@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "id": "smart_compact_after_bead_done",
+  "title": "Smart compact after Beads task completion",
+  "description": "A Beads task is ready to close after validation; Ciclo should compact the work memory into Beads before handoff.",
+  "tags": ["benchmark", "context", "compaction", "beads", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/context-compaction",
+    "upstream": "origin/feature/context-compaction",
+    "dirty_files": ["src/context-compaction.ts", "tests-ts/context-compaction.test.ts"],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [],
+    "claimed": [
+      {
+        "id": "ciclo-context.2",
+        "title": "Persist context memory after completion",
+        "status": "in_progress",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "The task has validation evidence and needs final memory compaction.",
+        "acceptance_criteria": "Ciclo writes a redacted final summary to Beads before close or handoff.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["context", "beads"],
+        "external_refs": []
+      }
+    ],
+    "blocked": [],
+    "remote_db": {
+      "mode": "dolt_remote_sync",
+      "health": "healthy",
+      "required": true
+    },
+    "tracker_sync": {
+      "enabled": true,
+      "targets": ["linear"],
+      "last_cursor": "cursor-77"
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-codex",
+      "harness": "codex",
+      "state": "done",
+      "cwd": ".",
+      "agent_label": "Codex",
+      "evidence": ["herdr.state:done", "validation:just_check:passed", "context.status:compact_after_task"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "local-codex",
+      "transcript_excerpt": "Implemented compaction and validation passed; final summary still needs to be persisted.",
+      "artifacts": ["src/context-compaction.ts", "tests-ts/context-compaction.test.ts"]
+    }
+  ],
+  "loop": {
+    "id": "smart-compact-done-demo",
+    "kind": "beads_work",
+    "goal": "Persist completed task memory to Beads before closing or handing off.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["task_close", "tracker_sync"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_update_work",
+      "arguments": {
+        "bead_id": "ciclo-context.2",
+        "transition": "completed"
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 93000,
+    "max_tokens": 120000,
+    "memory_summary": "Validation passed and compact-after-task threshold is active.",
+    "items": [
+      {
+        "source": "validation",
+        "text": "just check passed",
+        "sensitive": false
+      },
+      {
+        "source": "beads",
+        "text": "Acceptance criteria satisfied; final summary pending.",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["smart_compact"],
+    "evidence_includes": ["context.status:compact_after_task", "validation:just_check:passed"],
+    "required_actions": ["persist_beads_memory", "include_validation_evidence", "preserve_idempotency_key"]
+  },
+  "disallowed": {
+    "response_kinds": ["complete", "close_work"],
+    "text_includes": ["memory can be discarded", "skip Beads summary"],
+    "actions": ["close_work_without_compaction", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "agent_driver",
+      "model": "fixture",
+      "fixture": "smart_compact_done_transcript"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

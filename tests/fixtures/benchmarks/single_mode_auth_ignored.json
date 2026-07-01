@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "id": "single_mode_auth_ignored",
+  "title": "Single mode ignores supplied auth principal",
+  "description": "A local single-user Ciclo session receives a conflicting principal; Ciclo should map the action to the session owner without auth friction.",
+  "tags": ["benchmark", "auth", "single-mode", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/single-mode-auth",
+    "upstream": "origin/feature/single-mode-auth",
+    "dirty_files": [],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [
+      {
+        "id": "ciclo-auth.1",
+        "title": "Verify single-mode owner mapping",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Single-user mode should ignore caller-supplied principal IDs.",
+        "acceptance_criteria": "Local mutating actions are attributed to the owner principal in single mode.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["auth", "single-mode"],
+        "external_refs": []
+      }
+    ],
+    "claimed": [],
+    "blocked": [],
+    "remote_db": {
+      "mode": "local",
+      "health": "healthy",
+      "required": false
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-cli",
+      "harness": "unknown",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "Ciclo CLI",
+      "evidence": ["herdr.state:idle", "session.mode:single", "principal:owner:zach", "supplied_principal:ignored"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "unknown",
+      "target": "local-cli",
+      "transcript_excerpt": "CLI request supplied principal someone-else, but session mode is single.",
+      "artifacts": ["src/session-access.ts"]
+    }
+  ],
+  "loop": {
+    "id": "single-mode-auth-demo",
+    "kind": "beads_work",
+    "goal": "Keep single-user local actions frictionless while preserving owner attribution.",
+    "harnesses": ["unknown"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_claim_work",
+      "arguments": {
+        "loop_id": "single-mode-auth-demo",
+        "supplied_principal_id": "someone-else"
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach",
+    "supplied_principal_id": "someone-else"
+  },
+  "context": {
+    "used_tokens": 8200,
+    "max_tokens": 120000,
+    "memory_summary": "Single mode maps local action to owner and ignores supplied principal.",
+    "items": [
+      {
+        "source": "auth",
+        "text": "single mode owner mapping",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["claim_work", "accept_work_update"],
+    "evidence_includes": ["session.mode:single", "principal:owner:zach", "supplied_principal:ignored"],
+    "required_actions": ["map_to_owner_principal", "audit_access_acceptance"]
+  },
+  "disallowed": {
+    "response_kinds": ["deny_access", "ask_operator"],
+    "text_includes": ["login required", "principal someone-else accepted"],
+    "actions": ["require_device_login_in_single_mode", "accept_supplied_principal", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "user_driver",
+      "model": "fixture",
+      "fixture": "single_mode_local_cli"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

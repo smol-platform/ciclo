@@ -19,6 +19,8 @@ For first-run setup, use [docs/getting-started.md](/Users/ztaylor/repos/workspac
 - Beads is the durable work queue; Ciclo can use local Beads or a configured Beads remote database so agents centralize ready work, claims, progress, and closures through Beads.
 - Jira and Linear are optional outbound sync targets through Beads-native integrations when configured.
 - Ciclo exposes an MCP control plane for Claude, Codex, and generic harnesses to query status, coordinate work, ask/answer questions, and report feedback to the operator session.
+- Ciclo can own worker sessions: the operator talks to Ciclo, and Ciclo launches Claude Code or Codex workers with scoped prompts, model parameters, lifecycle tracking, and cleanup.
+- Ciclo can plan remote runner sessions for Kubernetes, AWS Lambda MicroVM, and Cloudflare environments, including WireGuard tunnel setup and Herdr attach commands for interactivity.
 - Remote sessions use Herdr remote attach over SSH (`herdr --remote ...`) with explicit registration, heartbeat, scoped access, and stale/lost detection.
 - Ciclo supports `single` mode without auth friction and `multiuser` mode with OAuth device-code login, scoped grants, and per-user authorization for work and commands.
 - Ciclo tracks context size, builds bounded context packs, and smart-compacts completed work into Beads so durable memory stays with the task.
@@ -77,6 +79,81 @@ Start MCP over stdio for Claude, Codex, or a generic MCP client:
 ```bash
 ciclo mcp stdio
 ```
+
+Use Ciclo as the operator interface for managed worker sessions. MCP clients can call:
+
+```text
+ciclo_launch_worker_session
+ciclo_list_worker_sessions
+ciclo_stop_worker_session
+ciclo://worker-sessions
+```
+
+Use `dry_run: true` on `ciclo_launch_worker_session` to inspect the exact Claude Code or Codex launch plan before starting a process. Once launched, workers should report progress, blockers, questions, and closeout evidence back through Ciclo MCP tools.
+
+Plan a remote runner environment through MCP:
+
+```text
+ciclo_launch_remote_runner
+ciclo_list_remote_runners
+ciclo_attach_plan
+ciclo://remote-runners
+```
+
+Supported runner kinds are `kubernetes`, `aws-lambda`, and `cloudflare`. Each kind is implemented by a remote runner provider plugin so new runnable environments can be added without changing the core planner. Each plan includes provider artifacts or commands, a simple WireGuard runner config, the Herdr remote target reachable over that tunnel, and a `ciclo attach` plan for monitoring the overall Ciclo session.
+
+The AWS provider targets Lambda MicroVMs, not legacy Lambda function invocation. It emits `aws lambda-microvms` image creation plus `run-microvm`, `suspend-microvm`, `resume-microvm`, and `terminate-microvm` lifecycle commands.
+
+Install third-party remote runner plugins:
+
+```bash
+ciclo plugin install @acme/ciclo-runner-fly --trust
+ciclo plugin list --compact
+ciclo plugin disable @acme/ciclo-runner-fly
+ciclo plugin enable @acme/ciclo-runner-fly
+```
+
+During plugin development, install from a local package directory:
+
+```bash
+ciclo plugin install @acme/ciclo-runner-fly --path ../ciclo-runner-fly --trust
+```
+
+External plugin packages include `ciclo.plugin.json` and export `activate(api)`. The manifest is validated before code loads, and enabled plugins must be trusted before activation. Plugin config is stored in `.ciclo/plugins.json`; npm-installed plugin packages are placed under `.ciclo/plugins/`.
+
+Minimal plugin entrypoint:
+
+```ts
+import type { CicloPluginApi } from "ciclo/plugin-sdk";
+
+export function activate(api: CicloPluginApi) {
+  api.remoteRunners.register({
+    kind: "fly",
+    name: "fly-machines",
+    executionModel: "fly_machine",
+    plan(input, wireGuard) {
+      return {
+        providerName: "fly-machines",
+        executionModel: "fly_machine",
+        commands: [`fly machines run ${input.image} --name ${input.runnerId}`],
+        artifacts: [],
+        warnings: [],
+        evidence: ["remote.runner.plugin:fly-machines"]
+      };
+    }
+  });
+}
+```
+
+Attach to Ciclo's Herdr session:
+
+```bash
+ciclo attach --session ciclo
+ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo
+ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo --target pane-1
+```
+
+By default, Ciclo names the Herdr/Ciclo session after the repository directory. In this repo the default is `ciclo`. Use `--dry-run --compact` to print the attach command as JSON instead of running Herdr.
 
 Start local MCP over HTTP:
 

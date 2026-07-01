@@ -1,0 +1,7 @@
+{
+  "id": "review-demo",
+  "kind": "review",
+  "goal": "Keep reviewing completed Codex work and ask the operator before mutation.",
+  "harnesses": ["codex", "claude-code"],
+  "dry_run": true
+}

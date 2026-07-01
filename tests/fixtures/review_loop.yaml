@@ -1,0 +1,24 @@
+id: review-demo
+kind: review
+goal: Review completed Codex work and ask the operator before mutation.
+harnesses:
+  - codex
+  - claude-code
+dry_run: true
+triggers:
+  - event: agent.state_changed
+    when: state == done
+  - event: repo.changed
+    when: dirty == true
+policy:
+  mode: dry_run
+  require_approval_for:
+    - prompt_send
+    - task_close
+    - git_commit
+exit_criteria:
+  success:
+    - review summary reported
+    - validation evidence attached
+  failure:
+    - unsafe command requested

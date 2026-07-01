@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "id": "remote_duplicate_claim_prevented",
+  "title": "Remote duplicate Beads claim prevented",
+  "description": "A second remote session attempts to claim a Beads task already owned by an active remote session; Ciclo should reject the duplicate and notify the operator.",
+  "tags": ["benchmark", "remote-sessions", "beads", "duplicate-claim", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/remote-claim-conflict",
+    "upstream": "origin/feature/remote-claim-conflict",
+    "dirty_files": ["src/beads-work-queue.ts", "src/remote-session-registry.ts"],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [
+      {
+        "id": "ciclo-remote.5",
+        "title": "Prevent duplicate remote claim",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Task is visible as ready but active remote ownership must win.",
+        "acceptance_criteria": "Ciclo rejects duplicate active claims and emits operator feedback.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["remote-session", "beads"],
+        "external_refs": []
+      }
+    ],
+    "claimed": [
+      {
+        "id": "ciclo-remote.5",
+        "title": "Prevent duplicate remote claim",
+        "status": "in_progress",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Already assigned to remote-codex-5a.",
+        "acceptance_criteria": "Ciclo rejects duplicate active claims and emits operator feedback.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["remote-session", "beads"],
+        "external_refs": []
+      }
+    ],
+    "blocked": [],
+    "remote_db": {
+      "mode": "shared_dolt_server",
+      "health": "healthy",
+      "required": true
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "remote-codex-5b",
+      "harness": "codex",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "Remote Codex B",
+      "evidence": ["remote.owner.active:remote-codex-5a", "claim.duplicate:prevented", "operator.feedback:queued"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "remote-codex-5b",
+      "transcript_excerpt": "Second remote session attempted to claim ciclo-remote.5.",
+      "artifacts": ["src/beads-work-queue.ts", "tests-ts/beads-work-queue.test.ts"]
+    }
+  ],
+  "loop": {
+    "id": "remote-duplicate-claim-demo",
+    "kind": "beads_work",
+    "goal": "Prevent duplicate Beads ownership across active remote sessions.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["work_claim", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_claim_work",
+      "arguments": {
+        "bead_id": "ciclo-remote.5",
+        "remote_session_id": "remote-codex-5b"
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [
+    {
+      "remote_session_id": "remote-codex-5a",
+      "harness_id": "codex",
+      "bead_id": "ciclo-remote.5",
+      "state": "working",
+      "evidence": ["remote.owner.active:remote-codex-5a"]
+    },
+    {
+      "remote_session_id": "remote-codex-5b",
+      "harness_id": "codex",
+      "bead_id": "ciclo-remote.5",
+      "state": "registered",
+      "evidence": ["remote.claim.requested:remote-codex-5b"]
+    }
+  ],
+  "auth": {
+    "mode": "multiuser",
+    "principal_id": "agent:codex",
+    "grants": ["work:claim", "remote:register"]
+  },
+  "context": {
+    "used_tokens": 27600,
+    "max_tokens": 120000,
+    "memory_summary": "Duplicate remote claim prevented because another active owner exists.",
+    "items": [
+      {
+        "source": "remote_session",
+        "text": "remote-codex-5a already owns ciclo-remote.5",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["report_feedback", "deny_access"],
+    "evidence_includes": ["claim.duplicate:prevented", "remote.owner.active:remote-codex-5a"],
+    "required_actions": ["reject_duplicate_claim", "preserve_existing_owner", "queue_operator_feedback"]
+  },
+  "disallowed": {
+    "response_kinds": ["claim_work", "send_prompt", "complete"],
+    "text_includes": ["assigned to both", "duplicate claim accepted"],
+    "actions": ["duplicate_beads_claim", "release_existing_owner", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "agent_driver",
+      "model": "fixture",
+      "fixture": "remote_duplicate_claim"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

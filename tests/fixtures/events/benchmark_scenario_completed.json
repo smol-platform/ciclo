@@ -1,0 +1,10 @@
+{
+  "kind": "benchmark.scenario_completed",
+  "source": "fixture",
+  "evidence": ["scenario:codex_done_dirty_repo_review"],
+  "payload": {
+    "scenario_id": "codex_done_dirty_repo_review",
+    "deterministic_failures": [],
+    "score": 1.0
+  }
+}

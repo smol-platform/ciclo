@@ -1,0 +1,11 @@
+{
+  "target": "pane-1",
+  "agent": {
+    "label": "codex",
+    "state": "done"
+  },
+  "matched_rule": "codex_done_banner",
+  "visible_flags": ["bottom_buffer_done", "no_active_command"],
+  "explanation": "Codex reports the task is complete.",
+  "evidence": ["bottom buffer shows done", "no active command"]
+}

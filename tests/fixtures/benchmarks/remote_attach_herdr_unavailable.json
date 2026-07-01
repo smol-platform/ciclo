@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "id": "remote_attach_herdr_unavailable",
+  "title": "Remote attach reports missing Herdr",
+  "description": "A Herdr remote attach over SSH fails because Herdr is unavailable on the remote host; Ciclo should surface a setup blocker and preserve ownership.",
+  "tags": ["benchmark", "remote-sessions", "herdr-remote", "ssh", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/remote-herdr-unavailable",
+    "upstream": "origin/feature/remote-herdr-unavailable",
+    "dirty_files": ["src/herdr-adapter.ts", "src/remote-session-registry.ts"],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [],
+    "claimed": [
+      {
+        "id": "ciclo-remote.6",
+        "title": "Handle remote Herdr unavailable",
+        "status": "in_progress",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Remote worker cannot attach because Herdr is missing on the target host.",
+        "acceptance_criteria": "Ciclo reports the setup blocker and keeps Beads ownership intact.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["herdr", "remote-session"],
+        "external_refs": []
+      }
+    ],
+    "blocked": [
+      {
+        "id": "ciclo-remote.6",
+        "title": "Handle remote Herdr unavailable",
+        "status": "blocked",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Remote Herdr is not installed or not on PATH.",
+        "acceptance_criteria": "Ciclo reports the setup blocker and keeps Beads ownership intact.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["herdr", "remote-session", "setup"],
+        "external_refs": []
+      }
+    ],
+    "remote_db": {
+      "mode": "shared_dolt_server",
+      "health": "healthy",
+      "required": true
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "remote-codex",
+      "harness": "codex",
+      "state": "unknown",
+      "cwd": ".",
+      "agent_label": "Remote Codex",
+      "evidence": ["herdr.remote.blocker:missing_remote_herdr", "remote.session.lost:remote-codex-6", "ownership.preserved:true"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "remote-codex",
+      "transcript_excerpt": "ssh target returned herdr: command not found.",
+      "artifacts": ["src/herdr-adapter.ts", "tests-ts/remote-session-registry.test.ts"]
+    }
+  ],
+  "loop": {
+    "id": "remote-herdr-unavailable-demo",
+    "kind": "beads_work",
+    "goal": "Surface remote Herdr setup blockers while preserving Beads ownership.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["remote_register", "send_prompt", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_register_remote_session",
+      "arguments": {
+        "remote_session_id": "remote-codex-6"
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [
+    {
+      "remote_session_id": "remote-codex-6",
+      "harness_id": "codex",
+      "bead_id": "ciclo-remote.6",
+      "state": "lost",
+      "evidence": ["remote.session.lost:remote-codex-6", "herdr.remote.blocker:missing_remote_herdr"]
+    }
+  ],
+  "auth": {
+    "mode": "multiuser",
+    "principal_id": "operator:ada",
+    "grants": ["remote:register", "work:update"]
+  },
+  "context": {
+    "used_tokens": 31000,
+    "max_tokens": 120000,
+    "memory_summary": "Remote Herdr attach failed and ownership remains assigned.",
+    "items": [
+      {
+        "source": "remote_session",
+        "text": "Remote Herdr is not installed or not on PATH.",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["ask_operator", "report_feedback"],
+    "evidence_includes": ["herdr.remote.blocker:missing_remote_herdr", "ownership.preserved:true"],
+    "required_actions": ["surface_setup_blocker", "preserve_beads_ownership", "request_remote_herdr_install"]
+  },
+  "disallowed": {
+    "response_kinds": ["send_prompt", "complete", "claim_work"],
+    "text_includes": ["released ownership", "ignored missing Herdr"],
+    "actions": ["release_remote_ownership", "send_prompt_without_attach", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "repo_driver",
+      "model": "fixture",
+      "fixture": "remote_herdr_unavailable"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

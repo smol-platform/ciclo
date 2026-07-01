@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "id": "remote_session_heartbeat_lost",
+  "title": "Remote session heartbeat lost",
+  "description": "A remote session misses heartbeat deadlines and is marked lost; Ciclo should produce structured handoff feedback with recovery action.",
+  "tags": ["benchmark", "remote-sessions", "heartbeat", "handoff", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/remote-heartbeat",
+    "upstream": "origin/feature/remote-heartbeat",
+    "dirty_files": ["src/remote-session-registry.ts", "src/remote-session-handoff.ts"],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [],
+    "claimed": [
+      {
+        "id": "ciclo-remote.4",
+        "title": "Recover lost remote session",
+        "status": "in_progress",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Remote heartbeat was lost while the task remained owned.",
+        "acceptance_criteria": "Ciclo reports a handoff with blocker and requested recovery action.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["remote-session", "handoff"],
+        "external_refs": []
+      }
+    ],
+    "blocked": [],
+    "remote_db": {
+      "mode": "shared_dolt_server",
+      "health": "healthy",
+      "required": true
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "remote-codex",
+      "harness": "codex",
+      "state": "unknown",
+      "cwd": ".",
+      "agent_label": "Remote Codex",
+      "evidence": ["remote.session.state:lost", "remote.heartbeat:expired", "remote.handoff.state:lost"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "remote-codex",
+      "transcript_excerpt": "Remote heartbeat expired after stale threshold; session marked lost.",
+      "artifacts": ["src/remote-session-registry.ts", "src/remote-session-handoff.ts"]
+    }
+  ],
+  "loop": {
+    "id": "remote-heartbeat-demo",
+    "kind": "beads_work",
+    "goal": "Recover lost remote sessions without dropping active work ownership.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["remote_register", "send_prompt", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_report_feedback",
+      "arguments": {
+        "remote_session_id": "remote-codex-4",
+        "state": "lost"
+      },
+      "expect_mutation": false
+    }
+  ],
+  "remote_sessions": [
+    {
+      "remote_session_id": "remote-codex-4",
+      "harness_id": "codex",
+      "bead_id": "ciclo-remote.4",
+      "state": "lost",
+      "evidence": ["remote.session.lost:remote-codex-4", "ownership.preserved:true"]
+    }
+  ],
+  "auth": {
+    "mode": "multiuser",
+    "principal_id": "agent:codex",
+    "grants": ["work:update", "remote:read"]
+  },
+  "context": {
+    "used_tokens": 33400,
+    "max_tokens": 120000,
+    "memory_summary": "Remote heartbeat was lost and handoff feedback is needed.",
+    "items": [
+      {
+        "source": "remote_session",
+        "text": "remote session lost; preserve ownership and ask operator to restore connectivity",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["report_feedback", "ask_operator"],
+    "evidence_includes": ["remote.session.state:lost", "remote.handoff.state:lost"],
+    "required_actions": ["build_remote_handoff", "preserve_beads_ownership", "request_recovery_action"]
+  },
+  "disallowed": {
+    "response_kinds": ["claim_work", "send_prompt", "complete"],
+    "text_includes": ["heartbeat ignored", "work released"],
+    "actions": ["release_remote_ownership", "send_prompt_without_attach", "close_work_without_validation"]
+  },
+  "drivers": [
+    {
+      "role": "repo_driver",
+      "model": "fixture",
+      "fixture": "remote_heartbeat_lost"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

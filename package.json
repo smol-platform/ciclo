@@ -1,0 +1,36 @@
+{
+  "name": "ciclo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone Ciclo orchestrator agent using Pi as an internal brain provider.",
+  "bin": {
+    "ciclo": "./dist/src/cli.js",
+    "ciclo-demo": "./dist/src/demo.js",
+    "ciclo-mcp-stdio": "./dist/src/mcp-stdio-cli.js",
+    "ciclo-mcp-http": "./dist/src/mcp-http-cli.js"
+  },
+  "exports": {
+    ".": "./dist/src/cli.js",
+    "./plugin-sdk": "./dist/src/plugin-sdk.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "npm run build && node --test dist/tests-ts/*.test.js",
+    "demo": "npm run build && node dist/src/demo.js",
+    "mcp:stdio": "npm run build && node dist/src/mcp-stdio-cli.js",
+    "mcp:http": "npm run build && node dist/src/mcp-http-cli.js"
+  },
+  "devDependencies": {
+    "@types/node": "24.0.7",
+    "typescript": "5.8.3"
+  },
+  "pi": {
+    "extensions": [
+      "./src/pi-extension.ts"
+    ]
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.2"
+  }
+}

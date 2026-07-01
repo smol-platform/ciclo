@@ -1,0 +1,16 @@
+{
+  "kind": "agent.state_changed",
+  "source": "herdr",
+  "normalized_event": {
+    "source": "herdr",
+    "state": "done",
+    "harness": "codex",
+    "target": "pane-1",
+    "evidence": ["herdr:done"]
+  },
+  "evidence": ["herdr:done"],
+  "payload": {
+    "previous_state": "working",
+    "new_state": "done"
+  }
+}

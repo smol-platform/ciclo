@@ -1,0 +1,7 @@
+{
+  "source": "fixture",
+  "state": "done",
+  "harness": "codex",
+  "target": "local-demo",
+  "evidence": ["fixture:codex done", "repo:dirty"]
+}

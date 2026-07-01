@@ -1,0 +1,10 @@
+{
+  "target": "pane-idle",
+  "agent": {
+    "label": "Claude Code",
+    "state": "ready"
+  },
+  "cwd": "/workspace/ciclo",
+  "status": "waiting",
+  "evidence": ["prompt visible", "no active task"]
+}

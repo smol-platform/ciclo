@@ -1,0 +1,10 @@
+{
+  "target": "pane-blocked",
+  "agent": {
+    "label": "Codex",
+    "state": "needs-input"
+  },
+  "working_directory": "/workspace/deploy-service",
+  "reason": "Agent requested operator approval before deploying.",
+  "evidence": ["prompt asks for approval", "no command running"]
+}

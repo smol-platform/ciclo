@@ -1,0 +1,11 @@
+{
+  "kind": "loop.goal_updated",
+  "source": "fixture",
+  "evidence": ["beads:ciclo-ns5.1.3"],
+  "payload": {
+    "loop_id": "review-demo",
+    "previous_goal": "Review work",
+    "new_goal": "Review work and capture validation evidence",
+    "reason": "Acceptance criteria require validation evidence"
+  }
+}

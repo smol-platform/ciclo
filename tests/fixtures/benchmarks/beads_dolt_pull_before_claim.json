@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "id": "beads_dolt_pull_before_claim",
+  "title": "Dolt remote sync pulls before claim",
+  "description": "A Dolt remote-sync Beads workspace has ready work; Ciclo should pull before selection, re-read before claim, and push the claim after mutation.",
+  "tags": ["benchmark", "beads", "remote-db", "dolt-remote-sync", "claim", "mvp", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/beads-dolt-sync",
+    "upstream": "origin/feature/beads-dolt-sync",
+    "dirty_files": [],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run check"],
+    "errors": []
+  },
+  "beads": {
+    "ready": [
+      {
+        "id": "ciclo-beads.2",
+        "title": "Claim after remote pull",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Remote Beads state may have changed since the local workspace was last read.",
+        "acceptance_criteria": "Ciclo pulls before ready selection and again rechecks before claim.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["beads", "dolt", "claim"],
+        "external_refs": []
+      }
+    ],
+    "claimed": [],
+    "blocked": [],
+    "remote_db": {
+      "mode": "dolt_remote_sync",
+      "health": "healthy",
+      "required": true,
+      "remote": "origin",
+      "branch": "main",
+      "last_pull": "2026-06-29T22:31:00Z"
+    },
+    "tracker_sync": {
+      "enabled": false,
+      "last_cursor": null
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "local-codex",
+      "harness": "codex",
+      "state": "idle",
+      "cwd": ".",
+      "agent_label": "Codex",
+      "evidence": ["herdr.state:idle", "bd.dolt.pull:before_select", "bd.show:recheck_before_claim", "bd.dolt.push:after_claim"]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "codex",
+      "target": "local-codex",
+      "transcript_excerpt": "Dolt remote sync is configured; pull-before-select and recheck-before-claim are required.",
+      "artifacts": ["src/beads-dolt-sync.ts", "tests-ts/beads-dolt-sync.test.ts"]
+    }
+  ],
+  "loop": {
+    "id": "beads-dolt-pull-claim-demo",
+    "kind": "beads_work",
+    "goal": "Coordinate Beads claims through pull-before-select and push-after-claim.",
+    "harnesses": ["codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["work_claim", "task_close"],
+    "allow_commands": ["just check", "npm run check"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_claim_work",
+      "arguments": {
+        "bead_id": "ciclo-beads.2",
+        "remote_db_mode": "dolt_remote_sync"
+      },
+      "expect_mutation": true
+    }
+  ],
+  "remote_sessions": [],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 15100,
+    "max_tokens": 120000,
+    "memory_summary": "Dolt remote sync requires pull-before-select and push-after-claim.",
+    "items": [
+      {
+        "source": "beads",
+        "text": "bd dolt pull completed before selecting ciclo-beads.2",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["claim_work", "report_status"],
+    "evidence_includes": ["bd.dolt.pull:before_select", "bd.show:recheck_before_claim", "bd.dolt.push:after_claim"],
+    "required_actions": ["pull_before_select", "recheck_before_claim", "push_after_claim"]
+  },
+  "disallowed": {
+    "response_kinds": ["wait", "complete", "send_prompt"],
+    "text_includes": ["local state is enough", "skip pull"],
+    "actions": ["claim_without_pull", "claim_without_recheck", "skip_push_after_claim"]
+  },
+  "drivers": [
+    {
+      "role": "agent_driver",
+      "model": "fixture",
+      "fixture": "beads_dolt_pull_before_claim"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "correctness", "explainability"]
+    }
+  ]
+}

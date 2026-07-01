@@ -1,0 +1,6 @@
+{
+  "name": "@example/ciclo-runner-fly",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./dist/index.js"
+}

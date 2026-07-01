@@ -1,0 +1,1102 @@
+import assert from "node:assert/strict";
+import { Readable, Writable } from "node:stream";
+import test from "node:test";
+
+import type { AccessGrant } from "../src/access-grants.js";
+import { buildStandaloneStatus } from "../src/app.js";
+import { DeviceAuthorizationFlow } from "../src/auth-device-flow.js";
+import type { BeadsTaskSnapshot } from "../src/beads-adapter.js";
+import { BeadsRemoteTrackerSync } from "../src/beads-tracker-sync.js";
+import type { LoopConfig } from "../src/ciclo-core.js";
+import type { PolicyConfig } from "../src/loop-config.js";
+import { OperatorRoutingStore } from "../src/operator-routing.js";
+import { RemoteRunnerRegistry } from "../src/remote-runner.js";
+import { createSingleUserSession, type CicloSession } from "../src/session-access.js";
+import { TokenRegistry } from "../src/token-store.js";
+import { WorkerSessionSupervisor } from "../src/worker-session-supervisor.js";
+import {
+  handleMcpRequest,
+  runMcpStdioServer,
+  type CicloMcpRuntimeContext,
+  type CicloMcpReadService,
+  type JsonRpcResponse,
+  type LoopStatus
+} from "../src/mcp-stdio.js";
+
+const readyTask: BeadsTaskSnapshot = {
+  id: "ciclo-demo.1",
+  title: "Demo ready work",
+  status: "open",
+  priority: 1,
+  issueType: "task",
+  description: "Ready task fixture.",
+  acceptanceCriteria: "Visible through MCP.",
+  specId: "SPEC-CICLO-001",
+  labels: ["mcp"],
+  dependencies: [],
+  externalRefs: []
+};
+
+function loopStatus(loopId: string): LoopStatus {
+  return {
+    loop: {
+      id: loopId,
+      kind: "review",
+      state: "build_context_pack",
+      harnesses: ["codex", "claude-code"],
+      dryRun: true
+    },
+    goal: "Review completed work.",
+    policy: {
+      mutations: "disabled_in_local_status_mode",
+      networkListener: false,
+      access: "single_user"
+    },
+    currentWork: null,
+    evidence: ["fixture:loop"]
+  };
+}
+
+const service: CicloMcpReadService = {
+  async status() {
+    return buildStandaloneStatus();
+  },
+  async loopStatus(loopId) {
+    return loopStatus(loopId);
+  },
+  async readyWork(limit = 20) {
+    return {
+      selected: readyTask,
+      work: [readyTask].slice(0, limit),
+      skipped: [],
+      evidence: ["fixture:ready"]
+    };
+  },
+  async questions() {
+    return [
+      {
+        questionId: "q-1",
+        loopId: "review-demo",
+        question: "Should Ciclo continue?",
+        urgency: "normal"
+      }
+    ];
+  },
+  async feedback() {
+    return [
+      {
+        feedbackId: "f-1",
+        loopId: "review-demo",
+        severity: "warning",
+        message: "Validation is still pending.",
+        evidence: ["fixture:feedback"]
+      }
+    ];
+  }
+};
+
+const singleRuntime: CicloMcpRuntimeContext = {
+  auth: {
+    session: createSingleUserSession({
+      id: "session-local",
+      ownerPrincipalId: "owner:zach",
+      projectRoot: "/repo"
+    }),
+    origin: "mcp_stdio",
+    grants: [],
+    tokenRegistry: new TokenRegistry({ nowMs: () => 0 })
+  },
+  deviceFlow: new DeviceAuthorizationFlow({
+    verificationUri: "https://ciclo.local/device",
+    nowMs: () => 0,
+    codeBytes: () => Buffer.from("0123456789abcdef0123456789abcdef", "hex")
+  })
+};
+
+function resultOf(response: JsonRpcResponse | undefined): unknown {
+  assert.ok(response);
+  assert.ok("result" in response, JSON.stringify(response));
+  return response.result;
+}
+
+function structuredContent(response: JsonRpcResponse | undefined): Record<string, unknown> {
+  const result = resultOf(response) as Record<string, unknown>;
+  return result.structuredContent as Record<string, unknown>;
+}
+
+function resourcePayload(response: JsonRpcResponse | undefined): Record<string, unknown> {
+  const result = resultOf(response) as Record<string, unknown>;
+  const contents = result.contents as readonly Record<string, unknown>[];
+  assert.equal(contents.length, 1);
+  return JSON.parse(contents[0]?.text as string) as Record<string, unknown>;
+}
+
+function fakeMutationClient(initial: BeadsTaskSnapshot) {
+  const tasks = new Map<string, BeadsTaskSnapshot>([[initial.id, initial]]);
+  const notes: string[] = [];
+  const claims: string[] = [];
+  const closes: string[] = [];
+  return {
+    notes,
+    claims,
+    closes,
+    async ready() {
+      return [...tasks.values()].filter((task) => task.status === "open");
+    },
+    async show(id: string) {
+      const task = tasks.get(id);
+      if (task === undefined) throw new Error(`missing task ${id}`);
+      return task;
+    },
+    async claim(id: string) {
+      const before = await this.show(id);
+      const after = { ...before, status: "in_progress" };
+      tasks.set(id, after);
+      claims.push(id);
+      return after;
+    },
+    async note(id: string, message: string) {
+      await this.show(id);
+      notes.push(`${id}:${message}`);
+    },
+    async close(id: string, reason: string) {
+      const before = await this.show(id);
+      const after = { ...before, status: "closed" };
+      tasks.set(id, after);
+      closes.push(`${id}:${reason}`);
+      return after;
+    }
+  };
+}
+
+const activeLoop: LoopConfig = {
+  id: "review-demo",
+  kind: "beads_work",
+  goal: "Work through Beads.",
+  harnesses: ["codex", "claude-code"],
+  dryRun: false
+};
+
+const supervisedPolicy: PolicyConfig = {
+  mode: "supervised",
+  requireApprovalFor: [],
+  allowCommands: []
+};
+
+test("local MCP stdio handler exposes catalog capabilities", async () => {
+  const initialize = resultOf(
+    await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "initialize" }, service, singleRuntime)
+  ) as Record<string, unknown>;
+  assert.deepEqual(initialize.serverInfo, { name: "ciclo", version: "0.1.0" });
+
+  const tools = resultOf(
+    await handleMcpRequest({ jsonrpc: "2.0", id: 2, method: "tools/list" }, service, singleRuntime)
+  ) as Record<string, unknown>;
+  assert.ok((tools.tools as readonly unknown[]).some((tool) => (tool as { name?: string }).name === "ciclo_status"));
+
+  const resources = resultOf(
+    await handleMcpRequest({ jsonrpc: "2.0", id: 3, method: "resources/list" }, service, singleRuntime)
+  ) as Record<string, unknown>;
+  assert.ok((resources.resources as readonly unknown[]).some((resource) => (resource as { uri?: string }).uri === "ciclo://questions"));
+  assert.ok((resources.resourceTemplates as readonly unknown[]).some((resource) => (resource as { uriTemplate?: string }).uriTemplate === "ciclo://loops/{loop_id}"));
+});
+
+test("local MCP tools answer status loop status and ready work without mutations", async () => {
+  const status = structuredContent(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "ciclo_status", arguments: {} } },
+      service,
+      singleRuntime
+    )
+  );
+  assert.equal(status.app, "ciclo");
+
+  const loop = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
+        params: { name: "ciclo_loop_status", arguments: { loop_id: "review-demo" } }
+      },
+      service,
+      singleRuntime
+    )
+  );
+  assert.deepEqual(loop.policy, {
+    mutations: "disabled_in_local_status_mode",
+    networkListener: false,
+    access: "single_user"
+  });
+
+  const ready = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 6,
+        method: "tools/call",
+        params: { name: "ciclo_list_ready_work", arguments: { limit: 1 } }
+      },
+      service,
+      singleRuntime
+    )
+  );
+  assert.equal((ready.selected as { id?: string }).id, "ciclo-demo.1");
+  assert.deepEqual(ready.evidence, ["fixture:ready"]);
+});
+
+test("MCP worker session tools let Ciclo plan and list managed workers", async () => {
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    workerSupervisor: new WorkerSessionSupervisor("/repo")
+  };
+
+  const launched = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 61,
+        method: "tools/call",
+        params: {
+          name: "ciclo_launch_worker_session",
+          arguments: {
+            harness_id: "codex",
+            loop_id: "loop-1",
+            bead_id: "ciclo-774",
+            model: "gpt-5.5",
+            prompt: "Use Ciclo MCP to complete the work.",
+            dry_run: true
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+
+  assert.equal(launched.harness_id, "codex");
+  assert.equal(launched.state, "planned");
+  assert.equal(launched.command, "codex");
+  assert.ok((launched.args as readonly string[]).includes("gpt-5.5"));
+
+  const listed = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 62,
+        method: "tools/call",
+        params: { name: "ciclo_list_worker_sessions", arguments: {} }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.equal((listed.worker_sessions as readonly unknown[]).length, 1);
+
+  const resource = resourcePayload(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 63, method: "resources/read", params: { uri: "ciclo://worker-sessions" } },
+      service,
+      runtime
+    )
+  );
+  assert.equal((resource.worker_sessions as readonly unknown[]).length, 1);
+});
+
+test("MCP remote runner tools plan WireGuard Herdr runner environments", async () => {
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    remoteRunnerRegistry: new RemoteRunnerRegistry()
+  };
+
+  const launched = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 64,
+        method: "tools/call",
+        params: {
+          name: "ciclo_launch_remote_runner",
+          arguments: {
+            runner_kind: "kubernetes",
+            runner_id: "runner-k8s-1",
+            loop_id: "loop-remote",
+            bead_id: "ciclo-remote.1",
+            harness_id: "codex",
+            image: "ghcr.io/acme/ciclo-runner:latest",
+            repo_path: "/workspace/project",
+            prompt: "Use Ciclo MCP and report progress.",
+            herdr_session: "ciclo",
+            ssh_user: "ciclo",
+            wireguard: {
+              runner_address: "10.66.0.8/24",
+              ciclo_endpoint: "198.51.100.10:51820"
+            },
+            kubernetes: {
+              namespace: "ciclo-runners",
+              job_name: "runner-k8s-1"
+            },
+            dry_run: true
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+
+  assert.equal(launched.accepted, true);
+  assert.equal(launched.runner_kind, "kubernetes");
+  assert.equal(launched.provider_name, "kubernetes-job");
+  assert.equal(launched.execution_model, "kubernetes_job");
+  assert.equal(launched.herdr_remote_target, "ciclo@10.66.0.8:/workspace/project");
+  assert.ok((launched.commands as readonly string[]).some((command) => command.includes("kubectl")));
+
+  const attach = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 65,
+        method: "tools/call",
+        params: {
+          name: "ciclo_attach_plan",
+          arguments: {
+            herdr_target: "ciclo@10.66.0.8:/workspace/project",
+            herdr_session: "ciclo",
+            agent_target: "pane-1"
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.deepEqual(attach.args, [
+    "--remote",
+    "ciclo@10.66.0.8:/workspace/project",
+    "--session",
+    "ciclo",
+    "agent",
+    "attach",
+    "pane-1"
+  ]);
+
+  const listed = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 66,
+        method: "tools/call",
+        params: { name: "ciclo_list_remote_runners", arguments: {} }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.equal((listed.remote_runners as readonly unknown[]).length, 1);
+
+  const resource = resourcePayload(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 67, method: "resources/read", params: { uri: "ciclo://remote-runners" } },
+      service,
+      runtime
+    )
+  );
+  assert.equal((resource.remote_runners as readonly unknown[]).length, 1);
+});
+
+test("local MCP resources expose pending questions and feedback queues", async () => {
+  const questions = resourcePayload(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 7, method: "resources/read", params: { uri: "ciclo://questions" } },
+      service,
+      singleRuntime
+    )
+  );
+  assert.equal(((questions.questions as readonly { questionId: string }[])[0])?.questionId, "q-1");
+
+  const feedback = resourcePayload(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 8, method: "resources/read", params: { uri: "ciclo://feedback" } },
+      service,
+      singleRuntime
+    )
+  );
+  assert.equal(((feedback.feedback as readonly { feedbackId: string }[])[0])?.feedbackId, "f-1");
+});
+
+test("local MCP stdio server processes newline JSON-RPC on stdio", async () => {
+  const input = Readable.from([
+    `${JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list" })}\n`,
+    `${JSON.stringify({ jsonrpc: "2.0", id: 10, method: "resources/read", params: { uri: "ciclo://work/ready" } })}\n`
+  ]);
+  let output = "";
+  const writable = new Writable({
+    write(chunk, _encoding, callback) {
+      output += String(chunk);
+      callback();
+    }
+  });
+
+  await runMcpStdioServer(input, writable, service, singleRuntime);
+
+  const responses = output
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as JsonRpcResponse);
+  assert.equal(responses.length, 2);
+  assert.equal(responses[0]?.id, 9);
+  assert.equal(responses[1]?.id, 10);
+  assert.ok("result" in responses[0]!);
+  assert.ok("result" in responses[1]!);
+});
+
+test("local MCP stdio handler returns JSON-RPC errors for unknown methods and resources", async () => {
+  const unknownMethod = await handleMcpRequest({ jsonrpc: "2.0", id: 11, method: "missing" }, service, singleRuntime);
+  assert.ok(unknownMethod);
+  assert.ok("error" in unknownMethod);
+  assert.equal(unknownMethod.error.code, -32601);
+
+  const unknownResource = await handleMcpRequest(
+    { jsonrpc: "2.0", id: 12, method: "resources/read", params: { uri: "ciclo://missing" } },
+    service,
+    singleRuntime
+  );
+  assert.ok(unknownResource);
+  assert.ok("error" in unknownResource);
+  assert.equal(unknownResource.error.code, -32000);
+});
+
+test("local MCP whoami and access resources report stdio single owner identity", async () => {
+  const whoami = structuredContent(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 13, method: "tools/call", params: { name: "ciclo_whoami", arguments: {} } },
+      service,
+      singleRuntime
+    )
+  );
+  assert.equal(whoami.principal_id, "owner:zach");
+  assert.ok((whoami.capabilities as readonly string[]).includes("access.admin"));
+
+  const access = resourcePayload(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 14, method: "resources/read", params: { uri: "ciclo://session/access" } },
+      service,
+      singleRuntime
+    )
+  );
+  assert.equal((access.access as { principal_id?: string }).principal_id, "owner:zach");
+});
+
+test("local MCP stdio multiuser launcher principal reports effective grants", async () => {
+  const grants: readonly AccessGrant[] = [
+    {
+      principalId: "maintainer:lin",
+      role: "maintainer",
+      scope: { sessionId: "session-shared", loopId: "review-demo" }
+    }
+  ];
+  const multiuser: CicloSession = {
+    id: "session-shared",
+    mode: "multiuser",
+    ownerPrincipalId: "owner:zach",
+    projectRoot: "/repo"
+  };
+  const runtime: CicloMcpRuntimeContext = {
+    auth: {
+      session: multiuser,
+      origin: "mcp_stdio",
+      grants,
+      principalId: "maintainer:lin"
+    }
+  };
+
+  const access = resourcePayload(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 15, method: "resources/read", params: { uri: "ciclo://session/access" } },
+      service,
+      runtime
+    )
+  );
+  const accessView = access.access as { principal_id?: string; capabilities?: readonly string[] };
+  assert.equal(accessView.principal_id, "maintainer:lin");
+  assert.ok(accessView.capabilities?.includes("work.claim"));
+});
+
+test("MCP HTTP multiuser requests fail closed without bearer tokens", async () => {
+  const runtime: CicloMcpRuntimeContext = {
+    auth: {
+      session: {
+        id: "session-shared",
+        mode: "multiuser",
+        ownerPrincipalId: "owner:zach",
+        projectRoot: "/repo"
+      },
+      origin: "mcp_http",
+      grants: []
+    }
+  };
+
+  const response = await handleMcpRequest({ jsonrpc: "2.0", id: 16, method: "tools/list" }, service, runtime);
+
+  assert.ok(response);
+  assert.ok("error" in response);
+  assert.equal(response.error.code, -32001);
+  assert.match(response.error.message, /access denied/);
+});
+
+test("MCP auth device tools issue and store approved bearer tokens", async () => {
+  const registry = new TokenRegistry({ nowMs: () => 0 });
+  const flow = new DeviceAuthorizationFlow({
+    verificationUri: "https://ciclo.local/device",
+    nowMs: () => 0,
+    codeBytes: () => Buffer.from("0123456789abcdef0123456789abcdef", "hex")
+  });
+  const runtime: CicloMcpRuntimeContext = {
+    auth: {
+      session: createSingleUserSession({
+        id: "session-local",
+        ownerPrincipalId: "owner:zach",
+        projectRoot: "/repo"
+      }),
+      origin: "mcp_stdio",
+      grants: [],
+      tokenRegistry: registry
+    },
+    deviceFlow: flow
+  };
+
+  const start = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 17,
+        method: "tools/call",
+        params: {
+          name: "ciclo_auth_device_start",
+          arguments: { client_id: "codex-local", client_kind: "cli", requested_scopes: ["status.read"] }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  const deviceCode = start.device_code as string;
+  assert.equal(flow.approve(deviceCode, "operator:ada"), true);
+
+  const poll = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 18,
+        method: "tools/call",
+        params: {
+          name: "ciclo_auth_device_poll",
+          arguments: { device_code: deviceCode }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  const tokenSet = poll.token_set as { accessToken?: string };
+  assert.equal(poll.status, "approved");
+  assert.equal(registry.introspect(tokenSet.accessToken ?? "").active, true);
+});
+
+test("MCP work mutation tools claim update close audit and record idempotency", async () => {
+  const client = fakeMutationClient(readyTask);
+  const auditLog: NonNullable<CicloMcpRuntimeContext["auditLog"]> = [];
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    beadsClient: client,
+    loop: activeLoop,
+    policy: supervisedPolicy,
+    mutationIdempotencyStore: new Set<string>(),
+    auditLog
+  };
+
+  const claim = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 19,
+        method: "tools/call",
+        params: {
+          name: "ciclo_claim_work",
+          arguments: { loop_id: "review-demo", bead_id: readyTask.id, harness_id: "codex" }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.equal(claim.claimed, true);
+  assert.deepEqual(client.claims, [readyTask.id]);
+  assert.match(client.notes[0] ?? "", /Ciclo claim metadata/);
+
+  const update = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 20,
+        method: "tools/call",
+        params: {
+          name: "ciclo_update_work",
+          arguments: {
+            loop_id: "review-demo",
+            bead_id: readyTask.id,
+            harness_id: "codex",
+            kind: "progress",
+            message: "Implemented the MCP mutation path."
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.equal(update.mutated, true);
+  const noteCountAfterUpdate = client.notes.length;
+
+  const duplicate = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 21,
+        method: "tools/call",
+        params: {
+          name: "ciclo_update_work",
+          arguments: {
+            loop_id: "review-demo",
+            bead_id: readyTask.id,
+            harness_id: "codex",
+            kind: "progress",
+            message: "Implemented the MCP mutation path."
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.equal(duplicate.idempotent, true);
+  assert.equal(client.notes.length, noteCountAfterUpdate);
+
+  const close = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 22,
+        method: "tools/call",
+        params: {
+          name: "ciclo_close_work",
+          arguments: {
+            loop_id: "review-demo",
+            bead_id: readyTask.id,
+            harness_id: "codex",
+            final_summary: "MCP mutation path is complete.",
+            acceptance_evidence: ["claim update close flow covered"],
+            validation_evidence: [{ command: "just check", passed: true, summary: "passed" }]
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.equal(close.mutated, true);
+  assert.deepEqual(client.closes, [`${readyTask.id}:MCP mutation path is complete.`]);
+  assert.ok(auditLog.some((entry) => entry.tool === "ciclo_claim_work"));
+  assert.ok(auditLog.some((entry) => entry.tool === "ciclo_update_work"));
+  assert.ok(auditLog.some((entry) => entry.tool === "ciclo_close_work"));
+});
+
+test("MCP work mutations enforce loop dry-run policy before Beads ownership changes", async () => {
+  const client = fakeMutationClient(readyTask);
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    beadsClient: client,
+    loop: { ...activeLoop, dryRun: true },
+    policy: supervisedPolicy
+  };
+
+  const claim = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 23,
+        method: "tools/call",
+        params: {
+          name: "ciclo_claim_work",
+          arguments: { loop_id: "review-demo", bead_id: readyTask.id, harness_id: "codex" }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+
+  assert.equal(claim.claimed, false);
+  assert.match(claim.reason as string, /dry-run/);
+  assert.deepEqual(client.claims, []);
+});
+
+test("MCP remote tracker sync requires configured Beads integration", async () => {
+  const auditLog: NonNullable<CicloMcpRuntimeContext["auditLog"]> = [];
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    loop: activeLoop,
+    policy: supervisedPolicy,
+    auditLog
+  };
+
+  const result = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 2401,
+        method: "tools/call",
+        params: {
+          name: "ciclo_sync_remote_trackers",
+          arguments: { loop_id: "review-demo", bead_id: readyTask.id, dry_run: false }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+
+  assert.equal(result.synced, false);
+  assert.match((result.policy as { reason?: string }).reason ?? "", /disabled until Beads integration is configured/);
+  assert.ok((result.evidence as readonly string[]).includes("beads.tracker_sync:not_configured"));
+  assert.equal(auditLog[0]?.tool, "ciclo_sync_remote_trackers");
+});
+
+test("MCP remote tracker sync calls configured Beads-native trigger and deduplicates", async () => {
+  const auditLog: NonNullable<CicloMcpRuntimeContext["auditLog"]> = [];
+  const calls: string[][] = [];
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    loop: activeLoop,
+    policy: supervisedPolicy,
+    mutationIdempotencyStore: new Set<string>(),
+    auditLog,
+    remoteTrackerSync: new BeadsRemoteTrackerSync(
+      {
+        root: process.cwd(),
+        targets: [
+          {
+            id: "linear-team",
+            kind: "linear",
+            required: true,
+            syncArgs: ["trackers", "sync", "--target", "linear-team"],
+            statusArgs: ["trackers", "status", "--target", "linear-team"]
+          }
+        ]
+      },
+      async (_cwd, args) => {
+        calls.push([...args]);
+        return {
+          args,
+          code: 0,
+          stdout: JSON.stringify({ cursor: "mcp-cursor" }),
+          stderr: ""
+        };
+      }
+    )
+  };
+
+  const params = {
+    name: "ciclo_sync_remote_trackers",
+    arguments: {
+      loop_id: "review-demo",
+      bead_id: readyTask.id,
+      dry_run: false,
+      idempotency_key: "mcp-sync-1"
+    }
+  };
+  const first = structuredContent(
+    await handleMcpRequest({ jsonrpc: "2.0", id: 2402, method: "tools/call", params }, service, runtime)
+  );
+  const second = structuredContent(
+    await handleMcpRequest({ jsonrpc: "2.0", id: 2403, method: "tools/call", params }, service, runtime)
+  );
+
+  assert.equal(first.synced, true);
+  assert.equal((first.policy as { decision?: string }).decision, "allow");
+  assert.deepEqual(calls[0], ["bd", "trackers", "sync", "--target", "linear-team"]);
+  assert.equal(calls.length, 1);
+  assert.equal(second.idempotent, true);
+  assert.ok(auditLog.some((entry) => entry.tool === "ciclo_sync_remote_trackers"));
+});
+
+test("MCP work mutations enforce scoped multiuser grants", async () => {
+  const client = fakeMutationClient(readyTask);
+  const runtime: CicloMcpRuntimeContext = {
+    auth: {
+      session: {
+        id: "session-shared",
+        mode: "multiuser",
+        ownerPrincipalId: "owner:zach",
+        projectRoot: "/repo"
+      },
+      origin: "mcp_stdio",
+      principalId: "maintainer:lin",
+      grants: [
+        {
+          principalId: "maintainer:lin",
+          role: "maintainer",
+          scope: { sessionId: "session-shared", loopId: "other-loop", beadId: readyTask.id }
+        }
+      ]
+    },
+    beadsClient: client,
+    loop: activeLoop,
+    policy: supervisedPolicy
+  };
+
+  const response = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 24,
+      method: "tools/call",
+      params: {
+        name: "ciclo_claim_work",
+        arguments: { loop_id: "review-demo", bead_id: readyTask.id, harness_id: "codex" }
+      }
+    },
+    service,
+    runtime
+  );
+
+  assert.ok(response);
+  assert.ok("error" in response);
+  assert.equal(response.error.code, -32001);
+  assert.deepEqual(client.claims, []);
+});
+
+test("MCP handler records access audit entries for accepted and denied requests", async () => {
+  const accessAuditLog: NonNullable<CicloMcpRuntimeContext["accessAuditLog"]> = [];
+  const runtime: CicloMcpRuntimeContext = {
+    auth: {
+      session: {
+        id: "session-shared",
+        mode: "multiuser",
+        ownerPrincipalId: "owner:zach",
+        projectRoot: "/repo"
+      },
+      origin: "mcp_stdio",
+      principalId: "maintainer:lin",
+      grants: [
+        {
+          principalId: "maintainer:lin",
+          role: "maintainer",
+          scope: { sessionId: "session-shared", loopId: "review-demo", beadId: readyTask.id }
+        }
+      ]
+    },
+    beadsClient: fakeMutationClient(readyTask),
+    loop: activeLoop,
+    policy: supervisedPolicy,
+    accessAuditLog
+  };
+
+  await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 25,
+      method: "tools/call",
+      params: {
+        name: "ciclo_claim_work",
+        arguments: { loop_id: "review-demo", bead_id: readyTask.id, harness_id: "codex" }
+      }
+    },
+    service,
+    runtime
+  );
+  await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 26,
+      method: "tools/call",
+      params: {
+        name: "ciclo_close_work",
+        arguments: { loop_id: "review-demo", bead_id: "other-task", harness_id: "codex", final_summary: "no" }
+      }
+    },
+    service,
+    runtime
+  );
+
+  assert.equal(accessAuditLog[0]?.decision, "accepted");
+  assert.equal(accessAuditLog[0]?.principalId, "maintainer:lin");
+  assert.equal(accessAuditLog[1]?.decision, "denied");
+  assert.match(accessAuditLog[1]?.reason ?? "", /lacks an unexpired grant/);
+});
+
+test("MCP operator question tools queue dedupe expose and answer questions", async () => {
+  const operatorRouting = new OperatorRoutingStore();
+  const auditLog: NonNullable<CicloMcpRuntimeContext["auditLog"]> = [];
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    operatorRouting,
+    auditLog
+  };
+
+  const asked = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 27,
+        method: "tools/call",
+        params: {
+          name: "ciclo_ask_operator",
+          arguments: {
+            loop_id: "review-demo",
+            bead_id: readyTask.id,
+            harness_id: "codex",
+            question: "Should I continue with the review?",
+            urgency: "blocking",
+            evidence: ["herdr:blocked"]
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  const duplicate = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 28,
+        method: "tools/call",
+        params: {
+          name: "ciclo_ask_operator",
+          arguments: {
+            loop_id: "review-demo",
+            bead_id: readyTask.id,
+            harness_id: "codex",
+            question: "Should I continue with the review?",
+            urgency: "blocking"
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  const questions = resourcePayload(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 29, method: "resources/read", params: { uri: "ciclo://questions" } },
+      service,
+      runtime
+    )
+  );
+  const questionId = asked.question_id as string;
+  const answer = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 30,
+        method: "tools/call",
+        params: {
+          name: "ciclo_answer_question",
+          arguments: {
+            question_id: questionId,
+            answer: "Continue, but keep the change scoped.",
+            evidence: ["operator:confirmed"]
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  const remaining = resourcePayload(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 31, method: "resources/read", params: { uri: "ciclo://questions" } },
+      service,
+      runtime
+    )
+  );
+
+  assert.equal(asked.queued, true);
+  assert.equal(duplicate.deduplicated, true);
+  assert.equal(duplicate.question_id, questionId);
+  assert.equal((questions.questions as readonly unknown[]).length, 1);
+  assert.equal(answer.answered, true);
+  assert.deepEqual(answer.routed_to, {
+    loopId: "review-demo",
+    beadId: readyTask.id,
+    harnessId: "codex"
+  });
+  assert.equal((remaining.questions as readonly unknown[]).length, 0);
+  assert.ok(auditLog.some((entry) => entry.tool === "ciclo_ask_operator"));
+  assert.ok(auditLog.some((entry) => entry.tool === "ciclo_answer_question"));
+});
+
+test("MCP operator feedback tool queues deduplicated feedback and exposes it as a resource", async () => {
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    operatorRouting: new OperatorRoutingStore()
+  };
+
+  const first = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 32,
+        method: "tools/call",
+        params: {
+          name: "ciclo_report_feedback",
+          arguments: {
+            loop_id: "review-demo",
+            bead_id: readyTask.id,
+            severity: "warning",
+            message: "Review found a missing validation step.",
+            evidence: ["review:missing-test"]
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  const second = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 33,
+        method: "tools/call",
+        params: {
+          name: "ciclo_report_feedback",
+          arguments: {
+            loop_id: "review-demo",
+            bead_id: readyTask.id,
+            severity: "warning",
+            message: "Review found a missing validation step.",
+            evidence: ["review:repeat"]
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  const feedback = resourcePayload(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 34, method: "resources/read", params: { uri: "ciclo://feedback" } },
+      service,
+      runtime
+    )
+  );
+
+  assert.equal(first.deduplicated, false);
+  assert.equal(second.deduplicated, true);
+  assert.equal(second.feedback_id, first.feedback_id);
+  const records = feedback.feedback as readonly { feedbackId: string; duplicateCount: number }[];
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.duplicateCount, 1);
+});
