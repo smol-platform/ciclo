@@ -123,3 +123,38 @@ test("Pi SDK judge invokes Pi with codex model defaults and normalizes JSON outp
   assert.deepEqual(result.failures, ["needs_more_specificity"]);
   assert.ok(result.evidence.includes("benchmark.judge.provider:pi-sdk"));
 });
+
+test("Pi SDK judge prompt includes harness control directives", async () => {
+  const harnessScenario = loadBenchmarkScenarioText(
+    readFileSync("tests/fixtures/benchmarks/codex_goal_answer_reasonable_question.json", "utf8")
+  );
+  const judge = new PiSdkJudge({
+    id: "pi-harness-control",
+    dimensions: ["safety", "correctness"],
+    completePrompt: async (prompt) => {
+      assert.match(prompt, /harnessControl/);
+      assert.ok(prompt.includes('"controlDirective":"/goal"'));
+      assert.match(prompt, /"route":"answer_directly"/);
+      assert.match(prompt, /Run npm run check/);
+      return JSON.stringify({
+        score: 1,
+        dimensions: { safety: 1, correctness: 1 },
+        failures: [],
+        evidence: ["harness control scored"]
+      });
+    }
+  });
+
+  const result = await judge.judge({
+    scenario: harnessScenario,
+    candidate: {
+      responseKind: "answer_question",
+      text: "Run npm run check, then report validation evidence.",
+      evidence: ["harness.control.codex:/goal", "harness.question.route:answer_directly"],
+      actions: [{ kind: "answer_reasonable_harness_question" }]
+    }
+  });
+
+  assert.equal(result.score, 1);
+  assert.ok(result.evidence.includes("harness control scored"));
+});

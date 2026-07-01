@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -12,6 +12,8 @@ import {
   parseBenchmarkOptions,
   parseBenchmarkScenarioDir,
   parseMcpHttpOptions,
+  parseMcpInstallOptions,
+  parseSkillInstallOptions,
   type CliIo
 } from "../src/cli.js";
 
@@ -34,6 +36,8 @@ test("CLI prints top-level help and version", async () => {
   assert.match(help.stdout.join("\n"), /Usage: ciclo <command>/);
   assert.match(help.stdout.join("\n"), /attach/);
   assert.match(help.stdout.join("\n"), /mcp http/);
+  assert.match(help.stdout.join("\n"), /mcp install/);
+  assert.match(help.stdout.join("\n"), /skill install/);
 
   const version = captureIo();
   assert.equal(await main(["node", "ciclo", "--version"], version.io), 0);
@@ -60,6 +64,127 @@ test("CLI rejects unknown commands and unexpected status arguments", async () =>
   const badStatus = captureIo();
   assert.equal(await main(["node", "ciclo", "status", "extra"], badStatus.io), 2);
   assert.match(badStatus.stderr.join("\n"), /unexpected status argument: extra/);
+});
+
+test("CLI installs project MCP config for Claude and Codex", async () => {
+  assert.deepEqual(parseMcpInstallOptions([
+    "--client",
+    "all",
+    "--project",
+    "/tmp/project",
+    "--server-name",
+    "ciclo_local",
+    "--command",
+    "/bin/ciclo",
+    "--claude-channel",
+    "--dry-run"
+  ]), {
+    projectRoot: "/tmp/project",
+    clients: ["claude", "codex"],
+    serverName: "ciclo_local",
+    command: "/bin/ciclo",
+    claudeChannel: true,
+    dryRun: true
+  });
+  assert.throws(() => parseMcpInstallOptions(["--client", "wat"]), /--client must be/);
+
+  const before = process.cwd();
+  const tempDir = mkdtempSync(join(tmpdir(), "ciclo-mcp-cli-"));
+  try {
+    process.chdir(tempDir);
+    const install = captureIo();
+    assert.equal(await main([
+      "node",
+      "ciclo",
+      "mcp",
+      "install",
+      "--client",
+      "all",
+      "--command",
+      "ciclo-test",
+      "--claude-channel",
+      "--compact"
+    ], install.io), 0);
+
+    const payload = JSON.parse(install.stdout[0] ?? "{}") as {
+      installed?: boolean;
+      claudeChannel?: { selector?: string };
+      targets?: readonly { client?: string; changed?: boolean }[];
+    };
+    assert.equal(payload.installed, true);
+    assert.equal(payload.claudeChannel?.selector, "server:ciclo");
+    assert.deepEqual(payload.targets?.map((target) => target.client), ["claude", "codex"]);
+    assert.equal(payload.targets?.every((target) => target.changed), true);
+  } finally {
+    process.chdir(before);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("CLI installs Ciclo skills for Claude and Codex", async () => {
+  assert.deepEqual(parseSkillInstallOptions([
+    "--client",
+    "all",
+    "--project",
+    "/tmp/project",
+    "--dry-run"
+  ]), {
+    projectRoot: "/tmp/project",
+    clients: ["claude", "codex"],
+    dryRun: true
+  });
+  assert.throws(() => parseSkillInstallOptions(["--client", "wat"]), /--client must be/);
+
+  const before = process.cwd();
+  const tempDir = mkdtempSync(join(tmpdir(), "ciclo-skill-cli-"));
+  try {
+    process.chdir(tempDir);
+
+    const dryRun = captureIo();
+    assert.equal(await main([
+      "node",
+      "ciclo",
+      "skill",
+      "install",
+      "--client",
+      "all",
+      "--dry-run",
+      "--compact"
+    ], dryRun.io), 0);
+    const dryRunPayload = JSON.parse(dryRun.stdout[0] ?? "{}") as { installed?: boolean; targets?: readonly { dryRun?: boolean }[] };
+    assert.equal(dryRunPayload.installed, false);
+    assert.equal(dryRunPayload.targets?.every((target) => target.dryRun), true);
+    assert.equal(existsSync(join(tempDir, ".claude", "skills", "ciclo-mcp.md")), false);
+
+    const install = captureIo();
+    assert.equal(await main([
+      "node",
+      "ciclo",
+      "skill",
+      "install",
+      "--client",
+      "all",
+      "--compact"
+    ], install.io), 0);
+    const payload = JSON.parse(install.stdout[0] ?? "{}") as {
+      installed?: boolean;
+      targets?: readonly { client?: string; changed?: boolean; paths?: readonly string[] }[];
+    };
+    assert.equal(payload.installed, true);
+    assert.deepEqual(payload.targets?.map((target) => target.client), ["claude", "codex"]);
+    assert.equal(payload.targets?.every((target) => target.changed), true);
+
+    const claudeSkill = join(tempDir, ".claude", "skills", "ciclo-mcp.md");
+    const codexSkill = join(tempDir, ".agents", "skills", "ciclo-mcp", "SKILL.md");
+    const codexReference = join(tempDir, ".agents", "skills", "ciclo-mcp", "references", "mcp-workflows.md");
+    assert.equal(existsSync(claudeSkill), true);
+    assert.equal(existsSync(codexSkill), true);
+    assert.equal(existsSync(codexReference), true);
+    assert.match(readFileSync(codexSkill, "utf8"), /ciclo_launch_worker_session/);
+  } finally {
+    process.chdir(before);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("CLI parses benchmark scenario directory forms", () => {

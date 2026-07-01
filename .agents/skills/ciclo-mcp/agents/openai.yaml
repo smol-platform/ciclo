@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ciclo MCP"
+  short_description: "Use Ciclo MCP as the control plane for Claude and Codex work."
+  default_prompt: "Use Ciclo MCP to inspect status, claim work, ask questions, launch workers, and close work with validation evidence."

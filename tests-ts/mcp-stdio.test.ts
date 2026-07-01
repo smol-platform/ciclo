@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import test from "node:test";
 
@@ -7,13 +11,19 @@ import { buildStandaloneStatus } from "../src/app.js";
 import { DeviceAuthorizationFlow } from "../src/auth-device-flow.js";
 import type { BeadsTaskSnapshot } from "../src/beads-adapter.js";
 import { BeadsRemoteTrackerSync } from "../src/beads-tracker-sync.js";
+import { CicloEventStore } from "../src/ciclo-events.js";
 import type { LoopConfig } from "../src/ciclo-core.js";
 import type { PolicyConfig } from "../src/loop-config.js";
 import { OperatorRoutingStore } from "../src/operator-routing.js";
 import { RemoteRunnerRegistry } from "../src/remote-runner.js";
+import type { RepoBoardProvider, RepoBoardStatus } from "../src/repo-board.js";
 import { createSingleUserSession, type CicloSession } from "../src/session-access.js";
 import { TokenRegistry } from "../src/token-store.js";
-import { WorkerSessionSupervisor } from "../src/worker-session-supervisor.js";
+import {
+  WorkerSessionSupervisor,
+  type WorkerProcessHandle,
+  type WorkerProcessLauncher
+} from "../src/worker-session-supervisor.js";
 import {
   handleMcpRequest,
   runMcpStdioServer,
@@ -113,6 +123,33 @@ const singleRuntime: CicloMcpRuntimeContext = {
   })
 };
 
+class FakeWorkerHandle implements WorkerProcessHandle {
+  readonly pid = 8686;
+  onExit(): void {}
+  stop(): boolean {
+    return true;
+  }
+}
+
+class FakeWorkerLauncher implements WorkerProcessLauncher {
+  launch(): WorkerProcessHandle {
+    return new FakeWorkerHandle();
+  }
+}
+
+class FakeRepoBoardProvider implements RepoBoardProvider {
+  constructor(private readonly prState = "OPEN", private readonly conclusion = "SUCCESS") {}
+
+  statusForBranch(branch: string | undefined): RepoBoardStatus {
+    return {
+      pullRequests: branch === undefined || this.prState === "NONE" ? [] : [{ number: 42, state: this.prState, head_ref: branch, url: "https://example.test/pr/42" }],
+      ci: branch === undefined || this.conclusion === "NONE" ? [] : [{ name: "check", status: "COMPLETED", conclusion: this.conclusion }],
+      mergeState: branch === undefined ? undefined : this.prState === "MERGED" ? "MERGED" : "CLEAN",
+      evidence: branch === undefined ? ["fake.repo_board.branch:missing"] : [`fake.repo_board.branch:${branch}`]
+    };
+  }
+}
+
 function resultOf(response: JsonRpcResponse | undefined): unknown {
   assert.ok(response);
   assert.ok("result" in response, JSON.stringify(response));
@@ -201,6 +238,21 @@ test("local MCP stdio handler exposes catalog capabilities", async () => {
   assert.ok((resources.resourceTemplates as readonly unknown[]).some((resource) => (resource as { uriTemplate?: string }).uriTemplate === "ciclo://loops/{loop_id}"));
 });
 
+test("local MCP stdio handler can expose Claude channel capability", async () => {
+  const initialize = resultOf(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 31, method: "initialize" },
+      service,
+      {
+        ...singleRuntime,
+        claudeChannel: { enabled: true }
+      }
+    )
+  ) as { capabilities?: { experimental?: Record<string, unknown> } };
+
+  assert.deepEqual(initialize.capabilities?.experimental?.["claude/channel"], {});
+});
+
 test("local MCP tools answer status loop status and ready work without mutations", async () => {
   const status = structuredContent(
     await handleMcpRequest(
@@ -210,6 +262,7 @@ test("local MCP tools answer status loop status and ready work without mutations
     )
   );
   assert.equal(status.app, "ciclo");
+  assert.equal(status.live, true);
 
   const loop = structuredContent(
     await handleMcpRequest(
@@ -246,9 +299,13 @@ test("local MCP tools answer status loop status and ready work without mutations
 });
 
 test("MCP worker session tools let Ciclo plan and list managed workers", async () => {
+  const eventStore = new CicloEventStore();
   const runtime: CicloMcpRuntimeContext = {
     ...singleRuntime,
-    workerSupervisor: new WorkerSessionSupervisor("/repo")
+    eventStore,
+    workerSupervisor: new WorkerSessionSupervisor("/repo", undefined, undefined, eventStore),
+    repoBoardProvider: new FakeRepoBoardProvider(),
+    repoBoardEventKeys: new Set<string>()
   };
 
   const launched = structuredContent(
@@ -265,6 +322,10 @@ test("MCP worker session tools let Ciclo plan and list managed workers", async (
             bead_id: "ciclo-774",
             model: "gpt-5.5",
             prompt: "Use Ciclo MCP to complete the work.",
+            extra_args: ["--profile", "bench"],
+            create_worktree: true,
+            worktree_path: "../ciclo-mcp-worker",
+            worktree_branch: "ciclo-mcp-worker",
             dry_run: true
           }
         }
@@ -278,6 +339,10 @@ test("MCP worker session tools let Ciclo plan and list managed workers", async (
   assert.equal(launched.state, "planned");
   assert.equal(launched.command, "codex");
   assert.ok((launched.args as readonly string[]).includes("gpt-5.5"));
+  assert.deepEqual(launched.extra_args, ["--profile", "bench"]);
+  assert.ok((launched.args as readonly string[]).includes("--profile"));
+  assert.equal((launched.worktree as { branch?: string }).branch, "ciclo-mcp-worker");
+  assert.equal(launched.cwd, (launched.worktree as { path?: string }).path);
 
   const listed = structuredContent(
     await handleMcpRequest(
@@ -293,6 +358,56 @@ test("MCP worker session tools let Ciclo plan and list managed workers", async (
   );
   assert.equal((listed.worker_sessions as readonly unknown[]).length, 1);
 
+  const loop = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 621,
+        method: "tools/call",
+        params: { name: "ciclo_loop_status", arguments: { loop_id: "loop-1" } }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.equal((loop.loop as { id?: string }).id, "loop-1");
+  assert.equal((loop.loop as { state?: string }).state, "planned");
+
+  const status = structuredContent(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 622, method: "tools/call", params: { name: "ciclo_status", arguments: {} } },
+      service,
+      runtime
+    )
+  );
+  assert.equal((status.workers as { total?: number }).total, 1);
+
+  const board = structuredContent(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 623, method: "tools/call", params: { name: "ciclo_board", arguments: {} } },
+      service,
+      runtime
+    )
+  );
+  const workerRow = (board.rows as readonly { worker_session_id?: string; pull_requests?: readonly unknown[]; ci?: readonly unknown[]; validation?: readonly unknown[]; merge_state?: string }[])
+    .find((row) => row.worker_session_id === launched.session_id);
+  assert.ok(workerRow);
+  assert.equal(workerRow.pull_requests?.length, 1);
+  assert.equal(workerRow.ci?.length, 1);
+  assert.equal(workerRow.validation?.length, 1);
+  assert.equal(workerRow.merge_state, "CLEAN");
+
+  const events = structuredContent(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 624, method: "tools/call", params: { name: "ciclo_poll_events", arguments: { cursor: 0 } } },
+      service,
+      runtime
+    )
+  );
+  assert.ok((events.events as readonly { type?: string }[]).some((event) => event.type === "worker.state_change"));
+  assert.ok((events.events as readonly { type?: string }[]).some((event) => event.type === "pull_request.opened"));
+  assert.ok((events.events as readonly { type?: string }[]).some((event) => event.type === "validation.passed"));
+
   const resource = resourcePayload(
     await handleMcpRequest(
       { jsonrpc: "2.0", id: 63, method: "resources/read", params: { uri: "ciclo://worker-sessions" } },
@@ -301,6 +416,279 @@ test("MCP worker session tools let Ciclo plan and list managed workers", async (
     )
   );
   assert.equal((resource.worker_sessions as readonly unknown[]).length, 1);
+});
+
+test("MCP board emits merged PR and failed validation events once", async () => {
+  const eventStore = new CicloEventStore();
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    eventStore,
+    workerSupervisor: new WorkerSessionSupervisor("/repo", undefined, undefined, eventStore),
+    repoBoardProvider: new FakeRepoBoardProvider("MERGED", "FAILURE"),
+    repoBoardEventKeys: new Set<string>()
+  };
+
+  const launched = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 631,
+        method: "tools/call",
+        params: {
+          name: "ciclo_launch_worker_session",
+          arguments: {
+            harness_id: "codex",
+            loop_id: "loop-merged",
+            bead_id: "ciclo-merged",
+            prompt: "Use Ciclo MCP to complete the work.",
+            create_worktree: true,
+            worktree_branch: "ciclo-merged",
+            dry_run: true
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+
+  await handleMcpRequest(
+    { jsonrpc: "2.0", id: 632, method: "tools/call", params: { name: "ciclo_board", arguments: {} } },
+    service,
+    runtime
+  );
+  await handleMcpRequest(
+    { jsonrpc: "2.0", id: 633, method: "tools/call", params: { name: "ciclo_board", arguments: {} } },
+    service,
+    runtime
+  );
+
+  const events = structuredContent(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 634, method: "tools/call", params: { name: "ciclo_poll_events", arguments: { cursor: 0 } } },
+      service,
+      runtime
+    )
+  );
+  const matchingEvents = (events.events as readonly { type?: string; workerSessionId?: string }[])
+    .filter((event) => event.workerSessionId === launched.session_id);
+  assert.equal(matchingEvents.filter((event) => event.type === "pull_request.merged").length, 1);
+  assert.equal(matchingEvents.filter((event) => event.type === "validation.failed").length, 1);
+});
+
+test("MCP board flags workers that miss the expected PR artifact", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ciclo-mcp-pr-missing-"));
+  spawnSync("git", ["init", "-b", "main"], { cwd: root, encoding: "utf8" });
+  spawnSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "--allow-empty", "-m", "init"], {
+    cwd: root,
+    encoding: "utf8"
+  });
+  const eventStore = new CicloEventStore();
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    auth: {
+      ...singleRuntime.auth,
+      session: createSingleUserSession({
+        id: "session-local",
+        ownerPrincipalId: "owner:zach",
+        projectRoot: root
+      })
+    },
+    eventStore,
+    workerSupervisor: new WorkerSessionSupervisor(root, new FakeWorkerLauncher(), {
+      now: () => "2026-06-30T00:00:00.000Z"
+    }, eventStore),
+    repoBoardProvider: new FakeRepoBoardProvider("NONE", "NONE"),
+    repoBoardEventKeys: new Set<string>()
+  };
+
+  const launched = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 635,
+        method: "tools/call",
+        params: {
+          name: "ciclo_launch_worker_session",
+          arguments: {
+            harness_id: "codex",
+            loop_id: "loop-missing-pr",
+            bead_id: "ciclo-missing-pr",
+            prompt: "Open a PR when done.",
+            create_worktree: true,
+            worktree_branch: "ciclo-missing-pr"
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+
+  const board = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 636,
+        method: "tools/call",
+        params: { name: "ciclo_board", arguments: { expected_pr_after_ms: 1 } }
+      },
+      service,
+      runtime
+    )
+  );
+  const row = (board.rows as readonly { worker_session_id?: string; artifact_status?: string; recovery_actions?: readonly string[] }[])
+    .find((entry) => entry.worker_session_id === launched.session_id);
+  assert.equal(row?.artifact_status, "expected_pr_missing");
+  assert.ok(row?.recovery_actions?.some((action) => action.includes("relaunch")));
+
+  const events = structuredContent(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 637, method: "tools/call", params: { name: "ciclo_poll_events", arguments: { cursor: 0 } } },
+      service,
+      runtime
+    )
+  );
+  assert.ok((events.events as readonly { type?: string; data?: { kind?: string } }[])
+    .some((event) => event.type === "blocker.raised" && event.data?.kind === "expected_pr_missing"));
+});
+
+test("MCP worker sessions expose waiting heartbeat stalled and usage rollups", async () => {
+  let now = "2026-06-30T00:00:00.000Z";
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    operatorRouting: new OperatorRoutingStore(),
+    workerSupervisor: new WorkerSessionSupervisor("/repo", new FakeWorkerLauncher(), {
+      now: () => now
+    })
+  };
+
+  const launched = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 641,
+        method: "tools/call",
+        params: {
+          name: "ciclo_launch_worker_session",
+          arguments: {
+            harness_id: "codex",
+            loop_id: "loop-live",
+            bead_id: "ciclo-live",
+            prompt: "Use Ciclo MCP to complete the work."
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  const sessionId = launched.session_id as string;
+  assert.equal(launched.state, "running");
+
+  now = "2026-06-30T00:01:00.000Z";
+  const question = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 642,
+        method: "tools/call",
+        params: {
+          name: "ciclo_ask_operator",
+          arguments: {
+            loop_id: "loop-live",
+            bead_id: "ciclo-live",
+            worker_session_id: sessionId,
+            question: "Merge this risky change?",
+            urgency: "blocking"
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.equal(((question.waiting_workers as readonly { state?: string }[])[0])?.state, "waiting_on_operator");
+
+  const waitingStatus = structuredContent(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 643, method: "tools/call", params: { name: "ciclo_status", arguments: {} } },
+      service,
+      runtime
+    )
+  );
+  assert.equal(((waitingStatus.workers as { by_state?: Record<string, number> }).by_state ?? {}).waiting_on_operator, 1);
+
+  now = "2026-06-30T00:02:00.000Z";
+  const answer = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 644,
+        method: "tools/call",
+        params: {
+          name: "ciclo_answer_question",
+          arguments: {
+            question_id: question.question_id,
+            answer: "Proceed after validation passes."
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.equal(((answer.resumed_workers as readonly { state?: string }[])[0])?.state, "running");
+
+  now = "2026-06-30T00:03:00.000Z";
+  const heartbeat = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 645,
+        method: "tools/call",
+        params: {
+          name: "ciclo_heartbeat_worker_session",
+          arguments: {
+            worker_session_id: sessionId,
+            input_tokens: 12,
+            output_tokens: 7,
+            cost_usd: 0.03,
+            evidence: ["progress"]
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.deepEqual(heartbeat.usage, { inputTokens: 12, outputTokens: 7, costUsd: 0.03 });
+
+  now = "2026-06-30T00:20:00.000Z";
+  const board = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 646,
+        method: "tools/call",
+        params: { name: "ciclo_board", arguments: { stale_after_ms: 5 * 60 * 1000 } }
+      },
+      service,
+      runtime
+    )
+  );
+  const rollup = board.rollup as { workers?: { by_state?: Record<string, number>; usage?: Record<string, number> } };
+  assert.equal(rollup.workers?.by_state?.stalled, 1);
+  assert.equal(rollup.workers?.usage?.input_tokens, 12);
+
+  const events = structuredContent(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 647, method: "tools/call", params: { name: "ciclo_poll_events", arguments: { cursor: 0 } } },
+      service,
+      runtime
+    )
+  );
+  assert.ok((events.events as readonly { type?: string }[]).some((event) => event.type === "worker.stalled"));
 });
 
 test("MCP remote runner tools plan WireGuard Herdr runner environments", async () => {

@@ -8,6 +8,7 @@ import { buildStandaloneStatus } from "./app.js";
 import { runBenchmarkSuite, type BenchmarkRunnerOptions } from "./benchmark-runner.js";
 import { runtimeDecision } from "./ciclo-core.js";
 import { runMcpHttpServer, type McpHttpConfig } from "./mcp-http.js";
+import { installCicloMcp, type CicloMcpInstallClient } from "./mcp-install.js";
 import {
   createLocalMcpReadService,
   createLocalMcpRuntimeContextWithPlugins,
@@ -20,6 +21,7 @@ import {
   setPluginEnabled
 } from "./plugin-manager.js";
 import { buildCicloAttachPlan } from "./remote-runner.js";
+import { installCicloSkills, type CicloSkillInstallClient } from "./skill-install.js";
 
 const VERSION = "0.1.0";
 const DEFAULT_BENCHMARK_DIR = "tests/fixtures/benchmarks";
@@ -47,6 +49,21 @@ export interface CliAttachOptions {
   readonly dryRun: boolean;
 }
 
+export interface CliMcpInstallOptions {
+  readonly projectRoot?: string;
+  readonly clients: readonly CicloMcpInstallClient[];
+  readonly serverName?: string;
+  readonly command?: string;
+  readonly claudeChannel?: boolean;
+  readonly dryRun: boolean;
+}
+
+export interface CliSkillInstallOptions {
+  readonly projectRoot?: string;
+  readonly clients: readonly CicloSkillInstallClient[];
+  readonly dryRun: boolean;
+}
+
 interface ParsedArgs {
   readonly command: string;
   readonly args: readonly string[];
@@ -71,8 +88,10 @@ function usage(): string {
     "  benchmark [scenario-dir]       Run benchmark scenarios.",
     "  attach [options]               Attach to Ciclo's Herdr session.",
     "  plugin <subcommand>            Install, list, enable, or disable plugins.",
+    "  skill install [options]        Install Ciclo agent skills into a project.",
     "  mcp stdio                      Start the MCP stdio server.",
     "  mcp http [options]             Start the MCP HTTP server.",
+    "  mcp install [options]          Install Ciclo MCP config into a project.",
     "  demo                           Alias for status.",
     "  help [command]                 Show help.",
     "",
@@ -103,8 +122,10 @@ function usage(): string {
     "  ciclo attach --session ciclo",
     "  ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo",
     "  ciclo plugin install @acme/ciclo-runner-fly --trust",
+    "  ciclo skill install --client all --project /path/to/repo",
     "  ciclo mcp stdio",
-    "  ciclo mcp http --host 127.0.0.1 --port 7331"
+    "  ciclo mcp http --host 127.0.0.1 --port 7331",
+    "  ciclo mcp install --client claude --project /path/to/repo"
   ].join("\n");
 }
 
@@ -160,17 +181,50 @@ function commandHelp(command: string): string {
       "External plugins must include ciclo.plugin.json and export activate(api)."
     ].join("\n");
   }
+  if (command === "skill") {
+    return [
+      "Usage: ciclo skill <install> [options]",
+      "",
+      "Install Ciclo helper skills into a target project.",
+      "",
+      "Commands:",
+      "  ciclo skill install --client all --project /path/to/repo",
+      "  ciclo skill install --client claude --project /path/to/repo",
+      "  ciclo skill install --client codex --project /path/to/repo",
+      "",
+      "Install options:",
+      "  --client <claude|codex|all>    Skill target to update. Default: all.",
+      "  --project <dir>                Target project root. Default: cwd.",
+      "  --dry-run                      Print the install plan without writing files.",
+      "",
+      "Claude skills are written under .claude/skills/.",
+      "Codex-compatible skills are written under .agents/skills/."
+    ].join("\n");
+  }
   if (command === "mcp" || command === "mcp-http" || command === "mcp-stdio") {
     return [
-      "Usage: ciclo mcp <stdio|http> [options]",
+      "Usage: ciclo mcp <stdio|http|install> [options]",
       "",
-      "Start a Ciclo MCP server.",
+      "Start a Ciclo MCP server or install project MCP client configuration.",
       "",
       "Stdio:",
       "  ciclo mcp stdio",
       "",
       "HTTP:",
       "  ciclo mcp http --host 127.0.0.1 --port 7331 --path /mcp",
+      "",
+      "Install:",
+      "  ciclo mcp install --client claude --project /path/to/repo",
+      "  ciclo mcp install --client codex --project /path/to/repo",
+      "  ciclo mcp install --client all --project /path/to/repo",
+      "",
+      "Install options:",
+      "  --client <claude|codex|all>    Client config to update. Default: claude.",
+      "  --project <dir>                Target project root. Default: cwd.",
+      "  --server-name <name>           MCP server name. Default: ciclo.",
+      "  --command <command>            Ciclo command for clients to run. Default: ciclo.",
+      "  --claude-channel               Enable Claude Code channel capability for this MCP server.",
+      "  --dry-run                      Print the install plan without writing files.",
       "",
       "Legacy aliases are still accepted:",
       "  ciclo mcp-stdio",
@@ -346,6 +400,104 @@ export function parseMcpHttpOptions(
   return { host, port, path, maxBodyBytes };
 }
 
+function parseMcpInstallClient(value: string): readonly CicloMcpInstallClient[] {
+  if (value === "claude") return ["claude"];
+  if (value === "codex") return ["codex"];
+  if (value === "all") return ["claude", "codex"];
+  throw new Error("--client must be claude, codex, or all");
+}
+
+function parseSkillInstallClient(value: string): readonly CicloSkillInstallClient[] {
+  if (value === "claude") return ["claude"];
+  if (value === "codex") return ["codex"];
+  if (value === "all") return ["claude", "codex"];
+  throw new Error("--client must be claude, codex, or all");
+}
+
+export function parseMcpInstallOptions(args: readonly string[]): CliMcpInstallOptions {
+  let projectRoot: string | undefined;
+  let clients: readonly CicloMcpInstallClient[] = ["claude"];
+  let serverName: string | undefined;
+  let command: string | undefined;
+  let claudeChannel = false;
+  let dryRun = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--client") {
+      clients = parseMcpInstallClient(requireValue(args, index, arg));
+      index += 1;
+      continue;
+    }
+    if (arg === "--project") {
+      projectRoot = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--server-name") {
+      serverName = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--command") {
+      command = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--claude-channel") {
+      claudeChannel = true;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (arg === "--json" || arg === "--compact") continue;
+    throw new Error(`unknown MCP install option: ${arg}`);
+  }
+
+  return {
+    ...(projectRoot === undefined ? {} : { projectRoot }),
+    clients,
+    ...(serverName === undefined ? {} : { serverName }),
+    ...(command === undefined ? {} : { command }),
+    ...(claudeChannel ? { claudeChannel } : {}),
+    dryRun
+  };
+}
+
+export function parseSkillInstallOptions(args: readonly string[]): CliSkillInstallOptions {
+  let projectRoot: string | undefined;
+  let clients: readonly CicloSkillInstallClient[] = ["claude", "codex"];
+  let dryRun = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--client") {
+      clients = parseSkillInstallClient(requireValue(args, index, arg));
+      index += 1;
+      continue;
+    }
+    if (arg === "--project") {
+      projectRoot = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (arg === "--json" || arg === "--compact") continue;
+    throw new Error(`unknown skill install option: ${arg}`);
+  }
+
+  return {
+    ...(projectRoot === undefined ? {} : { projectRoot }),
+    clients,
+    dryRun
+  };
+}
+
 export function parseAttachOptions(args: readonly string[]): CliAttachOptions {
   let remoteTarget: string | undefined;
   let herdrSession: string | undefined;
@@ -396,7 +548,7 @@ function mcpHttpConfig(options: CliMcpHttpOptions): Partial<McpHttpConfig> {
 
 async function startMcpHttp(args: readonly string[], io: CliIo): Promise<number> {
   const options = parseMcpHttpOptions(args);
-  const root = process.cwd();
+  const root = projectRootFromEnv();
   const server = await runMcpHttpServer(
     mcpHttpConfig(options),
     createLocalMcpReadService(root),
@@ -415,6 +567,10 @@ function formatAddress(address: AddressInfo): string {
   return `${host}:${address.port}`;
 }
 
+function projectRootFromEnv(): string {
+  return process.env.CICLO_PROJECT_ROOT ?? process.cwd();
+}
+
 async function runMcp(args: readonly string[], io: CliIo): Promise<number> {
   const transport = args[0];
   if (transport === undefined || transport === "--help" || transport === "-h") {
@@ -422,7 +578,7 @@ async function runMcp(args: readonly string[], io: CliIo): Promise<number> {
     return 0;
   }
   if (transport === "stdio") {
-    const root = process.cwd();
+    const root = projectRootFromEnv();
     await runMcpStdioServer(
       process.stdin,
       process.stdout,
@@ -433,6 +589,11 @@ async function runMcp(args: readonly string[], io: CliIo): Promise<number> {
   }
   if (transport === "http") {
     return await startMcpHttp(args.slice(1), io);
+  }
+  if (transport === "install") {
+    const options = parseMcpInstallOptions(args.slice(1));
+    printJson(installCicloMcp(options), parseJsonMode(args), io);
+    return 0;
   }
   throw new Error(`unknown MCP transport: ${transport}`);
 }
@@ -518,6 +679,20 @@ function runPlugin(args: readonly string[], io: CliIo): number {
   throw new Error(`unknown plugin subcommand: ${subcommand}`);
 }
 
+function runSkill(args: readonly string[], io: CliIo): number {
+  const subcommand = args[0];
+  if (subcommand === undefined || subcommand === "--help" || subcommand === "-h") {
+    io.stdout(commandHelp("skill"));
+    return 0;
+  }
+  if (subcommand !== "install") {
+    throw new Error(`unknown skill subcommand: ${subcommand}`);
+  }
+  const options = parseSkillInstallOptions(args.slice(1));
+  printJson(installCicloSkills(options), parseJsonMode(args), io);
+  return 0;
+}
+
 export async function main(argv: readonly string[] = process.argv, io: CliIo = defaultIo()): Promise<number> {
   const parsed = parseTopLevel(argv);
   const command = parsed.command;
@@ -566,12 +741,16 @@ export async function main(argv: readonly string[] = process.argv, io: CliIo = d
       return runPlugin(args, io);
     }
 
+    if (command === "skill") {
+      return runSkill(args, io);
+    }
+
     if (command === "mcp") {
       return await runMcp(args, io);
     }
 
     if (command === "mcp-stdio") {
-      const root = process.cwd();
+      const root = projectRootFromEnv();
       await runMcpStdioServer(
         process.stdin,
         process.stdout,

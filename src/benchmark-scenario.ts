@@ -10,8 +10,16 @@ export type BenchmarkScenarioVersion = 1;
 export interface BenchmarkHarnessContext {
   readonly harnessId: HarnessId;
   readonly target: string;
+  readonly controlDirective?: "/loop" | "/goal";
+  readonly controllingSession?: boolean;
   readonly transcriptExcerpt?: string;
   readonly prompt?: string;
+  readonly question?: {
+    readonly text: string;
+    readonly answerable: boolean;
+    readonly expectedAnswer?: string;
+    readonly route: "answer_directly" | "ask_operator";
+  };
   readonly artifacts: readonly string[];
 }
 
@@ -167,6 +175,27 @@ function harnessId(value: string, path: string): HarnessId {
   throw new BenchmarkScenarioError(`${path} must be claude-code, codex, pi, or unknown`);
 }
 
+function controlDirective(value: unknown, path: string): BenchmarkHarnessContext["controlDirective"] {
+  if (value === undefined) return undefined;
+  if (value === "/loop" || value === "/goal") return value;
+  throw new BenchmarkScenarioError(`${path} must be /loop or /goal`);
+}
+
+function harnessQuestion(value: unknown, path: string): BenchmarkHarnessContext["question"] {
+  if (value === undefined) return undefined;
+  const record = asRecord(value, path);
+  const route = optionalStringValue(record, "route") ?? (booleanValue(record, "answerable", false) ? "answer_directly" : "ask_operator");
+  if (route !== "answer_directly" && route !== "ask_operator") {
+    throw new BenchmarkScenarioError(`${path}.route must be answer_directly or ask_operator`);
+  }
+  return {
+    text: stringValue(record, "text", path),
+    answerable: booleanValue(record, "answerable", false),
+    expectedAnswer: optionalStringValue(record, "expected_answer"),
+    route
+  };
+}
+
 function taskSnapshot(record: Record<string, unknown>, path: string): BeadsTaskSnapshot {
   return {
     id: stringValue(record, "id", path),
@@ -289,8 +318,11 @@ export function benchmarkScenarioFromObject(raw: Record<string, unknown>): Bench
     harnessContext: recordList(raw.harness_context, "harness_context").map((item, index) => ({
       harnessId: harnessId(stringValue(item, "harness_id", `harness_context[${index}]`), `harness_context[${index}].harness_id`),
       target: stringValue(item, "target", `harness_context[${index}]`),
+      controlDirective: controlDirective(item.control_directive, `harness_context[${index}].control_directive`),
+      controllingSession: booleanValue(item, "controlling_session", false),
       transcriptExcerpt: optionalStringValue(item, "transcript_excerpt"),
       prompt: optionalStringValue(item, "prompt"),
+      question: harnessQuestion(item.question, `harness_context[${index}].question`),
       artifacts: stringList(item.artifacts, `harness_context[${index}].artifacts`)
     })),
     loop: loopConfig(asRecord(raw.loop, "loop")),

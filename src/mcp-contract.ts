@@ -106,7 +106,10 @@ export const cicloMcpTools: readonly McpToolContract[] = [
   {
     name: "ciclo_status",
     description: "Return overall loop, Beads, Herdr, sync, access, and remote-session status.",
-    inputSchema: objectSchema("Optional status filter.", { include_remote: booleanSchema("Include remote sessions.") }),
+    inputSchema: objectSchema("Optional status filter.", {
+      include_remote: booleanSchema("Include remote sessions."),
+      stale_after_ms: { type: "number", description: "Mark running workers stalled after this many milliseconds without heartbeat." }
+    }),
     outputSchema: objectSchema("Overall Ciclo status.", {
       loops: { type: "array", items: { type: "object" } },
       beads: { type: "object" },
@@ -130,6 +133,38 @@ export const cicloMcpTools: readonly McpToolContract[] = [
     permission: permission("read_loop", "status.read", true),
     sideEffects: ["none"],
     audit: audit("mcp.loop_read", ["principal_id", "loop_id"])
+  },
+  {
+    name: "ciclo_poll_events",
+    description: "Poll Ciclo runtime events after a cursor: worker state changes, Beads mutations, blockers, validation, questions, feedback, and tracker sync.",
+    inputSchema: objectSchema("Event poll request.", {
+      cursor: { type: "number", description: "Last seen event cursor. Use 0 for the first poll." },
+      limit: { type: "number", description: "Maximum events to return." }
+    }),
+    outputSchema: objectSchema("Event poll result.", {
+      cursor: { type: "number" },
+      next_cursor: { type: "number" },
+      events: { type: "array", items: { type: "object" } }
+    }),
+    permission: permission("read_status", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.events_polled", ["principal_id", "session_id"])
+  },
+  {
+    name: "ciclo_board",
+    description: "Return a joined board view of Beads work, worker sessions, branches/worktrees, pending questions, PR placeholders, and validation placeholders.",
+    inputSchema: objectSchema("Board request.", {
+      stale_after_ms: { type: "number", description: "Mark running workers stalled after this many milliseconds without heartbeat." },
+      expected_pr_after_ms: { type: "number", description: "Raise a board blocker when a worker branch has no PR after this many milliseconds." }
+    }),
+    outputSchema: objectSchema("Ciclo board.", {
+      rows: { type: "array", items: { type: "object" } },
+      rollup: { type: "object" },
+      evidence: arrayOfStrings("Board evidence.")
+    }),
+    permission: permission("read_status", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.board_read", ["principal_id", "session_id"])
   },
   {
     name: "ciclo_list_ready_work",
@@ -229,6 +264,7 @@ export const cicloMcpTools: readonly McpToolContract[] = [
     inputSchema: objectSchema("Question request.", {
       loop_id: loopId,
       bead_id: beadId,
+      worker_session_id: stringSchema("Ciclo worker session asking the question."),
       question: stringSchema("Question text."),
       urgency: { type: "string", enum: ["low", "normal", "high", "blocking"] }
     }, ["question"]),
@@ -427,6 +463,7 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       loop_id: loopId,
       bead_id: beadId,
       prompt: stringSchema("Bounded worker prompt."),
+      extra_args: arrayOfStrings("Additional harness CLI arguments inserted before the final prompt argument."),
       model: stringSchema("Harness model id."),
       effort: stringSchema("Reasoning or effort level."),
       cwd: stringSchema("Worker cwd."),
@@ -434,24 +471,65 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       dry_run: booleanSchema("Plan the launch without starting the process."),
       permission_mode: stringSchema("Claude permission mode."),
       sandbox: stringSchema("Codex sandbox mode."),
-      approval_policy: stringSchema("Codex approval policy.")
+      approval_policy: stringSchema("Codex approval policy."),
+      isolation: { type: "string", enum: ["none", "worktree"], description: "Optional launch isolation mode. worktree creates an isolated worktree for the worker." },
+      create_worktree: booleanSchema("Create a git worktree and launch the worker from it."),
+      worktree_path: stringSchema("Optional worktree path. Relative paths are resolved from cwd."),
+      worktree_branch: stringSchema("Optional branch to create for the worktree."),
+      worktree_base: stringSchema("Optional base revision for the worktree."),
+      worktree_force: booleanSchema("Pass --force to git worktree add.")
     }, ["harness_id", "loop_id", "prompt"]),
     outputSchema: objectSchema("Worker session launch result.", {
       session_id: stringSchema("Ciclo worker session id."),
       state: stringSchema("Worker lifecycle state."),
+      launch_mode: stringSchema("process or herdr_pane."),
       command: stringSchema("Executable."),
       args: arrayOfStrings("Executable arguments."),
+      extra_args: arrayOfStrings("Additional caller-supplied harness arguments."),
+      cwd: stringSchema("Worker cwd."),
+      worktree: objectSchema("Created or planned worktree.", {
+        create: booleanSchema("Whether Ciclo creates the worktree."),
+        path: stringSchema("Worktree path."),
+        branch: stringSchema("Worktree branch."),
+        base: stringSchema("Worktree base revision."),
+        force: booleanSchema("Whether --force is used.")
+      }),
       pid: { type: "number", description: "Process id when launched." },
       evidence: arrayOfStrings("Launch evidence.")
     }),
     permission: permission("send_prompt", "work.update"),
     sideEffects: ["worker_session_update", "harness_dispatch"],
-    audit: audit("mcp.worker_session_launched", ["principal_id", "loop_id", "bead_id", "harness_id"], ["prompt"])
+    audit: audit("mcp.worker_session_launched", ["principal_id", "loop_id", "bead_id", "harness_id"], ["prompt", "extra_args"])
+  },
+  {
+    name: "ciclo_heartbeat_worker_session",
+    description: "Record worker liveness, optional waiting/running state, and token/cost usage for a Ciclo-managed worker session.",
+    inputSchema: objectSchema("Worker heartbeat request.", {
+      worker_session_id: stringSchema("Ciclo worker session id."),
+      state: { type: "string", enum: ["running", "waiting_on_operator"] },
+      input_tokens: { type: "number", description: "Input token delta since the previous heartbeat." },
+      output_tokens: { type: "number", description: "Output token delta since the previous heartbeat." },
+      cost_usd: { type: "number", description: "Cost delta in USD since the previous heartbeat." },
+      evidence: arrayOfStrings("Heartbeat evidence.")
+    }, ["worker_session_id"]),
+    outputSchema: objectSchema("Worker heartbeat result.", {
+      session_id: stringSchema("Ciclo worker session id."),
+      state: stringSchema("Worker lifecycle state."),
+      last_heartbeat_at: stringSchema("Last heartbeat timestamp."),
+      state_entered_at: stringSchema("Current state entry timestamp."),
+      usage: { type: "object" },
+      evidence: arrayOfStrings("Heartbeat evidence.")
+    }),
+    permission: permission("send_prompt", "work.update"),
+    sideEffects: ["worker_session_update"],
+    audit: audit("mcp.worker_session_heartbeat", ["principal_id", "worker_session_id", "state"], ["evidence"])
   },
   {
     name: "ciclo_list_worker_sessions",
     description: "List Ciclo-managed Claude Code and Codex worker sessions.",
-    inputSchema: objectSchema("Worker session list request.", {}),
+    inputSchema: objectSchema("Worker session list request.", {
+      stale_after_ms: { type: "number", description: "Mark running workers stalled after this many milliseconds without heartbeat." }
+    }),
     outputSchema: objectSchema("Worker sessions.", {
       worker_sessions: { type: "array", items: { type: "object" } }
     }),
@@ -584,6 +662,30 @@ export const cicloMcpResources: readonly McpResourceContract[] = [
     permission: permission("read_loop", "status.read", true),
     cachePolicy: "short_poll",
     audit: audit("mcp.resource.loop", ["principal_id", "loop_id"])
+  },
+  {
+    uriTemplate: "ciclo://events",
+    description: "Pollable Ciclo runtime event stream snapshot.",
+    outputSchema: objectSchema("Event stream snapshot.", {
+      cursor: { type: "number" },
+      next_cursor: { type: "number" },
+      events: { type: "array", items: { type: "object" } }
+    }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.events", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://board",
+    description: "Joined Beads worker branch PR validation board.",
+    outputSchema: objectSchema("Ciclo board.", {
+      rows: { type: "array", items: { type: "object" } },
+      rollup: { type: "object" },
+      evidence: arrayOfStrings("Board evidence.")
+    }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.board", ["principal_id"])
   },
   {
     uriTemplate: "ciclo://work/ready",

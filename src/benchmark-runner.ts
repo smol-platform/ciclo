@@ -60,6 +60,49 @@ function scenarioHasAccessApproval(scenario: BenchmarkScenarioFixture): boolean 
   return evidence.some((item) => item === "access.decision:allow" || item.startsWith("owner.grant:"));
 }
 
+function harnessControlEvidence(scenario: BenchmarkScenarioFixture): readonly string[] {
+  return scenario.harnessContext.flatMap((context) => [
+    ...(context.controlDirective === undefined
+      ? []
+      : [
+          `harness.control.${context.harnessId}:${context.controlDirective}`,
+          `harness.control.target:${context.target}`
+        ]),
+    ...(context.controllingSession ? [`harness.control.controlling_session:${context.target}`] : []),
+    ...(context.question === undefined
+      ? []
+      : [
+          `harness.question.route:${context.question.route}`,
+          `harness.question.answerable:${context.question.answerable}`
+        ])
+  ]);
+}
+
+function harnessControlActions(scenario: BenchmarkScenarioFixture): readonly string[] {
+  return scenario.harnessContext.flatMap((context) => [
+    ...(context.controlDirective === "/loop" ? ["use_claude_loop_directive"] : []),
+    ...(context.controlDirective === "/goal" ? ["use_codex_goal_directive"] : []),
+    ...(context.question?.route === "answer_directly" ? ["answer_reasonable_harness_question"] : []),
+    ...(context.question?.route === "ask_operator" ? ["surface_problem_to_controlling_session"] : [])
+  ]);
+}
+
+function harnessControlText(scenario: BenchmarkScenarioFixture): string {
+  const parts = scenario.harnessContext.flatMap((context) => [
+    ...(context.controlDirective === undefined
+      ? []
+      : [`Use ${context.controlDirective} for ${context.harnessId} target ${context.target}.`]),
+    ...(context.question === undefined
+      ? []
+      : [
+          context.question.route === "answer_directly"
+            ? `Answer harness question from context: ${context.question.expectedAnswer ?? context.question.text}`
+            : `Surface harness question to controlling session: ${context.question.text}`
+        ])
+  ]);
+  return parts.join(" ");
+}
+
 export function loadBenchmarkScenarioSuite(
   scenarioDir = defaultScenarioDir
 ): readonly BenchmarkScenarioFixture[] {
@@ -77,23 +120,26 @@ export function buildFixtureCandidate(scenario: BenchmarkScenarioFixture): Bench
     ...scenario.herdrEvents.flatMap((event) => event.evidence),
     ...scenario.remoteSessions.flatMap((session) => session.evidence),
     ...scenario.workerSessions.flatMap((session) => session.evidence),
+    ...harnessControlEvidence(scenario),
     `repo.dirty_files:${scenario.repo.dirtyFiles.length}`,
     `benchmark.scenario:${scenario.id}`
   ];
-  const actions = scenario.expected.requiredActions.map((kind) => ({
-    kind,
-    scope: "loop" as const,
-    approved,
-    idempotencyKey: `${scenario.id}:${kind}`
-  }));
+  const actions = [...new Set([...scenario.expected.requiredActions, ...harnessControlActions(scenario)])]
+    .map((kind) => ({
+      kind,
+      scope: "loop" as const,
+      approved,
+      idempotencyKey: `${scenario.id}:${kind}`
+    }));
 
   return {
     responseKind,
     text: [
       `Scenario ${scenario.id} response: ${responseKind}.`,
       `Required actions: ${scenario.expected.requiredActions.join(", ") || "none"}.`,
+      harnessControlText(scenario),
       "Acceptance and validation evidence remain required before completion."
-    ].join(" "),
+    ].filter((part) => part.length > 0).join(" "),
     evidence,
     actions,
     stateFingerprint: scenario.herdrEvents.at(-1) === undefined

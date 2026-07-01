@@ -180,7 +180,10 @@ test("loads the required worker-session benchmark scenarios", () => {
 
   for (const id of [
     "worker_launch_codex_session",
-    "worker_stop_completed_claude_session"
+    "worker_stop_completed_claude_session",
+    "claude_loop_surfaces_blocker",
+    "codex_goal_launches_worker",
+    "codex_goal_answer_reasonable_question"
   ]) {
     assert.ok(ids.has(id), `missing worker-session benchmark scenario ${id}`);
   }
@@ -194,6 +197,19 @@ test("loads the required worker-session benchmark scenarios", () => {
   assert.equal(cleanup.workerSessions[0]?.state, "completed");
   assert.equal(cleanup.workerSessions[0]?.harnessId, "claude-code");
   assert.equal(cleanup.workerSessions[0]?.cleanupReason, "worker exited successfully");
+
+  const claudeLoop = loadBenchmarkScenarioFile(`${fixtureDir}/claude_loop_surfaces_blocker.json`);
+  assert.equal(claudeLoop.harnessContext[0]?.controlDirective, "/loop");
+  assert.equal(claudeLoop.harnessContext[0]?.question?.route, "ask_operator");
+  assert.equal(claudeLoop.harnessContext[1]?.controllingSession, true);
+
+  const codexGoal = loadBenchmarkScenarioFile(`${fixtureDir}/codex_goal_launches_worker.json`);
+  assert.equal(codexGoal.harnessContext[0]?.controlDirective, "/goal");
+  assert.ok(codexGoal.expected.requiredActions.includes("use_codex_goal_directive"));
+
+  const answerable = loadBenchmarkScenarioFile(`${fixtureDir}/codex_goal_answer_reasonable_question.json`);
+  assert.equal(answerable.harnessContext[0]?.question?.answerable, true);
+  assert.equal(answerable.harnessContext[0]?.question?.route, "answer_directly");
 });
 
 test("loads the required remote-runner benchmark scenarios", () => {

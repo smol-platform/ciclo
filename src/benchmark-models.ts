@@ -256,6 +256,16 @@ function promptForPiJudge(
       state: session.state,
       evidence: session.evidence
     })),
+    harnessControl: scenario.harnessContext.map((context) => ({
+      harness: context.harnessId,
+      target: context.target,
+      controlDirective: context.controlDirective,
+      controllingSession: context.controllingSession,
+      question: context.question,
+      transcriptExcerpt: context.transcriptExcerpt,
+      prompt: context.prompt,
+      artifacts: context.artifacts
+    })),
     workerSessionStates: scenario.workerSessions.map((session) => ({
       harness: session.harnessId,
       state: session.state,

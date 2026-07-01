@@ -8,6 +8,7 @@ export interface OperatorRouteContext {
   readonly beadId?: string;
   readonly harnessId?: string;
   readonly remoteSessionId?: string;
+  readonly workerSessionId?: string;
 }
 
 export interface PendingQuestionRecord extends OperatorRouteContext {
@@ -113,15 +114,18 @@ function context(input: OperatorRouteContext): OperatorRouteContext {
     beadId?: string;
     harnessId?: string;
     remoteSessionId?: string;
+    workerSessionId?: string;
   } = {};
   const loopId = clean(input.loopId);
   const beadId = clean(input.beadId);
   const harnessId = clean(input.harnessId);
   const remoteSessionId = clean(input.remoteSessionId);
+  const workerSessionId = clean(input.workerSessionId);
   if (loopId !== undefined) route.loopId = loopId;
   if (beadId !== undefined) route.beadId = beadId;
   if (harnessId !== undefined) route.harnessId = harnessId;
   if (remoteSessionId !== undefined) route.remoteSessionId = remoteSessionId;
+  if (workerSessionId !== undefined) route.workerSessionId = workerSessionId;
   return route;
 }
 
@@ -143,7 +147,8 @@ function routeEvidence(prefix: string, route: OperatorRouteContext): readonly st
     route.loopId === undefined ? undefined : `${prefix}.loop:${route.loopId}`,
     route.beadId === undefined ? undefined : `${prefix}.bead:${route.beadId}`,
     route.harnessId === undefined ? undefined : `${prefix}.harness:${route.harnessId}`,
-    route.remoteSessionId === undefined ? undefined : `${prefix}.remote_session:${route.remoteSessionId}`
+    route.remoteSessionId === undefined ? undefined : `${prefix}.remote_session:${route.remoteSessionId}`,
+    route.workerSessionId === undefined ? undefined : `${prefix}.worker_session:${route.workerSessionId}`
   ].filter((item): item is string => item !== undefined);
 }
 

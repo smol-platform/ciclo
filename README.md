@@ -8,7 +8,7 @@ The first specification is [SPEC-CICLO-001: Agentic Babysitter Harness](/Users/z
 
 Operator runbooks for review, deploy, benchmark, approval, remote, multi-user, recovery, and closeout workflows are in [docs/operator-workflows.md](/Users/ztaylor/repos/workspaces/ciclo/docs/operator-workflows.md).
 
-For first-run setup, use [docs/getting-started.md](/Users/ztaylor/repos/workspaces/ciclo/docs/getting-started.md). For the shortest executable path through a local checkout, use [EGG.md](/Users/ztaylor/repos/workspaces/ciclo/EGG.md).
+For first-run setup, use [docs/getting-started.md](docs/getting-started.md). To connect an existing repository so Claude can drive work through Ciclo, use [docs/onboarding-project.md](docs/onboarding-project.md).
 
 ## Development Model
 
@@ -80,16 +80,42 @@ Start MCP over stdio for Claude, Codex, or a generic MCP client:
 ciclo mcp stdio
 ```
 
+Install Ciclo into a target project's MCP client config:
+
+```bash
+ciclo mcp install --client claude --project /path/to/project
+ciclo mcp install --client all --project /path/to/project --dry-run --compact
+ciclo mcp install --client claude --project /path/to/project --claude-channel
+```
+
+Claude project installs update `.mcp.json`; Codex installs update `.codex/config.toml`. The generated config sets `CICLO_PROJECT_ROOT` so the MCP server coordinates against the target repo even when launched by the client.
+
+For Claude Code channel preview workflows, add `--claude-channel`. Ciclo writes `CICLO_CLAUDE_CHANNEL=true` into the Claude MCP server config and returns the Claude launch selector, for example `--dangerously-load-development-channels server:ciclo`.
+
+Install Ciclo's agent skill guidance into the same target project:
+
+```bash
+ciclo skill install --client all --project /path/to/project
+ciclo skill install --client codex --project /path/to/project --dry-run --compact
+```
+
+Claude skill installs write `.claude/skills/ciclo-mcp.md`; Codex-compatible installs write `.agents/skills/ciclo-mcp/`.
+
 Use Ciclo as the operator interface for managed worker sessions. MCP clients can call:
 
 ```text
 ciclo_launch_worker_session
+ciclo_heartbeat_worker_session
 ciclo_list_worker_sessions
 ciclo_stop_worker_session
+ciclo_poll_events
+ciclo_board
 ciclo://worker-sessions
+ciclo://events
+ciclo://board
 ```
 
-Use `dry_run: true` on `ciclo_launch_worker_session` to inspect the exact Claude Code or Codex launch plan before starting a process. Once launched, workers should report progress, blockers, questions, and closeout evidence back through Ciclo MCP tools.
+Use `dry_run: true` on `ciclo_launch_worker_session` to inspect the exact Claude Code or Codex launch plan before starting a process. Pass `isolation: "worktree"` to create a worker worktree, defaulting bead work to a `ciclo/<bead-id>` branch. Once launched, workers should report liveness and optional token/cost deltas with `ciclo_heartbeat_worker_session`, and report progress, blockers, questions, and closeout evidence back through Ciclo MCP tools. `ciclo_poll_events` returns cursor-based runtime events, and `ciclo_board` joins Beads work, workers, worktrees, pending questions, rollup metrics, and validation/PR state for operator monitoring. Pass `expected_pr_after_ms` to `ciclo_board` to raise an `expected_pr_missing` blocker when a worker branch has not opened a PR by the deadline.
 
 Plan a remote runner environment through MCP:
 
@@ -153,7 +179,7 @@ ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo
 ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo --target pane-1
 ```
 
-By default, Ciclo names the Herdr/Ciclo session after the repository directory. In this repo the default is `ciclo`. Use `--dry-run --compact` to print the attach command as JSON instead of running Herdr.
+By default, Ciclo reuses the active Herdr session when it can detect one. Every local Claude/Codex worker session launched by Ciclo then runs through a visible Herdr agent pane in that session, so `ciclo attach` shows jobs as they spin up and work. If no active Herdr session is detected, Ciclo falls back to the repository directory name; in this repo the fallback is `ciclo`. Set `CICLO_REUSE_HERDR_SESSION=false` to force direct process launches and repo-name fallback. Use `--dry-run --compact` to print the attach command as JSON instead of running Herdr.
 
 Start local MCP over HTTP:
 

@@ -14,7 +14,8 @@ import {
 } from "./beads-progress.js";
 import { BeadsRemoteTrackerSync, type BeadsRemoteTrackerSyncInput } from "./beads-tracker-sync.js";
 import { selectAndClaimBeadsWork, type BeadsWorkClaimClient } from "./beads-work-queue.js";
-import type { HarnessId, LoopConfig } from "./ciclo-core.js";
+import { runtimeDecision, type HarnessId, type LoopConfig } from "./ciclo-core.js";
+import { CicloEventStore, type CicloEventInput } from "./ciclo-events.js";
 import {
   authorizeClientRequest,
   clientAccessView,
@@ -46,11 +47,13 @@ import {
   type WireGuardTunnelRequest
 } from "./remote-runner.js";
 import { activateConfiguredPlugins, defaultPluginPaths } from "./plugin-manager.js";
+import { GitHubCliRepoBoardProvider, type RepoBoardProvider, type RepoBoardStatus } from "./repo-board.js";
 
 export interface PendingQuestion {
   readonly questionId: string;
   readonly loopId?: string;
   readonly beadId?: string;
+  readonly workerSessionId?: string;
   readonly question: string;
   readonly urgency: "low" | "normal" | "high" | "blocking";
   readonly createdAt?: string;
@@ -76,11 +79,11 @@ export interface LoopStatus {
   };
   readonly goal: string;
   readonly policy: {
-    readonly mutations: "disabled_in_local_status_mode";
-    readonly networkListener: false;
-    readonly access: "single_user";
+    readonly mutations: string;
+    readonly networkListener: boolean;
+    readonly access: string;
   };
-  readonly currentWork: null;
+  readonly currentWork: unknown;
   readonly evidence: readonly string[];
 }
 
@@ -101,6 +104,8 @@ export interface CicloMcpReadService {
 
 export interface CicloMcpRuntimeContext {
   readonly auth: ClientAuthContext;
+  readonly claudeChannel?: CicloClaudeChannelRuntimeConfig;
+  readonly eventStore?: CicloEventStore;
   readonly deviceFlow?: DeviceAuthorizationFlow;
   readonly beadsClient?: BeadsWorkClaimClient & BeadsProgressClient;
   readonly sync?: BeadsProgressSync;
@@ -114,6 +119,12 @@ export interface CicloMcpRuntimeContext {
   readonly remoteTrackerSync?: BeadsRemoteTrackerSync;
   readonly workerSupervisor?: WorkerSessionSupervisor;
   readonly remoteRunnerRegistry?: RemoteRunnerRegistry;
+  readonly repoBoardProvider?: RepoBoardProvider;
+  readonly repoBoardEventKeys?: Set<string>;
+}
+
+export interface CicloClaudeChannelRuntimeConfig {
+  readonly enabled: boolean;
 }
 
 export interface CicloMcpAuditEntry {
@@ -228,6 +239,44 @@ function wireGuardParam(params: unknown): WireGuardTunnelRequest | undefined {
 function stringListParam(params: unknown, key: string): readonly string[] {
   const value = asRecord(params)[key];
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function worktreeParam(params: unknown):
+  | { readonly create: boolean; readonly path?: string; readonly branch?: string; readonly base?: string; readonly force?: boolean }
+  | undefined {
+  const create = booleanParam(params, "create_worktree", false);
+  const path = stringParam(params, "worktree_path") || undefined;
+  const branch = stringParam(params, "worktree_branch") || undefined;
+  const base = stringParam(params, "worktree_base") || undefined;
+  const force = booleanParam(params, "worktree_force", false);
+  if (!create && path === undefined && branch === undefined && base === undefined && !force) return undefined;
+  return {
+    create: create || path !== undefined || branch !== undefined || base !== undefined || force,
+    ...(path === undefined ? {} : { path }),
+    ...(branch === undefined ? {} : { branch }),
+    ...(base === undefined ? {} : { base }),
+    ...(force ? { force } : {})
+  };
+}
+
+function isolationParam(params: unknown): "none" | "worktree" | undefined {
+  const value = stringParam(params, "isolation");
+  if (value === "none" || value === "worktree") return value;
+  return undefined;
+}
+
+function heartbeatStateParam(params: unknown): "running" | "waiting_on_operator" | undefined {
+  const value = stringParam(params, "state");
+  if (value === "running" || value === "waiting_on_operator") return value;
+  return undefined;
+}
+
+function staleAfterMs(params: unknown): number {
+  return numberParam(params, "stale_after_ms", 10 * 60 * 1000);
+}
+
+function expectedPrAfterMs(params: unknown): number {
+  return numberParam(params, "expected_pr_after_ms", 30 * 60 * 1000);
 }
 
 function responseId(request: JsonRpcRequest | undefined): string | number | null {
@@ -415,6 +464,369 @@ function loopsFromStatus(status: CicloStandaloneStatus): readonly LoopStatus[] {
   ];
 }
 
+function workerStateCounts(workers: readonly ReturnType<WorkerSessionSupervisor["list"]>[number][]): Record<string, number> {
+  return workers.reduce<Record<string, number>>((counts, worker) => {
+    counts[worker.state] = (counts[worker.state] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function workerUsageTotals(workers: readonly ReturnType<WorkerSessionSupervisor["list"]>[number][]): Record<string, number> {
+  return workers.reduce<{ input_tokens: number; output_tokens: number; cost_usd: number }>((totals, worker) => ({
+    input_tokens: totals.input_tokens + (worker.usage?.inputTokens ?? 0),
+    output_tokens: totals.output_tokens + (worker.usage?.outputTokens ?? 0),
+    cost_usd: totals.cost_usd + (worker.usage?.costUsd ?? 0)
+  }), { input_tokens: 0, output_tokens: 0, cost_usd: 0 });
+}
+
+function timeInCurrentStateMs(worker: ReturnType<WorkerSessionSupervisor["list"]>[number], now = new Date().toISOString()): number {
+  const enteredAt = Date.parse(worker.stateEnteredAt ?? worker.startedAt ?? now);
+  const endAt = worker.stoppedAt === undefined ? Date.parse(now) : Date.parse(worker.stoppedAt);
+  return Number.isFinite(enteredAt) && Number.isFinite(endAt) ? Math.max(0, endAt - enteredAt) : 0;
+}
+
+function timeSinceWorkerStartMs(worker: ReturnType<WorkerSessionSupervisor["list"]>[number], now = new Date().toISOString()): number {
+  const startedAt = Date.parse(worker.startedAt ?? worker.stateEnteredAt ?? now);
+  const nowMs = Date.parse(now);
+  return Number.isFinite(startedAt) && Number.isFinite(nowMs) ? Math.max(0, nowMs - startedAt) : 0;
+}
+
+function refreshRuntimeStalled(runtime: CicloMcpRuntimeContext, thresholdMs: number): void {
+  runtime.workerSupervisor?.refreshStalled(thresholdMs);
+}
+
+function recordValue(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function eventKey(...parts: readonly (string | number | undefined)[]): string {
+  return parts.map((part) => String(part ?? "none")).join(":");
+}
+
+function appendDedupeRuntimeEvent(runtime: CicloMcpRuntimeContext, key: string, input: CicloEventInput): void {
+  const keys = runtime.repoBoardEventKeys;
+  if (keys !== undefined) {
+    if (keys.has(key)) return;
+    keys.add(key);
+  }
+  appendRuntimeEvent(runtime, input);
+}
+
+function emitRepoBoardEvents(
+  runtime: CicloMcpRuntimeContext,
+  worker: ReturnType<WorkerSessionSupervisor["list"]>[number],
+  status: RepoBoardStatus,
+  expectedPrAfterMsValue: number,
+  now = new Date().toISOString()
+): void {
+  for (const pullRequest of status.pullRequests) {
+    const state = recordValue(pullRequest, "state")?.toUpperCase();
+    const url = recordValue(pullRequest, "url");
+    const number = typeof pullRequest.number === "number" ? pullRequest.number : undefined;
+    if (state === "OPEN") {
+      appendDedupeRuntimeEvent(runtime, eventKey("pull_request.opened", worker.sessionId, url, number), {
+        type: "pull_request.opened",
+        workerSessionId: worker.sessionId,
+        loopId: worker.loopId,
+        beadId: worker.beadId,
+        evidence: ["repo_board.pull_request.opened", ...status.evidence],
+        data: { pull_request: pullRequest, branch: worker.worktree?.branch }
+      });
+    }
+    if (state === "MERGED") {
+      appendDedupeRuntimeEvent(runtime, eventKey("pull_request.merged", worker.sessionId, url, number), {
+        type: "pull_request.merged",
+        workerSessionId: worker.sessionId,
+        loopId: worker.loopId,
+        beadId: worker.beadId,
+        evidence: ["repo_board.pull_request.merged", ...status.evidence],
+        data: { pull_request: pullRequest, branch: worker.worktree?.branch }
+      });
+    }
+  }
+
+  for (const check of status.ci) {
+    const conclusion = recordValue(check, "conclusion")?.toUpperCase();
+    const name = recordValue(check, "name");
+    if (conclusion === "SUCCESS") {
+      appendDedupeRuntimeEvent(runtime, eventKey("validation.passed", worker.sessionId, name, conclusion), {
+        type: "validation.passed",
+        workerSessionId: worker.sessionId,
+        loopId: worker.loopId,
+        beadId: worker.beadId,
+        evidence: ["repo_board.validation.passed", ...status.evidence],
+        data: { check, branch: worker.worktree?.branch }
+      });
+    }
+    if (conclusion !== undefined && ["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"].includes(conclusion)) {
+      appendDedupeRuntimeEvent(runtime, eventKey("validation.failed", worker.sessionId, name, conclusion), {
+        type: "validation.failed",
+        workerSessionId: worker.sessionId,
+        loopId: worker.loopId,
+        beadId: worker.beadId,
+        evidence: ["repo_board.validation.failed", ...status.evidence],
+        data: { check, branch: worker.worktree?.branch }
+      });
+    }
+  }
+
+  if (
+    worker.worktree?.branch !== undefined &&
+    status.pullRequests.length === 0 &&
+    worker.state !== "planned" &&
+    Number.isFinite(expectedPrAfterMsValue) &&
+    expectedPrAfterMsValue > 0 &&
+    timeSinceWorkerStartMs(worker, now) >= expectedPrAfterMsValue
+  ) {
+    appendDedupeRuntimeEvent(runtime, eventKey("expected_pr.missing", worker.sessionId, worker.worktree.branch), {
+      type: "blocker.raised",
+      workerSessionId: worker.sessionId,
+      loopId: worker.loopId,
+      beadId: worker.beadId,
+      evidence: [
+        "repo_board.expected_pr:missing",
+        `repo_board.expected_pr_after_ms:${expectedPrAfterMsValue}`,
+        `repo_board.branch:${worker.worktree.branch}`,
+        ...status.evidence
+      ],
+      data: {
+        kind: "expected_pr_missing",
+        branch: worker.worktree.branch,
+        worker_state: worker.state,
+        recovery_actions: [
+          "inspect worker transcript through ciclo_attach_plan or Herdr",
+          "stop the stale worker with ciclo_stop_worker_session",
+          "relaunch the bead with ciclo_launch_worker_session and isolation:worktree"
+        ]
+      }
+    });
+  }
+}
+
+function loopState(workers: readonly ReturnType<WorkerSessionSupervisor["list"]>[number][], pendingQuestions: readonly PendingQuestion[]): string {
+  if (pendingQuestions.length > 0) return "waiting_on_operator";
+  if (workers.some((worker) => worker.state === "running")) return "running";
+  if (workers.some((worker) => worker.state === "failed")) return "failed";
+  if (workers.length > 0 && workers.every((worker) => worker.state === "completed")) return "completed";
+  if (workers.some((worker) => worker.state === "planned")) return "planned";
+  if (workers.some((worker) => worker.state === "stopped")) return "stopped";
+  return "idle";
+}
+
+function runtimeWorkers(runtime: CicloMcpRuntimeContext): readonly ReturnType<WorkerSessionSupervisor["list"]>[number][] {
+  return runtime.workerSupervisor?.list() ?? [];
+}
+
+function pendingQuestions(runtime: CicloMcpRuntimeContext): readonly PendingQuestion[] {
+  return runtime.operatorRouting?.listQuestions() ?? [];
+}
+
+function loopIdsFromRuntime(runtime: CicloMcpRuntimeContext, workers: readonly ReturnType<WorkerSessionSupervisor["list"]>[number][]): readonly string[] {
+  return [...new Set([
+    ...(runtime.loop === undefined ? [] : [runtime.loop.id]),
+    ...workers.map((worker) => worker.loopId),
+    ...pendingQuestions(runtime).flatMap((question) => question.loopId === undefined ? [] : [question.loopId])
+  ])];
+}
+
+function liveLoop(loopId: string, runtime: CicloMcpRuntimeContext): LoopStatus | undefined {
+  const workers = runtimeWorkers(runtime).filter((worker) => worker.loopId === loopId);
+  const questions = pendingQuestions(runtime).filter((question) => question.loopId === loopId);
+  const configured = runtime.loop?.id === loopId ? runtime.loop : undefined;
+  if (configured === undefined && workers.length === 0 && questions.length === 0) return undefined;
+  return {
+    loop: {
+      id: loopId,
+      kind: configured?.kind ?? "worker_session",
+      state: loopState(workers, questions),
+      harnesses: configured?.harnesses ?? [...new Set(workers.map((worker) => worker.harnessId))],
+      dryRun: configured?.dryRun ?? workers.every((worker) => worker.state === "planned")
+    },
+    goal: configured?.goal ?? `Coordinate ${loopId} worker sessions.`,
+    policy: {
+      mutations: "mcp_runtime",
+      networkListener: false,
+      access: runtime.auth.session.mode
+    },
+    currentWork: workers.find((worker) => worker.state === "running") ?? workers[0] ?? null,
+    evidence: [
+      `loop.live:${loopId}`,
+      `loop.workers:${workers.length}`,
+      `loop.questions.pending:${questions.length}`
+    ]
+  };
+}
+
+async function liveLoopStatus(loopId: string, service: CicloMcpReadService, runtime: CicloMcpRuntimeContext): Promise<LoopStatus> {
+  const live = liveLoop(loopId, runtime);
+  if (live !== undefined) return live;
+  return await service.loopStatus(loopId);
+}
+
+function boardRows(
+  runtime: CicloMcpRuntimeContext,
+  ready: ReadyWorkView,
+  repoStatuses: ReadonlyMap<string, RepoBoardStatus>,
+  expectedPrAfterMsValue: number
+): readonly Record<string, unknown>[] {
+  const workers = runtimeWorkers(runtime);
+  const now = new Date().toISOString();
+  const workerBeads = new Set(workers.flatMap((worker) => worker.beadId === undefined ? [] : [worker.beadId]));
+  const workerRows = workers.map((worker) => ({
+    bead_id: worker.beadId,
+    loop_id: worker.loopId,
+    worker_session_id: worker.sessionId,
+    worker_state: worker.state,
+    harness_id: worker.harnessId,
+    session_name: worker.sessionName,
+    tracking_mode: worker.trackingMode,
+    launch_mode: worker.launchMode,
+    agent_ref: worker.agentRef,
+    cwd: worker.cwd,
+    worktree: worker.worktree,
+    branch: worker.worktree?.branch,
+    state_entered_at: worker.stateEnteredAt,
+    time_in_state_ms: timeInCurrentStateMs(worker, now),
+    last_heartbeat_at: worker.lastHeartbeatAt,
+    usage: worker.usage,
+    pull_requests: repoStatuses.get(worker.sessionId)?.pullRequests ?? [],
+    ci: repoStatuses.get(worker.sessionId)?.ci ?? [],
+    merge_state: repoStatuses.get(worker.sessionId)?.mergeState,
+    validation: repoStatuses.get(worker.sessionId)?.ci ?? [],
+    artifact_status: worker.worktree?.branch !== undefined &&
+      (repoStatuses.get(worker.sessionId)?.pullRequests.length ?? 0) === 0 &&
+      worker.state !== "planned" &&
+      timeSinceWorkerStartMs(worker, now) >= expectedPrAfterMsValue
+        ? "expected_pr_missing"
+        : "ok",
+    recovery_actions: worker.worktree?.branch !== undefined &&
+      (repoStatuses.get(worker.sessionId)?.pullRequests.length ?? 0) === 0 &&
+      worker.state !== "planned" &&
+      timeSinceWorkerStartMs(worker, now) >= expectedPrAfterMsValue
+        ? [
+            "inspect worker transcript through ciclo_attach_plan or Herdr",
+            "stop the stale worker with ciclo_stop_worker_session",
+            "relaunch the bead with ciclo_launch_worker_session and isolation:worktree"
+          ]
+        : [],
+    needs_operator: pendingQuestions(runtime).some((question) =>
+      question.workerSessionId === worker.sessionId || question.loopId === worker.loopId || question.beadId === worker.beadId
+    )
+  }));
+  const readyRows = ready.work
+    .filter((work) => !workerBeads.has(work.id))
+    .map((work) => ({
+      bead_id: work.id,
+      loop_id: null,
+      worker_session_id: null,
+      worker_state: "queued",
+      harness_id: null,
+      title: work.title,
+      priority: work.priority,
+      pull_requests: [],
+      validation: [],
+      needs_operator: pendingQuestions(runtime).some((question) => question.beadId === work.id)
+    }));
+  return [...workerRows, ...readyRows];
+}
+
+async function liveBoard(
+  service: CicloMcpReadService,
+  runtime: CicloMcpRuntimeContext,
+  thresholdMs = 10 * 60 * 1000,
+  expectedPrAfterMsValue = 30 * 60 * 1000
+): Promise<Record<string, unknown>> {
+  refreshRuntimeStalled(runtime, thresholdMs);
+  const ready = await service.readyWork();
+  const workers = runtimeWorkers(runtime);
+  const questions = pendingQuestions(runtime);
+  const supervisorMetrics = runtime.workerSupervisor?.metrics();
+  const repoStatuses = new Map(workers.map((worker) => [
+    worker.sessionId,
+    (runtime.repoBoardProvider ?? new GitHubCliRepoBoardProvider()).statusForBranch(worker.worktree?.branch, worker.cwd)
+  ]));
+  for (const worker of workers) {
+    const status = repoStatuses.get(worker.sessionId);
+    if (status !== undefined) emitRepoBoardEvents(runtime, worker, status, expectedPrAfterMsValue);
+  }
+  return {
+    rows: boardRows(runtime, ready, repoStatuses, expectedPrAfterMsValue),
+    rollup: {
+      workers: {
+        total: workers.length,
+        by_state: supervisorMetrics?.byState ?? workerStateCounts(workers),
+        time_in_state_ms: supervisorMetrics?.timeInStateMs ?? {},
+        usage: supervisorMetrics === undefined ? workerUsageTotals(workers) : {
+          input_tokens: supervisorMetrics.usage.inputTokens,
+          output_tokens: supervisorMetrics.usage.outputTokens,
+          cost_usd: supervisorMetrics.usage.costUsd
+        }
+      },
+      ready_beads: ready.work.length,
+      pending_questions: questions.length
+    },
+    evidence: [
+      "board.live:true",
+      `board.workers:${workers.length}`,
+      `board.ready_beads:${ready.work.length}`,
+      `board.pending_questions:${questions.length}`,
+      ...[...repoStatuses.values()].flatMap((status) => status.evidence)
+    ]
+  };
+}
+
+async function liveStatus(service: CicloMcpReadService, runtime: CicloMcpRuntimeContext, thresholdMs = 10 * 60 * 1000): Promise<Record<string, unknown>> {
+  refreshRuntimeStalled(runtime, thresholdMs);
+  const workers = runtimeWorkers(runtime);
+  const ready = await service.readyWork();
+  const questions = pendingQuestions(runtime);
+  const feedback = runtime.operatorRouting?.listFeedback() ?? [];
+  const loopIds = loopIdsFromRuntime(runtime, workers);
+  const supervisorMetrics = runtime.workerSupervisor?.metrics();
+  return {
+    ok: true,
+    app: "ciclo",
+    runtime: runtimeDecision.runtime,
+    live: true,
+    loops: loopIds.map((loopId) => liveLoop(loopId, runtime)).filter((loop): loop is LoopStatus => loop !== undefined),
+    workers: {
+      total: workers.length,
+      by_state: supervisorMetrics?.byState ?? workerStateCounts(workers),
+      time_in_state_ms: supervisorMetrics?.timeInStateMs ?? {},
+      usage: supervisorMetrics === undefined ? workerUsageTotals(workers) : {
+        input_tokens: supervisorMetrics.usage.inputTokens,
+        output_tokens: supervisorMetrics.usage.outputTokens,
+        cost_usd: supervisorMetrics.usage.costUsd
+      },
+      sessions: workers
+    },
+    beads: {
+      ready_count: ready.work.length,
+      selected: ready.selected,
+      work: ready.work,
+      skipped: ready.skipped,
+      evidence: ready.evidence
+    },
+    questions: {
+      pending: questions.length,
+      items: questions
+    },
+    feedback: {
+      count: feedback.length,
+      items: feedback
+    },
+    remotes: runtime.remoteRunnerRegistry?.list() ?? [],
+    access: clientAccessView(runtime.auth),
+    evidence: [
+      "status.live:true",
+      `status.workers:${workers.length}`,
+      `status.ready_beads:${ready.work.length}`,
+      `status.pending_questions:${questions.length}`
+    ]
+  };
+}
+
 export function createLocalMcpReadService(root = process.cwd()): CicloMcpReadService {
   return {
     async status() {
@@ -473,18 +885,29 @@ export function createLocalMcpReadService(root = process.cwd()): CicloMcpReadSer
 
 export function createLocalMcpRuntimeContext(root = process.cwd()): CicloMcpRuntimeContext {
   const tokenRegistry = new TokenRegistry();
+  const eventStore = new CicloEventStore();
   return {
     auth: {
       ...defaultClientAuthContext(root),
       tokenRegistry
     },
+    claudeChannel: {
+      enabled: process.env.CICLO_CLAUDE_CHANNEL === "true"
+    },
+    eventStore,
     deviceFlow: new DeviceAuthorizationFlow({
       verificationUri: "http://127.0.0.1:0/oauth/device"
     }),
     operatorRouting: new OperatorRoutingStore(),
-    workerSupervisor: new WorkerSessionSupervisor(root),
-    remoteRunnerRegistry: new RemoteRunnerRegistry()
+    workerSupervisor: new WorkerSessionSupervisor(root, undefined, undefined, eventStore),
+    remoteRunnerRegistry: new RemoteRunnerRegistry(),
+    repoBoardProvider: new GitHubCliRepoBoardProvider(),
+    repoBoardEventKeys: new Set<string>()
   };
+}
+
+function appendRuntimeEvent(runtime: CicloMcpRuntimeContext, input: CicloEventInput): void {
+  runtime.eventStore?.append(input);
 }
 
 export async function createLocalMcpRuntimeContextWithPlugins(root = process.cwd()): Promise<CicloMcpRuntimeContext> {
@@ -515,11 +938,30 @@ async function callTool(
   authorization: AuthorizationResult
 ): Promise<unknown> {
   if (name === "ciclo_status") {
-    return textContent(await service.status());
+    return textContent(await liveStatus(service, runtime, staleAfterMs(params)));
   }
 
   if (name === "ciclo_loop_status") {
-    return textContent(await service.loopStatus(stringParam(params, "loop_id", "review-demo")));
+    return textContent(await liveLoopStatus(stringParam(params, "loop_id", "review-demo"), service, runtime));
+  }
+
+  if (name === "ciclo_poll_events") {
+    const cursor = numberParam(params, "cursor", 0);
+    const limit = numberParam(params, "limit", 100);
+    const poll = runtime.eventStore?.poll(cursor, limit) ?? runtime.workerSupervisor?.pollEvents(cursor, limit) ?? {
+      cursor,
+      nextCursor: cursor,
+      events: []
+    };
+    return textContent({
+      cursor: poll.cursor,
+      next_cursor: poll.nextCursor,
+      events: poll.events
+    });
+  }
+
+  if (name === "ciclo_board") {
+    return textContent(await liveBoard(service, runtime, staleAfterMs(params), expectedPrAfterMs(params)));
   }
 
   if (name === "ciclo_list_ready_work") {
@@ -533,11 +975,17 @@ async function callTool(
       beadId: stringParam(params, "bead_id") || undefined,
       harnessId: stringParam(params, "harness_id") || undefined,
       remoteSessionId: stringParam(params, "remote_session_id") || undefined,
+      workerSessionId: stringParam(params, "worker_session_id") || undefined,
       question: stringParam(params, "question"),
       urgency: urgencyParam(stringParam(params, "urgency")),
       principalId: authorization.principalId,
       evidence: stringListParam(params, "evidence")
     });
+    const waitingWorkers = runtime.workerSupervisor?.markWaitingOnOperator({
+      sessionId: stringParam(params, "worker_session_id") || undefined,
+      loopId: stringParam(params, "loop_id") || undefined,
+      beadId: stringParam(params, "bead_id") || undefined
+    }, result.evidence) ?? [];
     auditMutation({
       runtime,
       tool: name,
@@ -546,11 +994,29 @@ async function callTool(
       reason: result.deduplicated ? "operator question was deduplicated" : "operator question was queued",
       evidence: result.evidence
     });
+    appendRuntimeEvent(runtime, {
+      type: "question.asked",
+      loopId: stringParam(params, "loop_id") || undefined,
+      beadId: stringParam(params, "bead_id") || undefined,
+      workerSessionId: stringParam(params, "worker_session_id") || undefined,
+      evidence: result.evidence,
+      data: { question_id: result.questionId, urgency: result.question.urgency, waiting_workers: waitingWorkers.length }
+    });
+    if (result.question.urgency === "blocking") {
+      appendRuntimeEvent(runtime, {
+        type: "blocker.raised",
+        loopId: stringParam(params, "loop_id") || undefined,
+        beadId: stringParam(params, "bead_id") || undefined,
+        evidence: result.evidence,
+        data: { question_id: result.questionId }
+      });
+    }
     return textContent({
       question_id: result.questionId,
       queued: result.queued,
       deduplicated: result.deduplicated,
       question: result.question,
+      waiting_workers: waitingWorkers,
       evidence: result.evidence
     });
   }
@@ -563,6 +1029,13 @@ async function callTool(
       principalId: authorization.principalId,
       evidence: stringListParam(params, "evidence")
     });
+    const resumedWorkers = result.routedTo === undefined
+      ? []
+      : runtime.workerSupervisor?.resumeAfterOperator({
+          sessionId: result.routedTo.workerSessionId,
+          loopId: result.routedTo.loopId,
+          beadId: result.routedTo.beadId
+        }, result.evidence) ?? [];
     auditMutation({
       runtime,
       tool: name,
@@ -571,10 +1044,16 @@ async function callTool(
       reason: result.reason,
       evidence: result.evidence
     });
+    appendRuntimeEvent(runtime, {
+      type: "question.answered",
+      evidence: result.evidence,
+      data: { question_id: stringParam(params, "question_id"), answered: result.answered, resumed_workers: resumedWorkers.length }
+    });
     return textContent({
       answered: result.answered,
       routed_to: result.routedTo,
       question: result.question,
+      resumed_workers: resumedWorkers,
       reason: result.reason,
       evidence: result.evidence
     });
@@ -599,6 +1078,13 @@ async function callTool(
       authorization,
       reason: result.deduplicated ? "operator feedback was deduplicated" : "operator feedback was queued",
       evidence: result.evidence
+    });
+    appendRuntimeEvent(runtime, {
+      type: "feedback.reported",
+      loopId: stringParam(params, "loop_id") || undefined,
+      beadId: stringParam(params, "bead_id") || undefined,
+      evidence: result.evidence,
+      data: { feedback_id: result.feedbackId, severity: result.feedback.severity }
     });
     return textContent({
       feedback_id: result.feedbackId,
@@ -661,6 +1147,15 @@ async function callTool(
       reason: result.reason,
       evidence: result.evidence
     });
+    if (result.claimed) {
+      appendRuntimeEvent(runtime, {
+        type: "bead.claimed",
+        loopId: loop.id,
+        beadId,
+        evidence: result.evidence,
+        data: { harness_id: harnessId }
+      });
+    }
     return textContent(result);
   }
 
@@ -714,6 +1209,15 @@ async function callTool(
       reason: result.reason,
       evidence: result.evidence
     });
+    if (result.accepted) {
+      appendRuntimeEvent(runtime, {
+        type: "remote_runner.launched",
+        loopId: stringParam(params, "loop_id"),
+        beadId: stringParam(params, "bead_id") || undefined,
+        evidence: result.evidence,
+        data: { runner_id: result.plan?.runnerId, runner_kind: result.plan?.runnerKind }
+      });
+    }
     const plan = result.plan;
     return textContent({
       accepted: result.accepted,
@@ -752,6 +1256,7 @@ async function callTool(
       loopId: stringParam(params, "loop_id"),
       beadId: stringParam(params, "bead_id") || undefined,
       prompt: stringParam(params, "prompt"),
+      extraArgs: stringListParam(params, "extra_args"),
       model: stringParam(params, "model") || undefined,
       effort: stringParam(params, "effort") || undefined,
       cwd: stringParam(params, "cwd") || runtime.auth.session.projectRoot,
@@ -759,7 +1264,9 @@ async function callTool(
       dryRun: booleanParam(params, "dry_run", false),
       permissionMode: stringParam(params, "permission_mode") || undefined,
       sandbox: stringParam(params, "sandbox") || undefined,
-      approvalPolicy: stringParam(params, "approval_policy") || undefined
+      approvalPolicy: stringParam(params, "approval_policy") || undefined,
+      isolation: isolationParam(params),
+      worktree: worktreeParam(params)
     });
     auditMutation({
       runtime,
@@ -775,9 +1282,12 @@ async function callTool(
       state: result.state,
       command: result.command,
       args: result.args,
+      extra_args: result.extraArgs,
       cwd: result.cwd,
+      worktree: result.worktree,
       pid: result.pid,
       session_name: result.sessionName,
+      launch_mode: result.launchMode,
       model: result.model,
       effort: result.effort,
       loop_id: result.loopId,
@@ -786,8 +1296,38 @@ async function callTool(
     });
   }
 
+  if (name === "ciclo_heartbeat_worker_session") {
+    const supervisor = runtime.workerSupervisor ?? new WorkerSessionSupervisor(runtime.auth.session.projectRoot);
+    const result = supervisor.heartbeat(stringParam(params, "worker_session_id"), {
+      state: heartbeatStateParam(params),
+      evidence: stringListParam(params, "evidence"),
+      usage: {
+        inputTokens: numberParam(params, "input_tokens", 0),
+        outputTokens: numberParam(params, "output_tokens", 0),
+        costUsd: numberParam(params, "cost_usd", 0)
+      }
+    });
+    auditMutation({
+      runtime,
+      tool: name,
+      action: "send_prompt",
+      authorization,
+      reason: "worker session heartbeat recorded",
+      evidence: result.evidence
+    });
+    return textContent({
+      session_id: result.sessionId,
+      state: result.state,
+      last_heartbeat_at: result.lastHeartbeatAt,
+      state_entered_at: result.stateEnteredAt,
+      usage: result.usage,
+      evidence: result.evidence
+    });
+  }
+
   if (name === "ciclo_list_worker_sessions") {
     const supervisor = runtime.workerSupervisor ?? new WorkerSessionSupervisor(runtime.auth.session.projectRoot);
+    supervisor.refreshStalled(staleAfterMs(params));
     return textContent({ worker_sessions: supervisor.list() });
   }
 
@@ -879,6 +1419,22 @@ async function callTool(
       reason: result.reason,
       evidence: result.evidence
     });
+    if (result.mutated) {
+      appendRuntimeEvent(runtime, {
+        type: kind === "validation"
+          ? (booleanParam(params, "validation_passed") ? "validation.passed" : "validation.failed")
+          : kind === "blocker"
+            ? "blocker.raised"
+            : "feedback.reported",
+        loopId: loop.id,
+        beadId: stringParam(params, "bead_id"),
+        evidence: result.evidence,
+        data: {
+          kind,
+          validation_command: stringParam(params, "validation_command") || undefined
+        }
+      });
+    }
     return textContent(result);
   }
 
@@ -908,6 +1464,14 @@ async function callTool(
       reason: result.reason,
       evidence: result.evidence
     });
+    if (result.mutated) {
+      appendRuntimeEvent(runtime, {
+        type: "bead.closed",
+        loopId: loopFromParams(params, runtime).id,
+        beadId: stringParam(params, "bead_id"),
+        evidence: result.evidence
+      });
+    }
     return textContent(result);
   }
 
@@ -959,6 +1523,15 @@ async function callTool(
       reason: result.synced || input.dryRun ? policy.reason : "Beads remote tracker sync did not complete",
       evidence: payload.evidence
     });
+    if (result.synced || input.dryRun) {
+      appendRuntimeEvent(runtime, {
+        type: "tracker.synced",
+        loopId: input.loopId,
+        beadId: input.beadId,
+        evidence: payload.evidence,
+        data: { dry_run: input.dryRun, synced: result.synced }
+      });
+    }
     return textContent(payload);
   }
 
@@ -1021,11 +1594,18 @@ async function readResource(
 ): Promise<unknown> {
   let payload: unknown;
   if (uri === "ciclo://status") {
-    payload = { status: await service.status() };
+    payload = { status: await liveStatus(service, runtime) };
   } else if (uri === "ciclo://loops") {
-    payload = { loops: loopsFromStatus(await service.status()) };
+    const workers = runtimeWorkers(runtime);
+    const loopIds = loopIdsFromRuntime(runtime, workers);
+    payload = { loops: loopIds.map((loopId) => liveLoop(loopId, runtime)).filter((loop): loop is LoopStatus => loop !== undefined) };
   } else if (uri.startsWith("ciclo://loops/")) {
-    payload = await service.loopStatus(uri.slice("ciclo://loops/".length));
+    payload = await liveLoopStatus(uri.slice("ciclo://loops/".length), service, runtime);
+  } else if (uri === "ciclo://events") {
+    const poll = runtime.eventStore?.poll(0) ?? runtime.workerSupervisor?.pollEvents(0) ?? { cursor: 0, nextCursor: 0, events: [] };
+    payload = { cursor: poll.cursor, next_cursor: poll.nextCursor, events: poll.events };
+  } else if (uri === "ciclo://board") {
+    payload = await liveBoard(service, runtime);
   } else if (uri === "ciclo://work/ready") {
     payload = await service.readyWork();
   } else if (uri === "ciclo://questions") {
@@ -1037,6 +1617,7 @@ async function readResource(
   } else if (uri === "ciclo://remote-runners") {
     payload = { remote_runners: runtime.remoteRunnerRegistry?.list() ?? [] };
   } else if (uri === "ciclo://worker-sessions") {
+    runtime.workerSupervisor?.refreshStalled(10 * 60 * 1000);
     payload = { worker_sessions: runtime.workerSupervisor?.list() ?? [] };
   } else if (uri === "ciclo://session/access") {
     payload = { access: clientAccessView(runtime.auth) };
@@ -1116,6 +1697,21 @@ function requestScope(request: JsonRpcRequest): AccessScope | undefined {
   };
 }
 
+function mcpCapabilities(runtime: CicloMcpRuntimeContext): Record<string, unknown> {
+  return {
+    tools: { listChanged: false },
+    resources: { subscribe: false, listChanged: false },
+    prompts: { listChanged: false },
+    ...(runtime.claudeChannel?.enabled === true
+      ? {
+          experimental: {
+            "claude/channel": {}
+          }
+        }
+      : {})
+  };
+}
+
 export async function handleMcpRequest(
   request: JsonRpcRequest,
   service: CicloMcpReadService = createLocalMcpReadService(),
@@ -1145,11 +1741,7 @@ export async function handleMcpRequest(
       return success(request, {
         protocolVersion: "2025-06-18",
         serverInfo: { name: "ciclo", version: "0.1.0" },
-        capabilities: {
-          tools: { listChanged: false },
-          resources: { subscribe: false, listChanged: false },
-          prompts: { listChanged: false }
-        }
+        capabilities: mcpCapabilities(runtime)
       });
     }
 

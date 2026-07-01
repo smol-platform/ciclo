@@ -1,16 +1,35 @@
-import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 import type { HarnessId } from "./ciclo-core.js";
+import {
+  FileClaudeBackgroundAgentResolver,
+  type ClaudeBackgroundAgentRecord,
+  type ClaudeBackgroundAgentResolver
+} from "./claude-background-agent.js";
+import { CicloEventStore, type CicloEventPollResult } from "./ciclo-events.js";
+import { activeHerdrSessionName, repoSessionName } from "./repo-session-name.js";
 
 export type WorkerHarnessId = Extract<HarnessId, "claude-code" | "codex">;
 
-export type WorkerSessionState = "planned" | "running" | "stopped" | "failed" | "completed";
+export type WorkerSessionState =
+  | "planned"
+  | "running"
+  | "waiting_on_operator"
+  | "stalled"
+  | "stopped"
+  | "failed"
+  | "completed";
+export type WorkerTrackingMode = "process" | "detached_agent" | "herdr_agent";
+export type WorkerLaunchMode = "process" | "herdr_pane";
 
 export interface WorkerSessionLaunchRequest {
   readonly harnessId: WorkerHarnessId;
   readonly loopId: string;
   readonly prompt: string;
+  readonly extraArgs?: readonly string[];
   readonly beadId?: string;
   readonly model?: string;
   readonly effort?: string;
@@ -20,6 +39,26 @@ export interface WorkerSessionLaunchRequest {
   readonly permissionMode?: string;
   readonly sandbox?: string;
   readonly approvalPolicy?: string;
+  readonly isolation?: WorkerIsolationMode;
+  readonly worktree?: WorkerWorktreeRequest;
+}
+
+export type WorkerIsolationMode = "none" | "worktree";
+
+export interface WorkerWorktreeRequest {
+  readonly create?: boolean;
+  readonly path?: string;
+  readonly branch?: string;
+  readonly base?: string;
+  readonly force?: boolean;
+}
+
+export interface WorkerWorktreePlan {
+  readonly create: boolean;
+  readonly path: string;
+  readonly branch?: string;
+  readonly base?: string;
+  readonly force: boolean;
 }
 
 export interface WorkerLaunchPlan {
@@ -27,14 +66,52 @@ export interface WorkerLaunchPlan {
   readonly harnessId: WorkerHarnessId;
   readonly command: string;
   readonly args: readonly string[];
+  readonly extraArgs: readonly string[];
   readonly cwd: string;
   readonly model?: string;
   readonly effort?: string;
+  readonly worktree?: WorkerWorktreePlan;
   readonly loopId: string;
   readonly beadId?: string;
   readonly sessionName: string;
+  readonly trackingMode: WorkerTrackingMode;
+  readonly launchMode: WorkerLaunchMode;
+  readonly agentRef?: WorkerAgentRef;
   readonly prompt: string;
   readonly evidence: readonly string[];
+}
+
+export interface WorkerAgentRef {
+  readonly kind: "process" | "claude_background_session" | "herdr_agent";
+  readonly id: string;
+  readonly herdrSession?: string;
+  readonly target?: string;
+  readonly sessionId?: string;
+  readonly jobId?: string;
+  readonly pid?: number;
+  readonly status?: string;
+  readonly waitingFor?: string;
+  readonly ptyHost?: string;
+  readonly rendezvousHost?: string;
+  readonly registrySource?: string;
+}
+
+export interface WorkerUsageMetrics {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly costUsd?: number;
+}
+
+export interface WorkerSessionHeartbeatInput {
+  readonly evidence?: readonly string[];
+  readonly usage?: WorkerUsageMetrics;
+  readonly state?: Extract<WorkerSessionState, "running" | "waiting_on_operator">;
+}
+
+export interface WorkerSessionMatch {
+  readonly sessionId?: string;
+  readonly loopId?: string;
+  readonly beadId?: string;
 }
 
 export interface WorkerSessionRecord {
@@ -43,19 +120,38 @@ export interface WorkerSessionRecord {
   readonly state: WorkerSessionState;
   readonly command: string;
   readonly args: readonly string[];
+  readonly extraArgs: readonly string[];
   readonly cwd: string;
   readonly pid?: number;
   readonly loopId: string;
   readonly beadId?: string;
   readonly model?: string;
   readonly effort?: string;
+  readonly worktree?: WorkerWorktreePlan;
   readonly sessionName: string;
+  readonly trackingMode: WorkerTrackingMode;
+  readonly launchMode: WorkerLaunchMode;
+  readonly agentRef?: WorkerAgentRef;
   readonly startedAt?: string;
   readonly stoppedAt?: string;
+  readonly stateEnteredAt?: string;
+  readonly lastHeartbeatAt?: string;
+  readonly usage?: WorkerUsageMetrics;
   readonly cleanupReason?: string;
   readonly exitCode?: number | null;
   readonly signal?: NodeJS.Signals | null;
   readonly evidence: readonly string[];
+}
+
+export interface WorkerSessionMetrics {
+  readonly total: number;
+  readonly byState: Record<string, number>;
+  readonly timeInStateMs: Record<string, number>;
+  readonly usage: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly costUsd: number;
+  };
 }
 
 export interface WorkerProcessHandle {
@@ -105,11 +201,21 @@ function clean(value: string | undefined): string | undefined {
   return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
 }
 
-function sessionName(input: WorkerSessionLaunchRequest): string {
+function cleanArgs(values: readonly string[] | undefined): readonly string[] {
+  return (values ?? []).filter((value) => value.length > 0);
+}
+
+function safePathSegment(value: string): string {
+  const cleaned = value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return cleaned.length === 0 ? "worker" : cleaned.slice(0, 80);
+}
+
+function sessionName(input: WorkerSessionLaunchRequest, root: string): string {
   const explicit = clean(input.sessionName);
   if (explicit !== undefined) return explicit;
+  const herdrSession = repoSessionName(clean(input.cwd) ?? root);
   return [
-    "ciclo",
+    herdrSession,
     input.loopId,
     input.beadId ?? "unassigned",
     input.harnessId
@@ -121,23 +227,152 @@ function appendIfValue(args: string[], flag: string, value: string | undefined):
   if (cleaned !== undefined) args.push(flag, cleaned);
 }
 
-function codexArgs(input: WorkerSessionLaunchRequest, cwd: string): readonly string[] {
+function worktreePlan(
+  input: WorkerSessionLaunchRequest,
+  baseCwd: string,
+  name: string,
+  sessionId: string
+): WorkerWorktreePlan | undefined {
+  const isolation = input.isolation ?? "none";
+  if (input.worktree === undefined && isolation !== "worktree") return undefined;
+  const request = input.worktree ?? {};
+  const create = request.create ?? true;
+  if (!create) return undefined;
+  const requestedPath = clean(request.path);
+  const resolvedBaseCwd = resolve(baseCwd);
+  const defaultPath = join(
+    dirname(resolvedBaseCwd),
+    ".ciclo-worktrees",
+    basename(resolvedBaseCwd),
+    safePathSegment(`${name}-${sessionId}`)
+  );
+  const path = requestedPath === undefined ? defaultPath : resolve(baseCwd, requestedPath);
+  const branch = clean(request.branch) ?? (isolation === "worktree" && input.beadId !== undefined ? `ciclo/${safePathSegment(input.beadId)}` : undefined);
+  const base = clean(request.base);
+  return {
+    create: true,
+    path,
+    ...(branch === undefined ? {} : { branch }),
+    ...(base === undefined ? {} : { base }),
+    force: request.force === true
+  };
+}
+
+function codexArgs(input: WorkerSessionLaunchRequest, cwd: string, extraArgs: readonly string[]): readonly string[] {
   const args: string[] = [];
   appendIfValue(args, "--model", input.model);
   args.push("--cd", cwd);
   args.push("--ask-for-approval", clean(input.approvalPolicy) ?? "on-request");
   args.push("--sandbox", clean(input.sandbox) ?? "workspace-write");
+  args.push(...extraArgs);
   args.push(input.prompt);
   return args;
 }
 
-function claudeArgs(input: WorkerSessionLaunchRequest, name: string): readonly string[] {
+function claudeArgs(input: WorkerSessionLaunchRequest, name: string, extraArgs: readonly string[]): readonly string[] {
   const args: string[] = ["--bg", "--name", name];
   appendIfValue(args, "--model", input.model);
   appendIfValue(args, "--effort", input.effort);
   args.push("--permission-mode", clean(input.permissionMode) ?? "default");
+  args.push(...extraArgs);
   args.push(input.prompt);
   return args;
+}
+
+function claudePaneArgs(input: WorkerSessionLaunchRequest, name: string, extraArgs: readonly string[]): readonly string[] {
+  const args: string[] = ["--name", name];
+  appendIfValue(args, "--model", input.model);
+  appendIfValue(args, "--effort", input.effort);
+  args.push("--permission-mode", clean(input.permissionMode) ?? "default");
+  args.push(...extraArgs);
+  args.push(input.prompt);
+  return args;
+}
+
+function directTrackingMode(input: WorkerSessionLaunchRequest): WorkerTrackingMode {
+  return input.harnessId === "claude-code" ? "detached_agent" : "process";
+}
+
+function herdrPaneLaunchEnabled(_input: WorkerSessionLaunchRequest): string | undefined {
+  return activeHerdrSessionName();
+}
+
+function workerCommand(input: WorkerSessionLaunchRequest): string {
+  return input.harnessId === "codex" ? "codex" : "claude";
+}
+
+function directWorkerArgs(input: WorkerSessionLaunchRequest, cwd: string, name: string, extraArgs: readonly string[]): readonly string[] {
+  return input.harnessId === "codex" ? codexArgs(input, cwd, extraArgs) : claudeArgs(input, name, extraArgs);
+}
+
+function paneWorkerArgs(input: WorkerSessionLaunchRequest, cwd: string, name: string, extraArgs: readonly string[]): readonly string[] {
+  return input.harnessId === "codex" ? codexArgs(input, cwd, extraArgs) : claudePaneArgs(input, name, extraArgs);
+}
+
+function herdrPaneArgs(session: string, name: string, cwd: string, command: string, args: readonly string[]): readonly string[] {
+  return [
+    "--session",
+    session,
+    "agent",
+    "start",
+    name,
+    "--cwd",
+    cwd,
+    "--no-focus",
+    "--",
+    command,
+    ...args
+  ];
+}
+
+function launchMode(herdrSession: string | undefined): WorkerLaunchMode {
+  return herdrSession === undefined ? "process" : "herdr_pane";
+}
+
+function agentRef(input: WorkerSessionLaunchRequest, name: string, mode: WorkerLaunchMode, herdrSession?: string): WorkerAgentRef {
+  if (mode === "herdr_pane") {
+    return {
+      kind: "herdr_agent",
+      id: name,
+      target: name,
+      herdrSession
+    };
+  }
+  if (input.harnessId === "claude-code") {
+    return { kind: "claude_background_session", id: name };
+  }
+  return { kind: "process", id: name };
+}
+
+function agentRefFromClaude(record: ClaudeBackgroundAgentRecord, fallbackId: string): WorkerAgentRef {
+  return {
+    kind: "claude_background_session",
+    id: record.sessionId ?? record.jobId ?? fallbackId,
+    sessionId: record.sessionId,
+    jobId: record.jobId,
+    pid: record.pid,
+    status: record.status,
+    waitingFor: record.waitingFor,
+    ptyHost: record.ptySock,
+    rendezvousHost: record.rendezvousSock,
+    registrySource: record.source
+  };
+}
+
+function stateFromClaudeStatus(record: ClaudeBackgroundAgentRecord, current: WorkerSessionState): WorkerSessionState {
+  if (record.waitingFor !== undefined || record.status === "waiting") return "waiting_on_operator";
+  if (record.status === "failed" || record.status === "error") return "failed";
+  if (record.status === "stopped" || record.status === "killed") return "stopped";
+  if (record.status === "done" || record.status === "completed" || record.status === "exited") return "completed";
+  if (record.status === "busy" || record.status === "idle" || record.status === "shell" || record.status === "running") return "running";
+  return current;
+}
+
+function terminalReason(state: WorkerSessionState, record: ClaudeBackgroundAgentRecord): string | undefined {
+  if (state === "completed") return "claude background agent completed";
+  if (state === "failed") return `claude background agent failed${record.status === undefined ? "" : `:${record.status}`}`;
+  if (state === "stopped") return "claude background agent stopped";
+  return undefined;
 }
 
 export function buildWorkerLaunchPlan(
@@ -145,54 +380,274 @@ export function buildWorkerLaunchPlan(
   root = process.cwd(),
   sessionId = `worker-${randomUUID()}`
 ): WorkerLaunchPlan {
-  const cwd = clean(input.cwd) ?? root;
-  const name = sessionName(input);
-  const command = input.harnessId === "codex" ? "codex" : "claude";
-  const args = input.harnessId === "codex" ? codexArgs(input, cwd) : claudeArgs(input, name);
+  const requestedCwd = clean(input.cwd) ?? root;
+  const name = sessionName(input, root);
+  const worktree = worktreePlan(input, requestedCwd, name, sessionId);
+  const cwd = worktree?.path ?? requestedCwd;
+  const extraArgs = cleanArgs(input.extraArgs);
+  const herdrSession = herdrPaneLaunchEnabled(input);
+  const localLaunchMode = launchMode(herdrSession);
+  const mode = localLaunchMode === "herdr_pane" ? "herdr_agent" : directTrackingMode(input);
+  const underlyingCommand = workerCommand(input);
+  const underlyingArgs = localLaunchMode === "herdr_pane"
+    ? paneWorkerArgs(input, cwd, name, extraArgs)
+    : directWorkerArgs(input, cwd, name, extraArgs);
+  const command = localLaunchMode === "herdr_pane" ? "herdr" : underlyingCommand;
+  const args = localLaunchMode === "herdr_pane"
+    ? herdrPaneArgs(herdrSession!, name, cwd, underlyingCommand, underlyingArgs)
+    : underlyingArgs;
   return {
     sessionId,
     harnessId: input.harnessId,
     command,
     args,
+    extraArgs,
     cwd,
     model: clean(input.model),
     effort: clean(input.effort),
+    ...(worktree === undefined ? {} : { worktree }),
     loopId: input.loopId,
     beadId: clean(input.beadId),
     sessionName: name,
+    trackingMode: mode,
+    launchMode: localLaunchMode,
+    agentRef: agentRef(input, name, localLaunchMode, herdrSession),
     prompt: input.prompt,
     evidence: [
       `worker.session.plan:${sessionId}`,
       `worker.session.harness:${input.harnessId}`,
       `worker.session.loop:${input.loopId}`,
+      `worker.session.tracking:${mode}`,
+      `worker.session.launch_mode:${localLaunchMode}`,
+      ...(herdrSession === undefined ? [] : [`worker.session.herdr_session:${herdrSession}`]),
       ...(input.beadId === undefined ? [] : [`worker.session.bead:${input.beadId}`]),
+      ...(extraArgs.length === 0 ? [] : [`worker.session.extra_args:${extraArgs.length}`]),
+      ...(worktree === undefined
+        ? []
+        : [
+            "worker.worktree:create:true",
+            `worker.worktree.path:${worktree.path}`,
+            ...(worktree.branch === undefined ? [] : [`worker.worktree.branch:${worktree.branch}`]),
+            ...(worktree.base === undefined ? [] : [`worker.worktree.base:${worktree.base}`]),
+            `worker.worktree.force:${worktree.force}`
+          ]),
       input.dryRun === true ? "worker.session.dry_run:true" : "worker.session.dry_run:false"
     ]
+  };
+}
+
+function prepareWorktree(plan: WorkerLaunchPlan, root: string): readonly string[] {
+  const worktree = plan.worktree;
+  if (worktree === undefined) return [];
+  if (existsSync(worktree.path)) return ["worker.worktree:reused"];
+
+  mkdirSync(dirname(worktree.path), { recursive: true });
+  const args = [
+    "-C",
+    root,
+    "worktree",
+    "add",
+    ...(worktree.force ? ["--force"] : []),
+    ...(worktree.branch === undefined ? [] : ["-b", worktree.branch]),
+    worktree.path,
+    ...(worktree.base === undefined ? [] : [worktree.base])
+  ];
+  const result = spawnSync("git", args, { encoding: "utf8" });
+  if (result.status !== 0) {
+    const message = (result.stderr || result.stdout || "git worktree add failed").trim();
+    throw new Error(message);
+  }
+  return ["worker.worktree:created"];
+}
+
+function isTerminalState(state: WorkerSessionState): boolean {
+  return state === "completed" || state === "failed" || state === "stopped";
+}
+
+function isActiveState(state: WorkerSessionState): boolean {
+  return state === "running" || state === "waiting_on_operator" || state === "stalled";
+}
+
+function usageValue(value: number | undefined): number {
+  return Number.isFinite(value) ? value ?? 0 : 0;
+}
+
+function mergeUsage(current: WorkerUsageMetrics | undefined, next: WorkerUsageMetrics | undefined): WorkerUsageMetrics | undefined {
+  if (next === undefined) return current;
+  return {
+    inputTokens: usageValue(current?.inputTokens) + usageValue(next.inputTokens),
+    outputTokens: usageValue(current?.outputTokens) + usageValue(next.outputTokens),
+    costUsd: usageValue(current?.costUsd) + usageValue(next.costUsd)
   };
 }
 
 export class WorkerSessionSupervisor {
   private readonly sessions = new Map<string, WorkerSessionRecord>();
   private readonly handles = new Map<string, WorkerProcessHandle>();
+  private readonly launcher: WorkerProcessLauncher;
+  private readonly clock: WorkerClock;
+  private readonly events: CicloEventStore;
 
   constructor(
     private readonly root = process.cwd(),
-    private readonly launcher: WorkerProcessLauncher = new NodeWorkerProcessLauncher(),
-    private readonly clock: WorkerClock = defaultClock
-  ) {}
+    launcher?: WorkerProcessLauncher,
+    clock?: WorkerClock,
+    eventSink?: CicloEventStore,
+    private readonly claudeAgents: ClaudeBackgroundAgentResolver = new FileClaudeBackgroundAgentResolver()
+  ) {
+    this.launcher = launcher ?? new NodeWorkerProcessLauncher();
+    this.clock = clock ?? defaultClock;
+    this.events = eventSink ?? new CicloEventStore(() => this.clock.now());
+  }
+
+  private emit(record: WorkerSessionRecord, type: "worker.state_change" | "worker.launcher_exit", evidence: readonly string[] = []): void {
+    this.events.append({
+      type,
+      workerSessionId: record.sessionId,
+      loopId: record.loopId,
+      beadId: record.beadId,
+      state: record.state,
+      evidence,
+      data: {
+        harness_id: record.harnessId,
+        session_name: record.sessionName,
+        tracking_mode: record.trackingMode,
+        launch_mode: record.launchMode,
+        agent_ref: record.agentRef,
+        cwd: record.cwd,
+        worktree: record.worktree,
+        state_entered_at: record.stateEnteredAt,
+        last_heartbeat_at: record.lastHeartbeatAt,
+        usage: record.usage
+      }
+    });
+  }
+
+  private transition(
+    session: WorkerSessionRecord,
+    state: WorkerSessionState,
+    evidence: readonly string[],
+    extra: Partial<WorkerSessionRecord> = {},
+    eventType: "worker.state_change" | "worker.stalled" = "worker.state_change"
+  ): WorkerSessionRecord {
+    const now = this.clock.now();
+    const updated: WorkerSessionRecord = {
+      ...session,
+      ...extra,
+      state,
+      stateEnteredAt: session.state === state ? session.stateEnteredAt : now,
+      evidence: [...session.evidence, ...evidence]
+    };
+    this.sessions.set(session.sessionId, updated);
+    if (eventType === "worker.stalled") {
+      this.events.append({
+        type: "worker.stalled",
+        workerSessionId: updated.sessionId,
+        loopId: updated.loopId,
+        beadId: updated.beadId,
+        state: updated.state,
+        evidence,
+        data: {
+          harness_id: updated.harnessId,
+          session_name: updated.sessionName,
+          last_heartbeat_at: updated.lastHeartbeatAt
+        }
+      });
+    } else {
+      this.emit(updated, eventType, evidence);
+    }
+    return updated;
+  }
+
+  private matches(session: WorkerSessionRecord, match: WorkerSessionMatch): boolean {
+    if (match.sessionId !== undefined) return session.sessionId === match.sessionId;
+    const loopMatches = match.loopId === undefined || session.loopId === match.loopId;
+    const beadMatches = match.beadId === undefined || session.beadId === match.beadId;
+    return loopMatches && beadMatches;
+  }
+
+  private refreshDetachedAgent(session: WorkerSessionRecord): WorkerSessionRecord {
+    if (session.trackingMode !== "detached_agent" || session.agentRef?.kind !== "claude_background_session") return session;
+    if (isTerminalState(session.state)) return session;
+    const resolved = this.claudeAgents.resolve({ name: session.sessionName, cwd: session.cwd });
+    if (resolved === undefined) return session;
+
+    const nextState = stateFromClaudeStatus(resolved, session.state);
+    const ref = agentRefFromClaude(resolved, session.agentRef.id);
+    const activityAt = resolved.statusUpdatedAt ?? resolved.updatedAt;
+    if (
+      session.state === nextState &&
+      session.agentRef?.sessionId === ref.sessionId &&
+      session.agentRef?.jobId === ref.jobId &&
+      session.agentRef?.status === ref.status &&
+      session.agentRef?.waitingFor === ref.waitingFor &&
+      session.agentRef?.ptyHost === ref.ptyHost &&
+      session.lastHeartbeatAt === (activityAt ?? session.lastHeartbeatAt)
+    ) {
+      return session;
+    }
+    const evidence = [
+      "worker.session.agent_registry:resolved",
+      ...(resolved.status === undefined ? [] : [`worker.session.agent_registry.status:${resolved.status}`]),
+      ...(resolved.sessionId === undefined ? [] : [`worker.session.agent_registry.session_id:${resolved.sessionId}`]),
+      ...(resolved.jobId === undefined ? [] : [`worker.session.agent_registry.job_id:${resolved.jobId}`]),
+      ...(resolved.ptySock === undefined ? [] : ["worker.session.agent_registry.pty:true"])
+    ];
+    const extra: Partial<WorkerSessionRecord> = {
+      agentRef: ref,
+      pid: ref.pid ?? session.pid,
+      lastHeartbeatAt: activityAt ?? session.lastHeartbeatAt,
+      cleanupReason: terminalReason(nextState, resolved) ?? session.cleanupReason,
+      stoppedAt: isTerminalState(nextState) ? this.clock.now() : session.stoppedAt
+    };
+    return this.transition(session, nextState, evidence, extra);
+  }
+
+  refreshDetachedAgents(): readonly WorkerSessionRecord[] {
+    return [...this.sessions.values()]
+      .filter((session) => session.trackingMode === "detached_agent" && !isTerminalState(session.state))
+      .map((session) => this.refreshDetachedAgent(session));
+  }
 
   launch(input: WorkerSessionLaunchRequest): WorkerSessionRecord {
     const plan = buildWorkerLaunchPlan(input, this.root);
     if (input.dryRun === true) {
+      const now = this.clock.now();
       const record: WorkerSessionRecord = {
         ...plan,
         state: "planned",
-        evidence: [...plan.evidence, "worker.session.launch:planned"]
+        stateEnteredAt: now,
+        evidence: [
+          ...plan.evidence,
+          ...(plan.worktree === undefined ? [] : ["worker.worktree:dry_run"]),
+          "worker.session.launch:planned"
+        ]
       };
       this.sessions.set(plan.sessionId, record);
+      this.emit(record, "worker.state_change", ["worker.session.launch:planned"]);
       return record;
     }
 
+    let worktreeEvidence: readonly string[] = [];
+    try {
+      worktreeEvidence = prepareWorktree(plan, this.root);
+    } catch (error) {
+      const now = this.clock.now();
+      const failed: WorkerSessionRecord = {
+        ...plan,
+        state: "failed",
+        startedAt: now,
+        stoppedAt: now,
+        stateEnteredAt: now,
+        cleanupReason: error instanceof Error ? error.message : "worktree creation failed",
+        evidence: [...plan.evidence, "worker.worktree:failed"]
+      };
+      this.sessions.set(plan.sessionId, failed);
+      this.emit(failed, "worker.state_change", ["worker.worktree:failed"]);
+      return failed;
+    }
+
+    const startedAt = this.clock.now();
     const handle = this.launcher.launch(plan.command, plan.args, {
       cwd: plan.cwd,
       env: process.env,
@@ -203,26 +658,67 @@ export class WorkerSessionSupervisor {
       ...plan,
       state: "running",
       pid: handle.pid,
-      startedAt: this.clock.now(),
-      evidence: [...plan.evidence, "worker.session.launch:started", ...(handle.pid === undefined ? [] : [`worker.session.pid:${handle.pid}`])]
+      startedAt,
+      stateEnteredAt: startedAt,
+      lastHeartbeatAt: startedAt,
+      evidence: [
+        ...plan.evidence,
+        ...worktreeEvidence,
+        "worker.session.launch:started",
+        ...(handle.pid === undefined ? [] : [`worker.session.pid:${handle.pid}`])
+      ]
     };
     this.sessions.set(plan.sessionId, started);
+    this.emit(started, "worker.state_change", ["worker.session.launch:started"]);
     this.handles.set(plan.sessionId, handle);
     handle.onExit((exitCode, signal) => {
       const current = this.sessions.get(plan.sessionId);
-      if (current === undefined || current.state !== "running") return;
-      this.sessions.set(plan.sessionId, {
-        ...current,
-        state: exitCode === 0 ? "completed" : "failed",
+      if (current === undefined || !isActiveState(current.state)) return;
+      if (current.launchMode === "herdr_pane" && exitCode === 0) {
+        const updated: WorkerSessionRecord = {
+          ...current,
+          exitCode,
+          signal,
+          cleanupReason: "herdr pane launcher exited; pane agent is still tracked",
+          evidence: [
+            ...current.evidence,
+            "worker.session.launcher_exit:herdr_pane_still_running",
+            `worker.session.launcher_exit_code:${exitCode ?? "none"}`,
+            `worker.session.launcher_signal:${signal ?? "none"}`
+          ]
+        };
+        this.sessions.set(plan.sessionId, updated);
+        this.handles.delete(plan.sessionId);
+        this.emit(updated, "worker.launcher_exit", ["worker.session.launcher_exit:herdr_pane_still_running"]);
+        return;
+      }
+      if (current.trackingMode === "detached_agent" && exitCode === 0) {
+        const updated: WorkerSessionRecord = {
+          ...current,
+          exitCode,
+          signal,
+          cleanupReason: "launcher exited; detached agent is still tracked",
+          evidence: [
+            ...current.evidence,
+            "worker.session.launcher_exit:detached_agent_still_running",
+            `worker.session.launcher_exit_code:${exitCode ?? "none"}`,
+            `worker.session.launcher_signal:${signal ?? "none"}`
+          ]
+        };
+        this.sessions.set(plan.sessionId, updated);
+        this.handles.delete(plan.sessionId);
+        this.emit(updated, "worker.launcher_exit", ["worker.session.launcher_exit:detached_agent_still_running"]);
+        return;
+      }
+      const state = exitCode === 0 ? "completed" : "failed";
+      this.transition(current, state, [
+        `worker.session.exit_code:${exitCode ?? "none"}`,
+        `worker.session.signal:${signal ?? "none"}`
+      ], {
         exitCode,
         signal,
         stoppedAt: this.clock.now(),
-        cleanupReason: exitCode === 0 ? "worker exited successfully" : "worker process exited",
-        evidence: [
-          ...current.evidence,
-          `worker.session.exit_code:${exitCode ?? "none"}`,
-          `worker.session.signal:${signal ?? "none"}`
-        ]
+        cleanupReason: exitCode === 0 ? "worker exited successfully" : "worker process exited"
       });
       this.handles.delete(plan.sessionId);
     });
@@ -230,11 +726,13 @@ export class WorkerSessionSupervisor {
   }
 
   list(): readonly WorkerSessionRecord[] {
+    this.refreshDetachedAgents();
     return [...this.sessions.values()];
   }
 
   get(sessionId: string): WorkerSessionRecord | undefined {
-    return this.sessions.get(sessionId);
+    const session = this.sessions.get(sessionId);
+    return session === undefined ? undefined : this.refreshDetachedAgent(session);
   }
 
   stop(sessionId: string, reason: string, signal: NodeJS.Signals = "SIGTERM"): WorkerSessionRecord {
@@ -242,37 +740,148 @@ export class WorkerSessionSupervisor {
     if (session === undefined) {
       throw new Error(`worker session not found: ${sessionId}`);
     }
-    if (session.state !== "running") {
+    if (!isActiveState(session.state)) {
       const shouldMarkStopped = session.state === "planned";
-      const updated: WorkerSessionRecord = {
-        ...session,
-        state: shouldMarkStopped ? "stopped" : session.state,
-        stoppedAt: shouldMarkStopped ? this.clock.now() : session.stoppedAt,
-        cleanupReason: reason,
-        evidence: [
-          ...session.evidence,
+      if (shouldMarkStopped) {
+        return this.transition(session, "stopped", [
           "worker.session.stop:not_running",
           `worker.session.stop.reason:${reason}`
-        ]
+        ], {
+          stoppedAt: this.clock.now(),
+          cleanupReason: reason
+        });
+      }
+      const updated: WorkerSessionRecord = {
+        ...session,
+        cleanupReason: reason,
+        evidence: [...session.evidence, "worker.session.stop:not_running", `worker.session.stop.reason:${reason}`]
       };
       this.sessions.set(sessionId, updated);
+      this.emit(updated, "worker.state_change", ["worker.session.stop:not_running"]);
       return updated;
     }
     const stopped = this.handles.get(sessionId)?.stop(signal) ?? false;
-    const updated: WorkerSessionRecord = {
-      ...session,
-      state: "stopped",
+    const updated = this.transition(session, "stopped", [
+      `worker.session.stop:${stopped ? "sent" : "missing_handle"}`,
+      `worker.session.stop.reason:${reason}`
+    ], {
       stoppedAt: this.clock.now(),
       cleanupReason: reason,
-      signal,
-      evidence: [
-        ...session.evidence,
-        `worker.session.stop:${stopped ? "sent" : "missing_handle"}`,
-        `worker.session.stop.reason:${reason}`
-      ]
-    };
-    this.sessions.set(sessionId, updated);
+      signal
+    });
     this.handles.delete(sessionId);
     return updated;
+  }
+
+  heartbeat(sessionId: string, input: WorkerSessionHeartbeatInput | readonly string[] = []): WorkerSessionRecord {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) throw new Error(`worker session not found: ${sessionId}`);
+    const heartbeatInput = (Array.isArray(input)
+      ? { evidence: input as readonly string[] }
+      : input) as WorkerSessionHeartbeatInput;
+    const evidence = ["worker.session.heartbeat", ...(heartbeatInput.evidence ?? [])];
+    const requestedState = heartbeatInput.state ?? (session.state === "stalled" ? "running" : session.state);
+    if (requestedState === "running" || requestedState === "waiting_on_operator") {
+      return this.transition(session, requestedState, evidence, {
+        lastHeartbeatAt: this.clock.now(),
+        usage: mergeUsage(session.usage, heartbeatInput.usage)
+      });
+    }
+    const updated: WorkerSessionRecord = {
+      ...session,
+      lastHeartbeatAt: this.clock.now(),
+      usage: mergeUsage(session.usage, heartbeatInput.usage),
+      evidence: [...session.evidence, ...evidence]
+    };
+    this.sessions.set(sessionId, updated);
+    return updated;
+  }
+
+  markWaitingOnOperator(match: WorkerSessionMatch, evidence: readonly string[] = []): readonly WorkerSessionRecord[] {
+    const matched = this.list().filter((session) => isActiveState(session.state) && this.matches(session, match));
+    return matched.map((session) =>
+      this.transition(session, "waiting_on_operator", [
+        "worker.session.waiting_on_operator",
+        ...evidence
+      ])
+    );
+  }
+
+  resumeAfterOperator(match: WorkerSessionMatch, evidence: readonly string[] = []): readonly WorkerSessionRecord[] {
+    const matched = this.list().filter((session) => session.state === "waiting_on_operator" && this.matches(session, match));
+    return matched.map((session) =>
+      this.transition(session, "running", [
+        "worker.session.operator_answered",
+        ...evidence
+      ], {
+        lastHeartbeatAt: this.clock.now()
+      })
+    );
+  }
+
+  refreshStalled(staleAfterMs: number, now = this.clock.now()): readonly WorkerSessionRecord[] {
+    const nowMs = Date.parse(now);
+    if (!Number.isFinite(staleAfterMs) || staleAfterMs <= 0 || !Number.isFinite(nowMs)) return [];
+    const stalled: WorkerSessionRecord[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.state !== "running") continue;
+      const activityAt = Date.parse(session.lastHeartbeatAt ?? session.startedAt ?? session.stateEnteredAt ?? now);
+      if (!Number.isFinite(activityAt) || nowMs - activityAt < staleAfterMs) continue;
+      stalled.push(this.transition(session, "stalled", [
+        `worker.session.stalled_after_ms:${staleAfterMs}`,
+        `worker.session.last_activity_at:${session.lastHeartbeatAt ?? session.startedAt ?? "unknown"}`
+      ], {}, "worker.stalled"));
+    }
+    return stalled;
+  }
+
+  recordAgentExit(
+    sessionId: string,
+    exitCode: number | null,
+    signal: NodeJS.Signals | null,
+    reason = "detached agent exited"
+  ): WorkerSessionRecord {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) throw new Error(`worker session not found: ${sessionId}`);
+    const updated = this.transition(session, exitCode === 0 ? "completed" : "failed", [
+        `worker.session.agent_exit_code:${exitCode ?? "none"}`,
+        `worker.session.agent_signal:${signal ?? "none"}`
+      ], {
+        exitCode,
+        signal,
+        stoppedAt: this.clock.now(),
+        cleanupReason: reason
+      });
+    this.handles.delete(sessionId);
+    return updated;
+  }
+
+  metrics(now = this.clock.now()): WorkerSessionMetrics {
+    const nowMs = Date.parse(now);
+    const byState: Record<string, number> = {};
+    const timeInStateMs: Record<string, number> = {};
+    const usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+    for (const session of this.sessions.values()) {
+      byState[session.state] = (byState[session.state] ?? 0) + 1;
+      const enteredAtMs = Date.parse(session.stateEnteredAt ?? session.startedAt ?? now);
+      const endAtMs = session.stoppedAt === undefined ? nowMs : Date.parse(session.stoppedAt);
+      const duration = Number.isFinite(enteredAtMs) && Number.isFinite(endAtMs)
+        ? Math.max(0, endAtMs - enteredAtMs)
+        : 0;
+      timeInStateMs[session.state] = (timeInStateMs[session.state] ?? 0) + duration;
+      usage.inputTokens += usageValue(session.usage?.inputTokens);
+      usage.outputTokens += usageValue(session.usage?.outputTokens);
+      usage.costUsd += usageValue(session.usage?.costUsd);
+    }
+    return {
+      total: this.sessions.size,
+      byState,
+      timeInStateMs,
+      usage
+    };
+  }
+
+  pollEvents(cursor = 0, limit = 100): CicloEventPollResult {
+    return this.events.poll(cursor, limit);
   }
 }

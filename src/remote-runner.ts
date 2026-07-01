@@ -277,6 +277,7 @@ function kubernetesArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGu
   const jobName = clean(input.kubernetes?.jobName) ?? input.runnerId ?? "ciclo-runner";
   const serviceAccount = clean(input.kubernetes?.serviceAccount) ?? "ciclo-runner";
   const extraEnv = envLines(input.environment);
+  const herdrSession = clean(input.herdrSession) ?? repoSessionName();
   const manifest = [
     "apiVersion: batch/v1",
     "kind: Job",
@@ -296,7 +297,7 @@ function kubernetesArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGu
     "              add: [\"NET_ADMIN\"]",
     "          env:",
     `            - name: CICLO_REMOTE_SESSION_ID\n              value: ${JSON.stringify(input.runnerId ?? jobName)}`,
-    `            - name: CICLO_HERDR_SESSION\n              value: ${JSON.stringify(input.herdrSession ?? repoSessionName())}`,
+    `            - name: CICLO_HERDR_SESSION\n              value: ${JSON.stringify(herdrSession)}`,
     `            - name: CICLO_REPO_PATH\n              value: ${JSON.stringify(input.repoPath)}`,
     `            - name: CICLO_WIREGUARD_INTERFACE\n              value: ${JSON.stringify(wireGuard.interfaceName)}`,
     ...(extraEnv.length === 0 ? [] : [extraEnv]),
@@ -333,6 +334,7 @@ function lambdaArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGuardT
   const sourceS3Uri = clean(input.awsLambda?.sourceS3Uri) ?? `s3://ciclo-runner-artifacts/${microVmImageName}.tar`;
   const microVmImageIdentifier = clean(input.awsLambda?.microVmImageIdentifier) ??
     `arn:aws:lambda-microvms:us-east-1:123456789012:microvm-image:${microVmImageName}`;
+  const herdrSession = clean(input.herdrSession) ?? repoSessionName();
   const payload = {
     MicroVmImageName: microVmImageName,
     Source: {
@@ -348,7 +350,7 @@ function lambdaArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGuardT
     },
     Environment: {
       Variables: {
-        CICLO_HERDR_SESSION: input.herdrSession ?? repoSessionName(),
+        CICLO_HERDR_SESSION: herdrSession,
         CICLO_REPO_PATH: input.repoPath,
         CICLO_WIREGUARD_INTERFACE: wireGuard.interfaceName,
         ...(input.environment ?? {})
@@ -403,6 +405,7 @@ function lambdaArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGuardT
 function cloudflareArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGuardTunnelPlan): RemoteRunnerProviderPlan {
   const workerName = clean(input.cloudflare?.workerName) ?? input.runnerId ?? "ciclo-runner";
   const account = clean(input.cloudflare?.accountId) ?? "${CLOUDFLARE_ACCOUNT_ID}";
+  const herdrSession = clean(input.herdrSession) ?? repoSessionName();
   const wrangler = [
     `name = "${workerName}"`,
     "main = \"src/index.ts\"",
@@ -410,7 +413,7 @@ function cloudflareArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGu
     `account_id = "${account}"`,
     "",
     "[vars]",
-    `CICLO_HERDR_SESSION = "${input.herdrSession ?? repoSessionName()}"`,
+    `CICLO_HERDR_SESSION = "${herdrSession}"`,
     `CICLO_REPO_PATH = "${input.repoPath}"`,
     `CICLO_WIREGUARD_INTERFACE = "${wireGuard.interfaceName}"`
   ].join("\n");
@@ -478,14 +481,16 @@ export function buildRemoteRunnerLaunchPlan(
   const image = required(input.image, "image");
   const repoPath = required(input.repoPath, "repo_path");
   const prompt = required(input.prompt, "prompt");
-  const wireGuard = wireGuardPlan({ ...input, runnerId: planId, image, repoPath, prompt });
-  const herdrRemoteTarget = remoteTarget({ ...input, runnerId: planId, image, repoPath, prompt }, wireGuard);
+  const herdrSession = clean(input.herdrSession) ?? repoSessionName();
+  const resolvedInput = { ...input, runnerId: planId, image, repoPath, prompt, herdrSession };
+  const wireGuard = wireGuardPlan(resolvedInput);
+  const herdrRemoteTarget = remoteTarget(resolvedInput, wireGuard);
   const attach = buildCicloAttachPlan({
     remoteTarget: herdrRemoteTarget,
-    session: clean(input.herdrSession) ?? repoSessionName()
+    session: herdrSession
   });
   const runnerArtifacts = pluginRegistry.require(input.runnerKind).plan(
-    { ...input, runnerId: planId, image, repoPath, prompt },
+    resolvedInput,
     wireGuard
   );
   const evidence = [
@@ -515,7 +520,7 @@ export function buildRemoteRunnerLaunchPlan(
     repoUrl: clean(input.repoUrl),
     repoPath,
     prompt,
-    herdrSession: clean(input.herdrSession) ?? repoSessionName(),
+    herdrSession,
     herdrRemoteTarget,
     wireGuard,
     attach,

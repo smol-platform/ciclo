@@ -27,6 +27,25 @@ const baseRequest = {
   }
 };
 
+function withHerdrSessionEnv(sessionName: string, run: () => void): void {
+  const before = {
+    CICLO_SESSION_NAME: process.env.CICLO_SESSION_NAME,
+    HERDR_SESSION_NAME: process.env.HERDR_SESSION_NAME,
+    CICLO_REUSE_HERDR_SESSION: process.env.CICLO_REUSE_HERDR_SESSION
+  };
+  delete process.env.CICLO_SESSION_NAME;
+  process.env.HERDR_SESSION_NAME = sessionName;
+  delete process.env.CICLO_REUSE_HERDR_SESSION;
+  try {
+    run();
+  } finally {
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 test("Kubernetes remote runner plan includes WireGuard tunnel Herdr attach and job artifact", () => {
   const plan = buildRemoteRunnerLaunchPlan({
     ...baseRequest,
@@ -100,8 +119,15 @@ test("Cloudflare runner plan requires a container or userspace connector for Her
 });
 
 test("Ciclo attach plan targets overview or one agent inside a Herdr session", () => {
-  const defaultOverview = buildCicloAttachPlan();
-  assert.deepEqual(defaultOverview.args, ["--session", "ciclo"]);
+  const before = process.env.CICLO_REUSE_HERDR_SESSION;
+  process.env.CICLO_REUSE_HERDR_SESSION = "false";
+  try {
+    const defaultOverview = buildCicloAttachPlan();
+    assert.deepEqual(defaultOverview.args, ["--session", "ciclo"]);
+  } finally {
+    if (before === undefined) delete process.env.CICLO_REUSE_HERDR_SESSION;
+    else process.env.CICLO_REUSE_HERDR_SESSION = before;
+  }
 
   const overview = buildCicloAttachPlan({ session: "ciclo" });
   assert.deepEqual(overview.args, ["--session", "ciclo"]);
@@ -135,13 +161,33 @@ test("remote runner registry records launch plans for later status", () => {
 });
 
 test("remote runner plans default Herdr session to repository name", () => {
-  const plan = buildRemoteRunnerLaunchPlan({
-    ...baseRequest,
-    herdrSession: undefined
-  });
+  const before = process.env.CICLO_REUSE_HERDR_SESSION;
+  process.env.CICLO_REUSE_HERDR_SESSION = "false";
+  try {
+    const plan = buildRemoteRunnerLaunchPlan({
+      ...baseRequest,
+      herdrSession: undefined
+    });
 
-  assert.equal(plan.herdrSession, "ciclo");
-  assert.deepEqual(plan.attach.args, ["--remote", "ciclo@10.55.0.7:/workspace/project", "--session", "ciclo"]);
+    assert.equal(plan.herdrSession, "ciclo");
+    assert.deepEqual(plan.attach.args, ["--remote", "ciclo@10.55.0.7:/workspace/project", "--session", "ciclo"]);
+  } finally {
+    if (before === undefined) delete process.env.CICLO_REUSE_HERDR_SESSION;
+    else process.env.CICLO_REUSE_HERDR_SESSION = before;
+  }
+});
+
+test("remote runner defaults reuse active Herdr session", () => {
+  withHerdrSessionEnv("operator-main", () => {
+    const plan = buildRemoteRunnerLaunchPlan({
+      ...baseRequest,
+      herdrSession: undefined
+    });
+
+    assert.equal(plan.herdrSession, "operator-main");
+    assert.deepEqual(plan.attach.args, ["--remote", "ciclo@10.55.0.7:/workspace/project", "--session", "operator-main"]);
+    assert.match(plan.artifacts[0]?.content ?? "", /operator-main/);
+  });
 });
 
 test("remote runner registry accepts new provider plugins without core branching", () => {

@@ -26,10 +26,34 @@ test("benchmark runner loads the fixture suite in deterministic order", () => {
     "force_compact_blocks_dispatch",
     "remote_runner_kubernetes_wireguard_attach",
     "worker_launch_codex_session",
-    "worker_stop_completed_claude_session"
+    "worker_stop_completed_claude_session",
+    "claude_loop_surfaces_blocker",
+    "codex_goal_launches_worker",
+    "codex_goal_answer_reasonable_question"
   ]) {
     assert.ok(ids.includes(id), `missing benchmark scenario ${id}`);
   }
+});
+
+test("fixture candidate preserves harness control directives and question routing", () => {
+  const claudeLoop = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/claude_loop_surfaces_blocker.json");
+  const claudeCandidate = buildFixtureCandidate(claudeLoop);
+  assert.ok(claudeCandidate.evidence.includes("harness.control.claude-code:/loop"));
+  assert.ok(claudeCandidate.actions.some((action) => action.kind === "use_claude_loop_directive"));
+  assert.ok(claudeCandidate.actions.some((action) => action.kind === "surface_problem_to_controlling_session"));
+  assert.match(claudeCandidate.text, /Use \/loop for claude-code/);
+
+  const codexGoal = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/codex_goal_launches_worker.json");
+  const codexCandidate = buildFixtureCandidate(codexGoal);
+  assert.ok(codexCandidate.evidence.includes("harness.control.codex:/goal"));
+  assert.ok(codexCandidate.actions.some((action) => action.kind === "use_codex_goal_directive"));
+  assert.match(codexCandidate.text, /Use \/goal for codex/);
+
+  const answerable = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/codex_goal_answer_reasonable_question.json");
+  const answerCandidate = buildFixtureCandidate(answerable);
+  assert.ok(answerCandidate.evidence.includes("harness.question.route:answer_directly"));
+  assert.ok(answerCandidate.actions.some((action) => action.kind === "answer_reasonable_harness_question"));
+  assert.match(answerCandidate.text, /Run npm run check/);
 });
 
 test("fixture candidate satisfies expected traits without disallowed actions", () => {

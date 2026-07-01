@@ -62,6 +62,8 @@ node dist/src/cli.js benchmark --scenario-dir tests/fixtures/benchmarks
 
 The benchmark runner loads scenario fixtures and scores Ciclo behavior with deterministic safety checks plus configured driver and judge models.
 
+For a walkthrough of what each benchmark category covers, see [Ciclo Benchmarks](./benchmarks.md).
+
 ### MCP Stdio
 
 Use stdio MCP for local Claude, Codex, or generic MCP clients:
@@ -75,6 +77,32 @@ Legacy package script:
 ```bash
 npm run mcp:stdio
 ```
+
+### MCP Client Install
+
+Install Ciclo into another project's MCP config so a Claude or Codex session can use Ciclo as its control plane:
+
+```bash
+ciclo mcp install --client claude --project /path/to/project
+ciclo mcp install --client codex --project /path/to/project
+ciclo mcp install --client all --project /path/to/project --dry-run --compact
+ciclo mcp install --client claude --project /path/to/project --claude-channel
+```
+
+Claude installs write `.mcp.json`. Codex installs write `.codex/config.toml`. The generated server config runs `ciclo mcp stdio` and sets `CICLO_PROJECT_ROOT` to the target project.
+
+Use `--claude-channel` when a Claude Code session should load Ciclo as a channel-capable MCP server. The install response includes the Claude launch selector, such as `--dangerously-load-development-channels server:ciclo`.
+
+Install the companion project skills so Claude or Codex knows how to use Ciclo once the MCP tools are available:
+
+```bash
+ciclo skill install --client all --project /path/to/project
+ciclo skill install --client claude --project /path/to/project --dry-run --compact
+```
+
+Claude skill installs write `.claude/skills/ciclo-mcp.md`. Codex-compatible installs write `.agents/skills/ciclo-mcp/`.
+
+For the full operator workflow, see [onboarding-project.md](onboarding-project.md).
 
 ### Ciclo-Managed Worker Sessions
 
@@ -90,12 +118,17 @@ From an MCP client, use:
 
 ```text
 ciclo_launch_worker_session
+ciclo_heartbeat_worker_session
 ciclo_list_worker_sessions
 ciclo_stop_worker_session
+ciclo_poll_events
+ciclo_board
 ciclo://worker-sessions
+ciclo://events
+ciclo://board
 ```
 
-A launch request includes the harness, loop, prompt, optional Beads issue, model, effort, cwd, and `dry_run`. Use `dry_run: true` to inspect the launch command without starting a process.
+A launch request includes the harness, loop, prompt, optional Beads issue, model, effort, cwd, `extra_args`, `isolation`, worktree options, and `dry_run`. Use `dry_run: true` to inspect the launch command and planned worktree without starting a process. Use `isolation: "worktree"` for bead-level fan-out; Ciclo defaults the branch to `ciclo/<bead-id>` unless `worktree_branch` is set.
 
 Example launch payload:
 
@@ -110,7 +143,9 @@ Example launch payload:
 }
 ```
 
-Ciclo owns the worker lifecycle. Workers should communicate back through Ciclo MCP tools such as `ciclo_update_work`, `ciclo_ask_operator`, `ciclo_report_feedback`, and `ciclo_close_work`.
+Ciclo owns the worker lifecycle. Workers should communicate back through Ciclo MCP tools such as `ciclo_update_work`, `ciclo_ask_operator`, `ciclo_report_feedback`, and `ciclo_close_work`. Use `ciclo_poll_events` with the returned cursor for monitoring state changes, and use `ciclo_board` for the joined operator dashboard.
+Workers should heartbeat through `ciclo_heartbeat_worker_session` while active and may include token and cost deltas. `ciclo_status`, `ciclo_board`, and `ciclo_list_worker_sessions` accept `stale_after_ms` to mark silent running workers as `stalled`.
+For PR-producing loops, pass `expected_pr_after_ms` to `ciclo_board`. If a worker branch has no PR after that deadline, Ciclo emits a `blocker.raised` event with `kind: "expected_pr_missing"` and includes recovery actions on the board row.
 
 ### Remote Runner Sessions
 
@@ -212,7 +247,7 @@ node dist/src/cli.js attach --remote ciclo@10.44.0.2:/workspace/ciclo --session 
 node dist/src/cli.js attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo --dry-run --compact
 ```
 
-If `--session` is omitted, Ciclo uses the repository directory name as the Herdr session name. For this repo that default is `ciclo`.
+If `--session` is omitted, Ciclo first reuses the active Herdr session when it can detect one, then falls back to the repository directory name. Every local Claude/Codex worker session launched from that MCP session uses a visible Herdr agent pane, so attaching to the Ciclo session shows the worker jobs directly. For this repo the fallback is `ciclo`. Set `CICLO_REUSE_HERDR_SESSION=false` to force direct process launches and repo-name fallback.
 
 AWS Lambda runner plans target Lambda MicroVMs, not legacy Lambda function invocation. The AWS plugin emits `aws lambda-microvms` image creation plus `run-microvm`, `suspend-microvm`, `resume-microvm`, and `terminate-microvm` lifecycle commands. Cloudflare runner plans remain control-plane plans and include warnings when a container or userspace connector is needed for Herdr plus WireGuard interactivity.
 
@@ -330,6 +365,7 @@ node dist/src/cli.js benchmark --scenario-dir tests/fixtures/benchmarks
 # MCP
 node dist/src/cli.js mcp stdio
 node dist/src/cli.js mcp http --host 127.0.0.1 --port 7331 --path /mcp
+node dist/src/cli.js mcp install --client claude --project /path/to/project
 
 # quality gates
 just check

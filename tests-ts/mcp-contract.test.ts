@@ -6,6 +6,8 @@ import { cicloMcpPrompts, cicloMcpResources, cicloMcpTools } from "../src/mcp-co
 const expectedTools = [
   "ciclo_status",
   "ciclo_loop_status",
+  "ciclo_poll_events",
+  "ciclo_board",
   "ciclo_list_ready_work",
   "ciclo_claim_work",
   "ciclo_start_work",
@@ -22,6 +24,7 @@ const expectedTools = [
   "ciclo_list_remote_runners",
   "ciclo_attach_plan",
   "ciclo_launch_worker_session",
+  "ciclo_heartbeat_worker_session",
   "ciclo_list_worker_sessions",
   "ciclo_stop_worker_session",
   "ciclo_auth_device_start",
@@ -35,6 +38,8 @@ const expectedResources = [
   "ciclo://status",
   "ciclo://loops",
   "ciclo://loops/{loop_id}",
+  "ciclo://events",
+  "ciclo://board",
   "ciclo://work/ready",
   "ciclo://work/{bead_id}",
   "ciclo://questions",
@@ -100,6 +105,7 @@ test("sensitive MCP tools require audit redaction", () => {
     "ciclo_register_remote_session",
     "ciclo_launch_remote_runner",
     "ciclo_launch_worker_session",
+    "ciclo_heartbeat_worker_session",
     "ciclo_stop_worker_session",
     "ciclo_auth_device_start",
     "ciclo_auth_device_poll"
