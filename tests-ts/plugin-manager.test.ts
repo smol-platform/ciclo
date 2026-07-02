@@ -16,8 +16,10 @@ import {
   buildRemoteRunnerLaunchPlan,
   createDefaultRemoteRunnerPluginRegistry
 } from "../src/remote-runner.js";
+import { SecretProviderRegistry } from "../src/secret-provider.js";
 
 const fixturePluginPath = resolve("tests/fixtures/plugins/fly-runner");
+const fixtureSecretPluginPath = resolve("tests/fixtures/plugins/keychain-secrets");
 
 function tempRoot(): string {
   return mkdtempSync(join(tmpdir(), "ciclo-plugin-test-"));
@@ -35,9 +37,19 @@ test("plugin manifest validation accepts remote runner package manifests", () =>
 
   assert.equal(manifest.name, "@example/ciclo-runner-fly");
   assert.deepEqual(manifest.runnerKinds, ["fly"]);
+  const secretManifest = parsePluginManifest({
+    schema: "ciclo.plugin.v1",
+    name: "@example/ciclo-secrets-keychain",
+    version: "1.0.0",
+    entrypoint: "./dist/index.js",
+    capabilities: ["secret-provider"],
+    secretProviderKinds: ["keychain"]
+  });
+  assert.deepEqual(secretManifest.runnerKinds, []);
+  assert.deepEqual(secretManifest.secretProviderKinds, ["keychain"]);
   assert.throws(
     () => parsePluginManifest({ schema: "ciclo.plugin.v1", name: "bad", version: "1", entrypoint: "../bad.js", capabilities: [], runnerKinds: [] }),
-    /remote-runner capability/
+    /remote-runner or secret-provider capability/
   );
 });
 
@@ -62,6 +74,39 @@ test("local plugin install writes trusted enabled config and can toggle state", 
     assert.equal(disabled.enabled, false);
     const enabled = setPluginEnabled("@example/ciclo-runner-fly", true, paths);
     assert.equal(enabled.enabled, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("enabled external plugin activates a custom secret provider kind", async () => {
+  const root = tempRoot();
+  try {
+    const paths = defaultPluginPaths(root);
+    const installed = installPlugin({
+      packageName: "@example/ciclo-secrets-keychain",
+      path: fixtureSecretPluginPath,
+      trust: true,
+      enable: true,
+      now: "2026-07-01T00:00:00.000Z"
+    }, paths);
+    assert.ok(installed.evidence.includes("plugin.secret_provider_kind:keychain"));
+
+    const secretRegistry = new SecretProviderRegistry();
+    const activation = await activateConfiguredPlugins(
+      createDefaultRemoteRunnerPluginRegistry(),
+      paths,
+      secretRegistry
+    );
+
+    assert.deepEqual(activation.activated, ["@example/ciclo-secrets-keychain"]);
+    assert.equal(secretRegistry.list()[0]?.id, "keychain-test");
+    const resolved = await secretRegistry.resolve({
+      providerId: "keychain-test",
+      secretRef: "keychain://ciclo/demo",
+      field: "token"
+    });
+    assert.equal(resolved.value, "fixture-secret");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

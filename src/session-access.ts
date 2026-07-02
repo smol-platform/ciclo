@@ -25,6 +25,8 @@ export type SessionAccessAction =
   | "register_remote_session"
   | "remote_tracker_sync"
   | "answer_agent_question"
+  | "request_secret"
+  | "use_brain"
   | "grant_access"
   | "revoke_access";
 
@@ -66,6 +68,8 @@ const mutatingSessionActions = new Set<SessionAccessAction>([
   "register_remote_session",
   "remote_tracker_sync",
   "answer_agent_question",
+  "request_secret",
+  "use_brain",
   "grant_access",
   "revoke_access"
 ]);

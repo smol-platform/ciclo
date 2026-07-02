@@ -71,6 +71,47 @@ test("Kubernetes remote runner plan includes WireGuard tunnel Herdr attach and j
   assert.match(plan.artifacts[0]?.content ?? "", /kind: Job/);
   assert.ok(plan.commands.some((command) => command.includes("kubectl -n ciclo-runners apply")));
   assert.ok(plan.evidence.includes("remote.runner.wireguard:planned"));
+  assert.equal(plan.mcpConfig?.projectRoot, "/workspace/project");
+  assert.deepEqual(plan.mcpConfig?.clients, ["codex"]);
+  assert.ok(plan.mcpConfig?.artifacts.some((artifact) => artifact.name === ".codex/config.toml"));
+  assert.ok(plan.evidence.includes("remote.runner.mcp_config:planned"));
+});
+
+test("remote runner plan can generate Claude .mcp.json for the remote repo path", () => {
+  const plan = buildRemoteRunnerLaunchPlan({
+    ...baseRequest,
+    harnessId: "claude-code",
+    mcpClients: ["claude", "codex"],
+    mcpServerName: "ciclo_remote",
+    mcpCommand: "ciclo",
+    mcpVars: { CICLO_REUSE_HERDR_SESSION: "true" },
+    mcpAdditionalServers: {
+      filesystem: {
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
+        env: { MCP_FS_MODE: "remote" }
+      }
+    },
+    kubernetes: {
+      namespace: "ciclo-runners",
+      serviceAccount: "ciclo-runner",
+      jobName: "ciclo-remote-1"
+    }
+  });
+
+  assert.deepEqual(plan.mcpConfig?.clients, ["claude", "codex"]);
+  assert.equal(plan.mcpConfig?.serverName, "ciclo_remote");
+  assert.deepEqual(plan.mcpConfig?.varKeys, ["CICLO_REUSE_HERDR_SESSION"]);
+  assert.deepEqual(plan.mcpConfig?.additionalServerNames, ["filesystem"]);
+
+  const claudeArtifact = plan.mcpConfig?.artifacts.find((artifact) => artifact.name === ".mcp.json");
+  assert.ok(claudeArtifact);
+  assert.match(claudeArtifact.content, /"ciclo_remote"/);
+  assert.match(claudeArtifact.content, /"filesystem"/);
+  assert.match(claudeArtifact.content, /"CICLO_PROJECT_ROOT": "\/workspace\/project"/);
+  assert.match(claudeArtifact.content, /"CICLO_REUSE_HERDR_SESSION": "true"/);
+  assert.match(claudeArtifact.content, /"MCP_FS_MODE": "remote"/);
+  assert.ok(plan.artifacts.some((artifact) => artifact.name === ".mcp.json"));
 });
 
 test("AWS Lambda runner plan uses the MicroVM execution model", () => {

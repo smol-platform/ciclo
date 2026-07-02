@@ -52,6 +52,40 @@ test("merges Claude MCP config without removing existing servers", () => {
   }
 });
 
+test("installs additional MCP servers alongside Ciclo for Claude and Codex", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "ciclo-mcp-additional-"));
+  try {
+    const result = installCicloMcp({
+      projectRoot,
+      clients: ["claude", "codex"],
+      additionalServers: {
+        filesystem: {
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
+          env: { MCP_FS_MODE: "workspace" }
+        }
+      }
+    });
+
+    assert.deepEqual(Object.keys(result.additionalServers), ["filesystem"]);
+
+    const claudeConfig = JSON.parse(readFileSync(join(projectRoot, ".mcp.json"), "utf8")) as {
+      mcpServers?: Record<string, { command?: string; args?: readonly string[]; ["env"]?: Record<string, string> }>;
+    };
+    assert.equal(claudeConfig.mcpServers?.filesystem?.command, "npx");
+    assert.deepEqual(claudeConfig.mcpServers?.filesystem?.args, ["-y", "@modelcontextprotocol/server-filesystem", "."]);
+    assert.equal(claudeConfig.mcpServers?.filesystem?.["env"]?.MCP_FS_MODE, "workspace");
+    assert.ok(claudeConfig.mcpServers?.ciclo);
+
+    const codexConfig = readFileSync(join(projectRoot, ".codex", "config.toml"), "utf8");
+    assert.match(codexConfig, /\[mcp_servers\.filesystem\]/u);
+    assert.match(codexConfig, /command = "npx"/u);
+    assert.match(codexConfig, /MCP_FS_MODE = "workspace"/u);
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
 test("installs Claude MCP config with optional channel mode", () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "ciclo-mcp-claude-channel-"));
   try {
@@ -73,6 +107,65 @@ test("installs Claude MCP config with optional channel mode", () => {
     };
     assert.equal(config.mcpServers?.ciclo_channel?.env?.CICLO_CLAUDE_CHANNEL, "true");
     assert.ok(result.nextSteps.some((step) => step.includes("--dangerously-load-development-channels server:ciclo_channel")));
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("installs MCP secret environment values while redacting install results", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "ciclo-mcp-secret-env-"));
+  try {
+    const result = installCicloMcp({
+      projectRoot,
+      clients: ["claude"],
+      secretEnv: [
+        {
+          name: "API_TOKEN",
+          value: "fixture-secret",
+          providerId: "fixture",
+          providerKind: "test",
+          secretRefHash: "abc123",
+          format: "Bearer ${secret}",
+          evidence: ["secret.fixture"]
+        }
+      ]
+    });
+    assert.equal(result.server["env"].API_TOKEN, "[redacted secret]");
+    assert.equal(result.secretEnv[0]?.name, "API_TOKEN");
+    assert.equal(result.secretEnv[0]?.secretRefHash, "abc123");
+    assert.equal(result.secretEnv[0]?.formatApplied, true);
+    assert.doesNotMatch(JSON.stringify(result), /fixture-secret/u);
+
+    const config = JSON.parse(readFileSync(join(projectRoot, ".mcp.json"), "utf8")) as {
+      mcpServers?: Record<string, { readonly ["env"]?: Record<string, string> }>;
+    };
+    assert.equal(config.mcpServers?.ciclo?.["env"]?.API_TOKEN, "Bearer fixture-secret");
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("rejects MCP secret environment formats without exactly one secret placeholder", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "ciclo-mcp-secret-format-"));
+  try {
+    assert.throws(
+      () => installCicloMcp({
+        projectRoot,
+        clients: ["claude"],
+        secretEnv: [
+          {
+            name: "API_TOKEN",
+            value: "fixture-secret",
+            providerId: "fixture",
+            providerKind: "test",
+            secretRefHash: "abc123",
+            format: "Bearer token",
+            evidence: ["secret.fixture"]
+          }
+        ]
+      }),
+      /format must contain exactly one \$\{secret\} placeholder/u
+    );
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });
   }

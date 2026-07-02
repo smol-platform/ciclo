@@ -6,6 +6,7 @@ import { cicloMcpPrompts, cicloMcpResources, cicloMcpTools } from "../src/mcp-co
 const expectedTools = [
   "ciclo_status",
   "ciclo_loop_status",
+  "ciclo_decide",
   "ciclo_poll_events",
   "ciclo_board",
   "ciclo_list_ready_work",
@@ -22,6 +23,8 @@ const expectedTools = [
   "ciclo_detach_remote_session",
   "ciclo_launch_remote_runner",
   "ciclo_list_remote_runners",
+  "ciclo_list_secret_providers",
+  "ciclo_request_secret",
   "ciclo_attach_plan",
   "ciclo_launch_worker_session",
   "ciclo_heartbeat_worker_session",
@@ -46,6 +49,7 @@ const expectedResources = [
   "ciclo://feedback",
   "ciclo://remote-sessions",
   "ciclo://remote-runners",
+  "ciclo://secret-providers",
   "ciclo://worker-sessions",
   "ciclo://session/access",
   "ciclo://users/me",
@@ -91,6 +95,9 @@ test("mutating MCP tools are not marked read-only and have side effects", () => 
   assert.equal(cicloMcpTools.find((tool) => tool.name === "ciclo_close_work")?.permission.capability, "work.close");
   assert.equal(cicloMcpTools.find((tool) => tool.name === "ciclo_register_remote_session")?.permission.capability, "remote.register");
   assert.equal(cicloMcpTools.find((tool) => tool.name === "ciclo_launch_remote_runner")?.permission.capability, "remote.register");
+  assert.equal(cicloMcpTools.find((tool) => tool.name === "ciclo_request_secret")?.permission.capability, "secret.read");
+  assert.equal(cicloMcpTools.find((tool) => tool.name === "ciclo_decide")?.permission.capability, "brain.decide");
+  assert.deepEqual(cicloMcpTools.find((tool) => tool.name === "ciclo_decide")?.sideEffects, ["model_call"]);
   assert.equal(cicloMcpTools.find((tool) => tool.name === "ciclo_launch_worker_session")?.permission.action, "send_prompt");
 });
 
@@ -101,9 +108,11 @@ test("sensitive MCP tools require audit redaction", () => {
     "ciclo_close_work",
     "ciclo_ask_operator",
     "ciclo_answer_question",
+    "ciclo_decide",
     "ciclo_report_feedback",
     "ciclo_register_remote_session",
     "ciclo_launch_remote_runner",
+    "ciclo_request_secret",
     "ciclo_launch_worker_session",
     "ciclo_heartbeat_worker_session",
     "ciclo_stop_worker_session",

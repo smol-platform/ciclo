@@ -25,6 +25,7 @@ import {
 } from "./client-auth.js";
 import type { AccessScope } from "./access-grants.js";
 import { cicloMcpPrompts, cicloMcpResources, cicloMcpTools, type McpPromptContract } from "./mcp-contract.js";
+import type { CicloMcpAdditionalServerConfig, CicloMcpInstallClient, CicloMcpSecretEnvBinding } from "./mcp-install.js";
 import {
   OperatorRoutingStore,
   type FeedbackSeverity,
@@ -46,8 +47,35 @@ import {
   type RemoteRunnerKind,
   type WireGuardTunnelRequest
 } from "./remote-runner.js";
+import type { RemoteHeartbeatClient, RemoteSessionRegistry } from "./remote-session-registry.js";
 import { activateConfiguredPlugins, defaultPluginPaths } from "./plugin-manager.js";
 import { GitHubCliRepoBoardProvider, type RepoBoardProvider, type RepoBoardStatus } from "./repo-board.js";
+import {
+  createDefaultSecretProviderRegistry,
+  SecretProviderRegistry
+} from "./secret-provider.js";
+import {
+  launchTaskReviewSession,
+  type TaskReviewSessionResult
+} from "./task-review-session.js";
+import { CicloInternalHeartbeat } from "./internal-heartbeat.js";
+import {
+  openAiDecisionPurposes,
+  openAiBrainPolicy,
+  PiSdkOpenAiBrain,
+  type OpenAiBrain,
+  type OpenAiDecisionPurpose
+} from "./openai-brain.js";
+import { CICLO_VERSION } from "./version.js";
+import {
+  configMcpSecretBindingParams,
+  createSecretProviderRegistryFromConfig,
+  loadCicloProjectConfig,
+  mergeRemoteRunnerLaunchWithConfig,
+  mergeWorkerLaunchWithConfig,
+  redactedCicloProjectConfig,
+  type CicloProjectConfig
+} from "./ciclo-config.js";
 
 export interface PendingQuestion {
   readonly questionId: string;
@@ -104,6 +132,8 @@ export interface CicloMcpReadService {
 
 export interface CicloMcpRuntimeContext {
   readonly auth: ClientAuthContext;
+  readonly projectConfig?: CicloProjectConfig;
+  readonly projectConfigEvidence?: readonly string[];
   readonly claudeChannel?: CicloClaudeChannelRuntimeConfig;
   readonly eventStore?: CicloEventStore;
   readonly deviceFlow?: DeviceAuthorizationFlow;
@@ -118,7 +148,12 @@ export interface CicloMcpRuntimeContext {
   readonly operatorRouting?: OperatorRoutingStore;
   readonly remoteTrackerSync?: BeadsRemoteTrackerSync;
   readonly workerSupervisor?: WorkerSessionSupervisor;
+  readonly remoteSessionRegistry?: RemoteSessionRegistry;
+  readonly remoteHeartbeatClient?: RemoteHeartbeatClient;
   readonly remoteRunnerRegistry?: RemoteRunnerRegistry;
+  readonly secretProviderRegistry?: SecretProviderRegistry;
+  readonly openAiBrain?: OpenAiBrain;
+  readonly internalHeartbeat?: CicloInternalHeartbeat;
   readonly repoBoardProvider?: RepoBoardProvider;
   readonly repoBoardEventKeys?: Set<string>;
 }
@@ -185,6 +220,11 @@ function booleanParam(params: unknown, key: string, fallback = false): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function optionalBooleanParam(params: unknown, key: string): boolean | undefined {
+  const value = asRecord(params)[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function urgencyParam(value: string): QuestionUrgency {
   if (value === "low" || value === "high" || value === "blocking") return value;
   return "normal";
@@ -208,6 +248,11 @@ function signalParam(value: string): NodeJS.Signals {
 function remoteRunnerKindParam(value: string): RemoteRunnerKind {
   if (value.trim().length > 0) return value;
   throw new Error("runner_kind must be a non-empty remote runner kind");
+}
+
+function openAiDecisionPurposeParam(value: string): OpenAiDecisionPurpose {
+  if ((openAiDecisionPurposes as readonly string[]).includes(value)) return value as OpenAiDecisionPurpose;
+  throw new Error(`purpose must be one of ${openAiDecisionPurposes.join(", ")}`);
 }
 
 function stringRecordParam(params: unknown, key: string): Record<string, string> | undefined {
@@ -239,6 +284,85 @@ function wireGuardParam(params: unknown): WireGuardTunnelRequest | undefined {
 function stringListParam(params: unknown, key: string): readonly string[] {
   const value = asRecord(params)[key];
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function mcpClientListParam(params: unknown, key: string): readonly CicloMcpInstallClient[] | undefined {
+  const clients = stringListParam(params, key).filter((client): client is CicloMcpInstallClient =>
+    client === "claude" || client === "codex"
+  );
+  return clients.length === 0 ? undefined : [...new Set(clients)];
+}
+
+function assertMcpEnvName(name: string): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+    throw new Error(`MCP env name must be a shell-safe environment variable name: ${name}`);
+  }
+  if (name === "CICLO_PROJECT_ROOT" || name === "CICLO_CLAUDE_CHANNEL") {
+    throw new Error(`MCP env name is reserved by Ciclo: ${name}`);
+  }
+}
+
+function mcpEnvParam(params: unknown): Record<string, string> | undefined {
+  const input = asRecord(params).mcp_env;
+  if (input === undefined) return undefined;
+  const env = asRecord(input);
+  const output: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    assertMcpEnvName(name);
+    if (typeof value !== "string") throw new Error(`mcp_env.${name} must be a string`);
+    output[name] = value;
+  }
+  return output;
+}
+
+function mcpAdditionalServersParam(params: unknown): Record<string, CicloMcpAdditionalServerConfig> | undefined {
+  const input = asRecord(params).mcp_additional_servers;
+  if (input === undefined) return undefined;
+  const servers = asRecord(input);
+  const output: Record<string, CicloMcpAdditionalServerConfig> = {};
+  for (const [name, value] of Object.entries(servers)) {
+    const server = asRecord(value);
+    const command = stringParam(server, "command");
+    if (command.length === 0) throw new Error(`mcp_additional_servers.${name}.command is required`);
+    output[name] = {
+      command,
+      args: stringListParam(server, "args"),
+      env: stringRecordParam(server, "env") ?? {}
+    };
+  }
+  return output;
+}
+
+interface McpSecretEnvRequest {
+  readonly name: string;
+  readonly providerId: string;
+  readonly secretRef: string;
+  readonly field?: string;
+  readonly format?: string;
+  readonly reason?: string;
+}
+
+function mcpSecretEnvRequests(params: unknown): readonly McpSecretEnvRequest[] {
+  const input = asRecord(params).mcp_secret_env;
+  if (input === undefined) return [];
+  if (!Array.isArray(input)) throw new Error("mcp_secret_env must be an array");
+  return input.map((item) => {
+    const record = asRecord(item);
+    const name = stringParam(record, "env_name") || stringParam(record, "name");
+    const providerId = stringParam(record, "provider_id");
+    const secretRef = stringParam(record, "secret_ref") || stringParam(record, "ref");
+    assertMcpEnvName(name);
+    if (providerId.length === 0) throw new Error(`mcp_secret_env.${name} requires provider_id`);
+    if (secretRef.length === 0) throw new Error(`mcp_secret_env.${name} requires secret_ref`);
+    return {
+      name,
+      providerId,
+      secretRef,
+      field: stringParam(record, "field") || undefined,
+      format: stringParam(record, "format") || stringParam(record, "value_format") || stringParam(record, "valueFormat") || undefined,
+      reason: stringParam(record, "reason") || undefined
+    };
+  });
 }
 
 function worktreeParam(params: unknown):
@@ -321,6 +445,18 @@ function loopFromParams(params: unknown, runtime: CicloMcpRuntimeContext): LoopC
     harnesses: harnessId === "unknown" ? ["codex", "claude-code"] : [harnessId],
     dryRun: runtimeLoop?.dryRun ?? false
   };
+}
+
+function reviewHarnessParam(params: unknown): WorkerHarnessId {
+  const value = stringParam(params, "review_harness_id") || stringParam(params, "harness_id");
+  return value === "claude-code" || value === "codex" ? value : "codex";
+}
+
+function reviewSessionCwd(params: unknown, runtime: CicloMcpRuntimeContext, beadId: string): string {
+  const explicit = stringParam(params, "review_cwd");
+  if (explicit.length > 0) return explicit;
+  const worker = [...runtimeWorkers(runtime)].reverse().find((candidate) => candidate.beadId === beadId);
+  return worker?.cwd ?? runtime.auth.session.projectRoot;
 }
 
 function validationEvidence(value: unknown): readonly ValidationEvidence[] {
@@ -420,6 +556,96 @@ function auditMutation(input: {
     reason: input.reason,
     evidence: input.evidence
   });
+}
+
+async function resolveMcpSecretEnvBindings(input: {
+  readonly params: unknown;
+  readonly runtime: CicloMcpRuntimeContext;
+  readonly loopId?: string;
+  readonly beadId?: string;
+  readonly workerSessionId?: string;
+  readonly dryRun: boolean;
+}): Promise<readonly CicloMcpSecretEnvBinding[]> {
+  const requests = [
+    ...mcpSecretEnvRequests({ mcp_secret_env: configMcpSecretBindingParams(input.runtime.projectConfig ?? {}) }),
+    ...mcpSecretEnvRequests(input.params)
+  ];
+  if (requests.length === 0) return [];
+
+  const registry = input.runtime.secretProviderRegistry ?? createDefaultSecretProviderRegistry();
+  const resolved: CicloMcpSecretEnvBinding[] = [];
+  for (const request of requests) {
+    const accessRequest = {
+      action: "request_secret" as const,
+      scope: { loopId: input.loopId, beadId: input.beadId },
+      allowUnauthenticated: false
+    };
+    const authorization = authorizeClientRequest(input.runtime.auth, accessRequest);
+    input.runtime.accessAuditLog?.push(buildAuthorizationAuditRecord(input.runtime.auth, accessRequest, authorization));
+    if (authorization.decision === "deny") {
+      throw new Error(`access denied for MCP secret env ${request.name}: ${authorization.reason}`);
+    }
+
+    const result = await registry.resolve({
+      providerId: request.providerId,
+      secretRef: request.secretRef,
+      field: request.field,
+      loopId: input.loopId,
+      beadId: input.beadId,
+      workerSessionId: input.workerSessionId,
+      principalId: authorization.principalId,
+      reason: request.reason ?? `provide ${request.name} to configured MCP server`,
+      dryRun: input.dryRun
+    });
+    auditMutation({
+      runtime: input.runtime,
+      tool: "ciclo_launch_worker_session.mcp_secret_env",
+      action: "request_secret",
+      authorization,
+      reason: result.reason,
+      evidence: result.evidence
+    });
+    appendRuntimeEvent(input.runtime, {
+      type: "secret.requested",
+      loopId: input.loopId,
+      beadId: input.beadId,
+      workerSessionId: input.workerSessionId,
+      evidence: [
+        ...result.evidence,
+        ...(request.format === undefined ? [] : ["mcp.secret_env.format:applied"])
+      ],
+      data: {
+        provider_id: result.providerId,
+        provider_kind: result.providerKind,
+        secret_ref_hash: result.secretRefHash,
+        field: result.field,
+        env_name: request.name,
+        target: "mcp_env",
+        format_applied: request.format !== undefined,
+        resolved: result.resolved
+      }
+    });
+
+    if (!input.dryRun && (!result.resolved || result.value === undefined)) {
+      throw new Error(`MCP secret env ${request.name} was not resolved: ${result.reason}`);
+    }
+    resolved.push({
+      name: request.name,
+      value: input.dryRun ? undefined : result.value,
+      providerId: result.providerId,
+      providerKind: result.providerKind,
+      secretRefHash: result.secretRefHash,
+      field: result.field,
+      format: request.format,
+      evidence: [
+        ...result.evidence,
+        `mcp.secret_env:${request.name}`,
+        ...(request.format === undefined ? [] : ["mcp.secret_env.format:applied"]),
+        input.dryRun ? "mcp.secret_env:dry_run" : "mcp.secret_env:resolved"
+      ]
+    });
+  }
+  return resolved;
 }
 
 function promptArguments(prompt: McpPromptContract): readonly { readonly name: string; readonly required: boolean }[] {
@@ -618,6 +844,23 @@ function runtimeWorkers(runtime: CicloMcpRuntimeContext): readonly ReturnType<Wo
   return runtime.workerSupervisor?.list() ?? [];
 }
 
+function publicMcpConfig(
+  config: ReturnType<WorkerSessionSupervisor["list"]>[number]["mcpConfig"]
+): Record<string, unknown> | undefined {
+  if (config === undefined) return undefined;
+  const { env: _env, secretEnvBindings: _secretEnvBindings, ...safeConfig } = config;
+  return safeConfig;
+}
+
+function publicWorkerSession(
+  worker: ReturnType<WorkerSessionSupervisor["list"]>[number]
+): Record<string, unknown> {
+  return {
+    ...worker,
+    ...(worker.mcpConfig === undefined ? {} : { mcpConfig: publicMcpConfig(worker.mcpConfig) })
+  };
+}
+
 function pendingQuestions(runtime: CicloMcpRuntimeContext): readonly PendingQuestion[] {
   return runtime.operatorRouting?.listQuestions() ?? [];
 }
@@ -788,6 +1031,7 @@ async function liveStatus(service: CicloMcpReadService, runtime: CicloMcpRuntime
     ok: true,
     app: "ciclo",
     runtime: runtimeDecision.runtime,
+    brain: runtime.openAiBrain?.status() ?? openAiBrainPolicy,
     live: true,
     loops: loopIds.map((loopId) => liveLoop(loopId, runtime)).filter((loop): loop is LoopStatus => loop !== undefined),
     workers: {
@@ -817,6 +1061,11 @@ async function liveStatus(service: CicloMcpReadService, runtime: CicloMcpRuntime
       items: feedback
     },
     remotes: runtime.remoteRunnerRegistry?.list() ?? [],
+    config: {
+      loaded: runtime.projectConfig !== undefined,
+      value: runtime.projectConfig === undefined ? undefined : redactedCicloProjectConfig(runtime.projectConfig),
+      evidence: runtime.projectConfigEvidence ?? []
+    },
     access: clientAccessView(runtime.auth),
     evidence: [
       "status.live:true",
@@ -884,13 +1133,16 @@ export function createLocalMcpReadService(root = process.cwd()): CicloMcpReadSer
 }
 
 export function createLocalMcpRuntimeContext(root = process.cwd()): CicloMcpRuntimeContext {
+  const loadedConfig = loadCicloProjectConfig(root);
   const tokenRegistry = new TokenRegistry();
   const eventStore = new CicloEventStore();
-  return {
+  const runtime: CicloMcpRuntimeContext = {
     auth: {
       ...defaultClientAuthContext(root),
       tokenRegistry
     },
+    projectConfig: loadedConfig.found ? loadedConfig.config : undefined,
+    projectConfigEvidence: loadedConfig.evidence,
     claudeChannel: {
       enabled: process.env.CICLO_CLAUDE_CHANNEL === "true"
     },
@@ -901,8 +1153,14 @@ export function createLocalMcpRuntimeContext(root = process.cwd()): CicloMcpRunt
     operatorRouting: new OperatorRoutingStore(),
     workerSupervisor: new WorkerSessionSupervisor(root, undefined, undefined, eventStore),
     remoteRunnerRegistry: new RemoteRunnerRegistry(),
+    secretProviderRegistry: createDefaultSecretProviderRegistry(),
+    openAiBrain: new PiSdkOpenAiBrain(),
     repoBoardProvider: new GitHubCliRepoBoardProvider(),
     repoBoardEventKeys: new Set<string>()
+  };
+  return {
+    ...runtime,
+    internalHeartbeat: new CicloInternalHeartbeat(runtime)
   };
 }
 
@@ -911,11 +1169,16 @@ function appendRuntimeEvent(runtime: CicloMcpRuntimeContext, input: CicloEventIn
 }
 
 export async function createLocalMcpRuntimeContextWithPlugins(root = process.cwd()): Promise<CicloMcpRuntimeContext> {
+  const loadedConfig = loadCicloProjectConfig(root);
   const pluginRegistry = createDefaultRemoteRunnerPluginRegistry();
-  await activateConfiguredPlugins(pluginRegistry, defaultPluginPaths(root));
+  const secretProviderRegistry = createSecretProviderRegistryFromConfig(loadedConfig.config);
+  await activateConfiguredPlugins(pluginRegistry, defaultPluginPaths(root), secretProviderRegistry);
   return {
     ...createLocalMcpRuntimeContext(root),
-    remoteRunnerRegistry: new RemoteRunnerRegistry(pluginRegistry)
+    projectConfig: loadedConfig.found ? loadedConfig.config : undefined,
+    projectConfigEvidence: loadedConfig.evidence,
+    remoteRunnerRegistry: new RemoteRunnerRegistry(pluginRegistry),
+    secretProviderRegistry
   };
 }
 
@@ -943,6 +1206,53 @@ async function callTool(
 
   if (name === "ciclo_loop_status") {
     return textContent(await liveLoopStatus(stringParam(params, "loop_id", "review-demo"), service, runtime));
+  }
+
+  if (name === "ciclo_decide") {
+    const brain = runtime.openAiBrain ?? new PiSdkOpenAiBrain();
+    const purpose = openAiDecisionPurposeParam(stringParam(params, "purpose"));
+    const decision = await brain.decide({
+      purpose,
+      prompt: stringParam(params, "prompt"),
+      context: stringListParam(params, "context"),
+      evidence: stringListParam(params, "evidence"),
+      loopId: stringParam(params, "loop_id") || undefined,
+      beadId: stringParam(params, "bead_id") || undefined,
+      harnessId: stringParam(params, "harness_id") || undefined,
+      remoteSessionId: stringParam(params, "remote_session_id") || undefined,
+      workerSessionId: stringParam(params, "worker_session_id") || undefined
+    });
+    auditMutation({
+      runtime,
+      tool: name,
+      action: "use_brain",
+      authorization,
+      reason: `OpenAI brain decision for ${purpose}`,
+      evidence: decision.evidence
+    });
+    appendRuntimeEvent(runtime, {
+      type: "brain.decision",
+      loopId: stringParam(params, "loop_id") || undefined,
+      beadId: stringParam(params, "bead_id") || undefined,
+      workerSessionId: stringParam(params, "worker_session_id") || undefined,
+      evidence: decision.evidence,
+      data: {
+        purpose,
+        provider: decision.provider,
+        adapter: decision.adapter,
+        model: decision.model,
+        thinking: decision.thinking
+      }
+    });
+    return textContent({
+      decision: decision.text,
+      provider: decision.provider,
+      adapter: decision.adapter,
+      model: decision.model,
+      thinking: decision.thinking,
+      purpose: decision.purpose,
+      evidence: decision.evidence
+    });
   }
 
   if (name === "ciclo_poll_events") {
@@ -1165,8 +1475,8 @@ async function callTool(
     const kubernetes = asRecord(record.kubernetes);
     const awsLambda = asRecord(record.aws_lambda);
     const cloudflare = asRecord(record.cloudflare);
-    const result = registry.launch({
-      runnerKind: remoteRunnerKindParam(stringParam(params, "runner_kind")),
+    const launchRequest = mergeRemoteRunnerLaunchWithConfig({
+      runnerKind: stringParam(params, "runner_kind"),
       runnerId: stringParam(params, "runner_id") || undefined,
       loopId: stringParam(params, "loop_id"),
       beadId: stringParam(params, "bead_id") || undefined,
@@ -1179,6 +1489,13 @@ async function callTool(
       sshUser: stringParam(params, "ssh_user") || undefined,
       wireGuard: wireGuardParam(params),
       environment: stringRecordParam(params, "environment"),
+      configureMcp: optionalBooleanParam(params, "configure_mcp"),
+      mcpClients: mcpClientListParam(params, "mcp_clients"),
+      mcpServerName: stringParam(params, "mcp_server_name") || undefined,
+      mcpCommand: stringParam(params, "mcp_command") || undefined,
+      mcpVars: mcpEnvParam(params),
+      mcpAdditionalServers: mcpAdditionalServersParam(params),
+      mcpClaudeChannel: optionalBooleanParam(params, "mcp_claude_channel"),
       kubernetes: {
         namespace: stringParam(kubernetes, "namespace") || undefined,
         serviceAccount: stringParam(kubernetes, "service_account") || undefined,
@@ -1200,6 +1517,10 @@ async function callTool(
         workerName: stringParam(cloudflare, "worker_name") || undefined
       },
       dryRun: booleanParam(params, "dry_run", true)
+    }, runtime.projectConfig ?? {});
+    const result = registry.launch({
+      ...launchRequest,
+      runnerKind: remoteRunnerKindParam(launchRequest.runnerKind)
     });
     auditMutation({
       runtime,
@@ -1229,6 +1550,7 @@ async function callTool(
       state: plan?.state,
       herdr_remote_target: plan?.herdrRemoteTarget,
       attach: plan?.attach,
+      mcp_config: plan?.mcpConfig,
       wireguard: plan?.wireGuard,
       commands: plan?.commands ?? [],
       artifacts: plan?.artifacts ?? [],
@@ -1241,6 +1563,65 @@ async function callTool(
     return textContent({ remote_runners: runtime.remoteRunnerRegistry?.list() ?? [] });
   }
 
+  if (name === "ciclo_list_secret_providers") {
+    const registry = runtime.secretProviderRegistry ?? createDefaultSecretProviderRegistry();
+    const providers = registry.list();
+    return textContent({
+      secret_providers: providers,
+      evidence: [
+        "secret.providers:list",
+        `secret.providers.count:${providers.length}`
+      ]
+    });
+  }
+
+  if (name === "ciclo_request_secret") {
+    const registry = runtime.secretProviderRegistry ?? createDefaultSecretProviderRegistry();
+    const result = await registry.resolve({
+      providerId: stringParam(params, "provider_id"),
+      secretRef: stringParam(params, "secret_ref"),
+      field: stringParam(params, "field") || undefined,
+      loopId: stringParam(params, "loop_id") || undefined,
+      beadId: stringParam(params, "bead_id") || undefined,
+      workerSessionId: stringParam(params, "worker_session_id") || undefined,
+      principalId: authorization.principalId,
+      reason: stringParam(params, "reason"),
+      dryRun: booleanParam(params, "dry_run", false)
+    });
+    auditMutation({
+      runtime,
+      tool: name,
+      action: "request_secret",
+      authorization,
+      reason: result.reason,
+      evidence: result.evidence
+    });
+    appendRuntimeEvent(runtime, {
+      type: "secret.requested",
+      loopId: stringParam(params, "loop_id") || undefined,
+      beadId: stringParam(params, "bead_id") || undefined,
+      workerSessionId: stringParam(params, "worker_session_id") || undefined,
+      evidence: result.evidence,
+      data: {
+        provider_id: result.providerId,
+        provider_kind: result.providerKind,
+        secret_ref_hash: result.secretRefHash,
+        field: result.field,
+        resolved: result.resolved
+      }
+    });
+    return textContent({
+      resolved: result.resolved,
+      provider_id: result.providerId,
+      provider_kind: result.providerKind,
+      secret_ref_hash: result.secretRefHash,
+      field: result.field,
+      value: booleanParam(params, "dry_run", false) ? undefined : result.value,
+      reason: result.reason,
+      evidence: result.evidence
+    });
+  }
+
   if (name === "ciclo_attach_plan") {
     return textContent(buildCicloAttachPlan({
       remoteTarget: stringParam(params, "herdr_target") || undefined,
@@ -1251,23 +1632,41 @@ async function callTool(
 
   if (name === "ciclo_launch_worker_session") {
     const supervisor = runtime.workerSupervisor ?? new WorkerSessionSupervisor(runtime.auth.session.projectRoot);
-    const result = supervisor.launch({
+    const loopId = stringParam(params, "loop_id");
+    const beadId = stringParam(params, "bead_id") || undefined;
+    const dryRun = booleanParam(params, "dry_run", false);
+    const mcpSecretEnv = await resolveMcpSecretEnvBindings({
+      params,
+      runtime,
+      loopId,
+      beadId,
+      dryRun
+    });
+    const result = supervisor.launch(mergeWorkerLaunchWithConfig({
       harnessId: workerHarnessParam(stringParam(params, "harness_id")),
-      loopId: stringParam(params, "loop_id"),
-      beadId: stringParam(params, "bead_id") || undefined,
+      loopId,
+      beadId,
       prompt: stringParam(params, "prompt"),
       extraArgs: stringListParam(params, "extra_args"),
       model: stringParam(params, "model") || undefined,
       effort: stringParam(params, "effort") || undefined,
       cwd: stringParam(params, "cwd") || runtime.auth.session.projectRoot,
       sessionName: stringParam(params, "session_name") || undefined,
-      dryRun: booleanParam(params, "dry_run", false),
+      dryRun,
       permissionMode: stringParam(params, "permission_mode") || undefined,
       sandbox: stringParam(params, "sandbox") || undefined,
       approvalPolicy: stringParam(params, "approval_policy") || undefined,
       isolation: isolationParam(params),
-      worktree: worktreeParam(params)
-    });
+      worktree: worktreeParam(params),
+      configureMcp: optionalBooleanParam(params, "configure_mcp"),
+      mcpClients: mcpClientListParam(params, "mcp_clients"),
+      mcpServerName: stringParam(params, "mcp_server_name") || undefined,
+      mcpCommand: stringParam(params, "mcp_command") || undefined,
+      mcpEnv: mcpEnvParam(params),
+      mcpAdditionalServers: mcpAdditionalServersParam(params),
+      mcpSecretEnv,
+      mcpClaudeChannel: optionalBooleanParam(params, "mcp_claude_channel")
+    }, runtime.projectConfig ?? {}));
     auditMutation({
       runtime,
       tool: name,
@@ -1285,6 +1684,7 @@ async function callTool(
       extra_args: result.extraArgs,
       cwd: result.cwd,
       worktree: result.worktree,
+      mcp_config: publicMcpConfig(result.mcpConfig),
       pid: result.pid,
       session_name: result.sessionName,
       launch_mode: result.launchMode,
@@ -1328,7 +1728,7 @@ async function callTool(
   if (name === "ciclo_list_worker_sessions") {
     const supervisor = runtime.workerSupervisor ?? new WorkerSessionSupervisor(runtime.auth.session.projectRoot);
     supervisor.refreshStalled(staleAfterMs(params));
-    return textContent({ worker_sessions: supervisor.list() });
+    return textContent({ worker_sessions: supervisor.list().map(publicWorkerSession) });
   }
 
   if (name === "ciclo_stop_worker_session") {
@@ -1442,13 +1842,18 @@ async function callTool(
     const idempotent = idempotentResult(name, params, runtime);
     if (idempotent !== undefined) return textContent(idempotent.payload);
     const record = asRecord(params);
+    const beadId = stringParam(params, "bead_id");
+    const loop = loopFromParams(params, runtime);
+    const finalSummary = stringParam(params, "final_summary");
+    const acceptanceEvidence = stringListParam(params, "acceptance_evidence");
+    const validations = validationEvidence(record.validation_evidence);
     const result = await closeBeadsTaskWithPolicy(runtimeBeadsClient(runtime), {
-      id: stringParam(params, "bead_id"),
-      loop: loopFromParams(params, runtime),
+      id: beadId,
+      loop,
       policy: runtime.policy ?? defaultPolicy,
-      finalSummary: stringParam(params, "final_summary"),
-      acceptanceEvidence: stringListParam(params, "acceptance_evidence"),
-      validationEvidence: validationEvidence(record.validation_evidence),
+      finalSummary,
+      acceptanceEvidence,
+      validationEvidence: validations,
       authorization,
       principalId: authorization.principalId,
       harnessId: stringParam(params, "harness_id") || undefined,
@@ -1467,12 +1872,61 @@ async function callTool(
     if (result.mutated) {
       appendRuntimeEvent(runtime, {
         type: "bead.closed",
-        loopId: loopFromParams(params, runtime).id,
-        beadId: stringParam(params, "bead_id"),
+        loopId: loop.id,
+        beadId,
         evidence: result.evidence
       });
     }
-    return textContent(result);
+    let reviewSession: TaskReviewSessionResult | undefined;
+    if (result.mutated) {
+      if (!booleanParam(params, "launch_review", true)) {
+        reviewSession = {
+          launched: false,
+          reason: "review launch disabled by request",
+          evidence: ["review.session.skipped:disabled"]
+        };
+      } else {
+        const reviewHarnessId = reviewHarnessParam(params);
+        const reviewAccessRequest = {
+          action: "send_prompt" as const,
+          scope: { loopId: loop.id, beadId, harnessId: reviewHarnessId },
+          allowUnauthenticated: false
+        };
+        const reviewAuthorization = authorizeClientRequest(runtime.auth, reviewAccessRequest);
+        runtime.accessAuditLog?.push(buildAuthorizationAuditRecord(runtime.auth, reviewAccessRequest, reviewAuthorization));
+        if (reviewAuthorization.decision === "deny") {
+          reviewSession = {
+            launched: false,
+            reason: reviewAuthorization.reason,
+            evidence: ["review.session.skipped:access_denied", ...reviewAuthorization.evidence]
+          };
+        } else {
+          reviewSession = launchTaskReviewSession({
+            supervisor: runtime.workerSupervisor,
+            loopId: loop.id,
+            beadId,
+            finalSummary,
+            acceptanceEvidence,
+            validationEvidence: validations,
+            cwd: reviewSessionCwd(params, runtime, beadId),
+            harnessId: reviewHarnessId,
+            model: stringParam(params, "review_model") || undefined,
+            effort: stringParam(params, "review_effort") || undefined,
+            dryRun: booleanParam(params, "review_dry_run", false),
+            configureMcp: booleanParam(params, "review_configure_mcp", true)
+          });
+        }
+        auditMutation({
+          runtime,
+          tool: `${name}.review`,
+          action: "send_prompt",
+          authorization: reviewAuthorization,
+          reason: reviewSession.reason,
+          evidence: reviewSession.evidence
+        });
+      }
+    }
+    return textContent(reviewSession === undefined ? result : { ...result, review_session: reviewSession });
   }
 
   if (name === "ciclo_sync_remote_trackers") {
@@ -1616,9 +2070,11 @@ async function readResource(
     payload = { remote_sessions: [] };
   } else if (uri === "ciclo://remote-runners") {
     payload = { remote_runners: runtime.remoteRunnerRegistry?.list() ?? [] };
+  } else if (uri === "ciclo://secret-providers") {
+    payload = { secret_providers: (runtime.secretProviderRegistry ?? createDefaultSecretProviderRegistry()).list() };
   } else if (uri === "ciclo://worker-sessions") {
     runtime.workerSupervisor?.refreshStalled(10 * 60 * 1000);
-    payload = { worker_sessions: runtime.workerSupervisor?.list() ?? [] };
+    payload = { worker_sessions: runtime.workerSupervisor?.list().map(publicWorkerSession) ?? [] };
   } else if (uri === "ciclo://session/access") {
     payload = { access: clientAccessView(runtime.auth) };
   } else if (uri === "ciclo://users/me") {
@@ -1740,7 +2196,7 @@ export async function handleMcpRequest(
     if (request.method === "initialize") {
       return success(request, {
         protocolVersion: "2025-06-18",
-        serverInfo: { name: "ciclo", version: "0.1.0" },
+        serverInfo: { name: "ciclo", version: CICLO_VERSION },
         capabilities: mcpCapabilities(runtime)
       });
     }
@@ -1832,29 +2288,33 @@ export async function runMcpStdioServer(
 ): Promise<void> {
   input.setEncoding("utf8");
   let buffer = "";
-
-  for await (const chunk of input) {
-    buffer += chunk;
-    let newline = buffer.indexOf("\n");
-    while (newline >= 0) {
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      if (line.length > 0) {
-        let request: JsonRpcRequest | undefined;
-        try {
-          request = JSON.parse(line) as JsonRpcRequest;
-          const response = await handleMcpRequest(request, service, runtime);
-          if (response !== undefined) output.write(`${JSON.stringify(response)}\n`);
-        } catch (error) {
-          const response = failure(
-            request,
-            -32700,
-            error instanceof Error ? error.message : "parse error"
-          );
-          output.write(`${JSON.stringify(response)}\n`);
+  runtime.internalHeartbeat?.start();
+  try {
+    for await (const chunk of input) {
+      buffer += chunk;
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line.length > 0) {
+          let request: JsonRpcRequest | undefined;
+          try {
+            request = JSON.parse(line) as JsonRpcRequest;
+            const response = await handleMcpRequest(request, service, runtime);
+            if (response !== undefined) output.write(`${JSON.stringify(response)}\n`);
+          } catch (error) {
+            const response = failure(
+              request,
+              -32700,
+              error instanceof Error ? error.message : "parse error"
+            );
+            output.write(`${JSON.stringify(response)}\n`);
+          }
         }
+        newline = buffer.indexOf("\n");
       }
-      newline = buffer.indexOf("\n");
     }
+  } finally {
+    runtime.internalHeartbeat?.stop();
   }
 }

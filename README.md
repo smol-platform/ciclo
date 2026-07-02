@@ -44,7 +44,7 @@ just check
 
 `bd` and `herdr` are required for runtime development. The shell intentionally uses the host Beads CLI so its version matches the local Beads database; Herdr is host-installed because it is not available from nixpkgs. `ciclo-doctor` verifies both before running the full check.
 
-The primary implementation runtime is a standalone TypeScript Ciclo orchestrator agent. Pi is used under the covers as an internal brain provider through [src/pi-extension.ts](/Users/ztaylor/repos/workspaces/ciclo/src/pi-extension.ts), while [src/cli.ts](/Users/ztaylor/repos/workspaces/ciclo/src/cli.ts) and future MCP/daemon entrypoints are Ciclo's user-facing surfaces. The earlier Python package under `src/ciclo` remains transitional support for Herdr/config fixtures until equivalent TypeScript adapters replace it.
+The primary implementation runtime is a standalone TypeScript Ciclo orchestrator agent. OpenAI is the default decision provider for live orchestration, reached through the Pi SDK adapter; Pi is not Ciclo's product boundary. Ciclo uses the OpenAI brain for remote-session monitoring, deciding when to insert more context, answering questions it can reason about from known state, and interfacing with the controlling user session. Short, specific CLI utilities such as help, status, install, and deterministic benchmark runs can remain local. [src/cli.ts](/Users/ztaylor/repos/workspaces/ciclo/src/cli.ts) and MCP/daemon entrypoints are Ciclo's user-facing surfaces. The earlier Python package under `src/ciclo` remains transitional support for Herdr/config fixtures until equivalent TypeScript adapters replace it.
 
 ## Using Ciclo
 
@@ -80,6 +80,22 @@ Start MCP over stdio for Claude, Codex, or a generic MCP client:
 ciclo mcp stdio
 ```
 
+When MCP is running, Ciclo starts an internal heartbeat for the sessions it owns. The heartbeat refreshes worker state, marks silent workers stale or stalled, checks registered remote sessions through Herdr remote attach when a remote heartbeat client is configured, and asks the OpenAI brain for follow-up decisions instead of waiting for an external poll.
+
+Project defaults can live in `.ciclo/config.json`:
+
+```bash
+ciclo config init --project /path/to/project
+ciclo config show --project /path/to/project --compact
+ciclo config path --project /path/to/project
+```
+
+The config stores secret provider references, MCP defaults, and remote runner defaults. It should contain provider ids, secret references, and non-secret `vars`, not raw secret values. `ciclo mcp install`, MCP runtime startup, spawned worker MCP setup, and remote runner planning all read this file; explicit CLI or MCP tool arguments override config values.
+
+Use [examples/ciclo-config.json](/Users/ztaylor/repos/workspaces/ciclo/examples/ciclo-config.json) as the checked-in reference shape. It shows OpenBao, 1Password, and plugin-backed provider aliases, MCP secret bindings for spawned workers, Claude/Codex client defaults, remote runner defaults, WireGuard tunnel fields, and provider-specific Kubernetes, AWS Lambda MicroVM, and Cloudflare runner settings. `ciclo config show --compact` redacts secret references before display.
+
+Remote runner plans also include `mcp_config`: generated `.mcp.json` and/or `.codex/config.toml` artifacts for the remote `repoPath`, plus a `ciclo mcp install` command to run inside the runner when the remote checkout already has client config that should be merged.
+
 Install Ciclo into a target project's MCP client config:
 
 ```bash
@@ -108,6 +124,7 @@ ciclo_launch_worker_session
 ciclo_heartbeat_worker_session
 ciclo_list_worker_sessions
 ciclo_stop_worker_session
+ciclo_decide
 ciclo_poll_events
 ciclo_board
 ciclo://worker-sessions
@@ -115,7 +132,48 @@ ciclo://events
 ciclo://board
 ```
 
-Use `dry_run: true` on `ciclo_launch_worker_session` to inspect the exact Claude Code or Codex launch plan before starting a process. Pass `isolation: "worktree"` to create a worker worktree, defaulting bead work to a `ciclo/<bead-id>` branch. Once launched, workers should report liveness and optional token/cost deltas with `ciclo_heartbeat_worker_session`, and report progress, blockers, questions, and closeout evidence back through Ciclo MCP tools. `ciclo_poll_events` returns cursor-based runtime events, and `ciclo_board` joins Beads work, workers, worktrees, pending questions, rollup metrics, and validation/PR state for operator monitoring. Pass `expected_pr_after_ms` to `ciclo_board` to raise an `expected_pr_missing` blocker when a worker branch has not opened a PR by the deadline.
+Use `dry_run: true` on `ciclo_launch_worker_session` to inspect the exact Claude Code or Codex launch plan before starting a process. Pass `isolation: "worktree"` to create a worker worktree, defaulting bead work to a `ciclo/<bead-id>` branch. When Ciclo is running inside Herdr, local worktree-isolated workers use `herdr worktree create/open` and start the pane with the returned Herdr workspace id; outside Herdr, Ciclo falls back to `git worktree add`. Pass `configure_mcp: true` to install Ciclo MCP client config into the worker cwd or worktree before the harness starts; Ciclo defaults to the matching client (`claude` for Claude Code, `codex` for Codex) and accepts `mcp_clients`, `mcp_server_name`, `mcp_command`, and `mcp_claude_channel` overrides. Once launched, workers should report liveness and optional token/cost deltas with `ciclo_heartbeat_worker_session`, and report progress, blockers, questions, secret requests, and closeout evidence back through Ciclo MCP tools. `ciclo_poll_events` returns cursor-based runtime events, and `ciclo_board` joins Beads work, workers, worktrees, pending questions, rollup metrics, and validation/PR state for operator monitoring. Pass `expected_pr_after_ms` to `ciclo_board` to raise an `expected_pr_missing` blocker when a worker branch has not opened a PR by the deadline.
+
+When `.ciclo/config.json` contains `mcp`, spawned workers inherit its `clients`, `serverName`, `command`, `vars`, `secretBindings`, and `claudeChannel` defaults. Inline `ciclo_launch_worker_session` fields still win for one-off launches.
+
+Use `mcp.secretBindings` when the generated Ciclo MCP server config needs secret-backed environment variables. Each binding names the env var and references a configured provider; the provider may be built in, such as OpenBao or 1Password, or plugin-backed through `secrets.providers[].pluginProviderId`:
+
+```json
+{
+  "secrets": {
+    "providers": [
+      {
+        "id": "team-keychain",
+        "kind": "keychain",
+        "pluginProviderId": "keychain-test"
+      }
+    ]
+  },
+  "mcp": {
+    "secretBindings": [
+      {
+        "name": "PLUGIN_BACKED_API_TOKEN",
+        "providerId": "team-keychain",
+        "ref": "keychain://ciclo/example-api-token",
+        "format": "Bearer ${secret}",
+        "reason": "Provide task-scoped API access to the Ciclo MCP server."
+      }
+    ]
+  }
+}
+```
+
+For non-dry-run installs and worker launches, Ciclo resolves those bindings through the secret provider and writes the value into the generated `ciclo` server environment in `.mcp.json` or `.codex/config.toml`; install and launch responses stay redacted. Add `format` when the target variable needs a prefix, suffix, or wrapper string. The format must contain exactly one `${secret}` placeholder, for example `Bearer ${secret}`. Additional MCP server environment maps are still non-secret. If a third-party MCP server needs sensitive values, use provider-native secret references, a wrapper command, or a Ciclo-mediated secret request rather than putting raw values in config.
+
+Workers can request scoped secrets through Ciclo instead of asking the operator to paste values:
+
+```text
+ciclo_list_secret_providers
+ciclo_request_secret
+ciclo://secret-providers
+```
+
+Built-in providers are `openbao` and `onepassword`. OpenBao uses `bao kv get -field=<field> <secret_ref>` and requires an explicit field. 1Password uses `op read <secret_ref>`, for example an `op://vault/item/field` reference. Ciclo returns the secret value only to the requesting MCP caller; audit records and events store provider id, kind, field, and a stable secret-reference hash.
 
 Plan a remote runner environment through MCP:
 
@@ -126,11 +184,11 @@ ciclo_attach_plan
 ciclo://remote-runners
 ```
 
-Supported runner kinds are `kubernetes`, `aws-lambda`, and `cloudflare`. Each kind is implemented by a remote runner provider plugin so new runnable environments can be added without changing the core planner. Each plan includes provider artifacts or commands, a simple WireGuard runner config, the Herdr remote target reachable over that tunnel, and a `ciclo attach` plan for monitoring the overall Ciclo session.
+Supported runner kinds are `kubernetes`, `aws-lambda`, and `cloudflare`. Each kind is implemented by a remote runner provider plugin so new runnable environments can be added without changing the core planner. Each plan includes provider artifacts or commands, generated remote MCP client config artifacts, a simple WireGuard runner config, the Herdr remote target reachable over that tunnel, and a `ciclo attach` plan for monitoring the overall Ciclo session.
 
 The AWS provider targets Lambda MicroVMs, not legacy Lambda function invocation. It emits `aws lambda-microvms` image creation plus `run-microvm`, `suspend-microvm`, `resume-microvm`, and `terminate-microvm` lifecycle commands.
 
-Install third-party remote runner plugins:
+Install third-party remote runner or secret provider plugins:
 
 ```bash
 ciclo plugin install @acme/ciclo-runner-fly --trust
@@ -145,7 +203,7 @@ During plugin development, install from a local package directory:
 ciclo plugin install @acme/ciclo-runner-fly --path ../ciclo-runner-fly --trust
 ```
 
-External plugin packages include `ciclo.plugin.json` and export `activate(api)`. The manifest is validated before code loads, and enabled plugins must be trusted before activation. Plugin config is stored in `.ciclo/plugins.json`; npm-installed plugin packages are placed under `.ciclo/plugins/`.
+External plugin packages include `ciclo.plugin.json` and export `activate(api)`. The manifest is validated before code loads, and enabled plugins must be trusted before activation. Plugin config is stored in `.ciclo/plugins.json`; npm-installed plugin packages are placed under `.ciclo/plugins/`. Plugins can declare `remote-runner` with `runnerKinds`, `secret-provider` with `secretProviderKinds`, or both.
 
 Minimal plugin entrypoint:
 
@@ -165,6 +223,24 @@ export function activate(api: CicloPluginApi) {
         artifacts: [],
         warnings: [],
         evidence: ["remote.runner.plugin:fly-machines"]
+      };
+    }
+  });
+
+  api.secretProviders.register({
+    id: "acme-vault",
+    kind: "acme-vault",
+    name: "Acme Vault",
+    async resolve(input) {
+      return {
+        resolved: true,
+        providerId: "acme-vault",
+        providerKind: "acme-vault",
+        secretRefHash: "hash-the-secret-ref",
+        field: input.field,
+        value: "resolved-secret",
+        reason: "secret was resolved by provider",
+        evidence: ["secret.provider:acme-vault", "secret.resolved:true"]
       };
     }
   });

@@ -1612,7 +1612,7 @@ Deterministic checks should fail scenarios before model scoring when Ciclo:
 ```json
 {
   "scenario": "claude_blocked_permission",
-  "planner_version": "0.1.0",
+  "planner_version": "0.1.1",
   "driver_model": "configured-small-driver",
   "judge_model": "configured-judge",
   "scores": {

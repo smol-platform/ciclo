@@ -52,7 +52,7 @@ node dist/src/cli.js runtime
 npm run demo
 ```
 
-`status` returns the current standalone Ciclo status. `runtime` reports the product boundary: Ciclo is the standalone orchestrator agent, while Pi is used internally as a brain provider.
+`status` returns the current standalone Ciclo status. `runtime` reports the product boundary: Ciclo is the standalone orchestrator agent, while OpenAI is the default orchestration brain reached through the Pi SDK adapter.
 
 ### Benchmarks
 
@@ -71,6 +71,8 @@ Use stdio MCP for local Claude, Codex, or generic MCP clients:
 ```bash
 node dist/src/cli.js mcp stdio
 ```
+
+MCP starts Ciclo's internal heartbeat. That heartbeat periodically checks Ciclo-owned worker and remote sessions, marks silent sessions stalled or stale, and invokes the OpenAI brain for follow-up decisions about monitoring, context insertion, answerable worker questions, and controlling-session feedback. Workers should still call `ciclo_heartbeat_worker_session`; the internal heartbeat is Ciclo's independent supervisor loop, not a replacement for worker liveness reports.
 
 Legacy package script:
 
@@ -121,6 +123,7 @@ ciclo_launch_worker_session
 ciclo_heartbeat_worker_session
 ciclo_list_worker_sessions
 ciclo_stop_worker_session
+ciclo_decide
 ciclo_poll_events
 ciclo_board
 ciclo://worker-sessions
@@ -128,7 +131,40 @@ ciclo://events
 ciclo://board
 ```
 
-A launch request includes the harness, loop, prompt, optional Beads issue, model, effort, cwd, `extra_args`, `isolation`, worktree options, and `dry_run`. Use `dry_run: true` to inspect the launch command and planned worktree without starting a process. Use `isolation: "worktree"` for bead-level fan-out; Ciclo defaults the branch to `ciclo/<bead-id>` unless `worktree_branch` is set.
+A launch request includes the harness, loop, prompt, optional Beads issue, model, effort, cwd, `extra_args`, `isolation`, worktree options, MCP config options, and `dry_run`. Use `dry_run: true` to inspect the launch command, planned worktree, and planned MCP client config without starting a process. Use `isolation: "worktree"` for bead-level fan-out; Ciclo defaults the branch to `ciclo/<bead-id>` unless `worktree_branch` is set. When running inside Herdr, Ciclo uses `herdr worktree create/open` and starts the local pane with the returned Herdr workspace id; outside Herdr, it uses `git worktree add`. Use `configure_mcp: true` when the worker should receive Ciclo MCP config in its cwd or worktree before launch.
+
+For Claude Code sessions, `model` accepts `claude-fable-5` directly and normalizes `fable 5`, `Fable 5`, or `claude fable 5` to `claude-fable-5`. Other model ids remain pass-through so new Claude models can be used without a Ciclo release.
+
+Use `mcp_env` only for non-secret MCP server environment variables. When a configured worker MCP server needs a secret, pass `mcp_secret_env` bindings with `env_name`, `provider_id`, `secret_ref`, optional `field`, optional `format`, and `reason`; Ciclo resolves them through secret-provider plugins for non-dry-run launches, applies `format` only after resolution, and redacts values from responses, audit records, events, and worker-session listings. Formats must contain exactly one `${secret}` placeholder, for example `Bearer ${secret}`.
+
+### Project Config
+
+Use `.ciclo/config.json` to store shared Ciclo defaults for a repository:
+
+```bash
+node dist/src/cli.js config init --project /path/to/project
+node dist/src/cli.js config show --project /path/to/project --compact
+node dist/src/cli.js config path --project /path/to/project
+```
+
+Use [examples/ciclo-config.json](/Users/ztaylor/repos/workspaces/ciclo/examples/ciclo-config.json) as the reference shape when wiring a real project. It is intentionally safe to commit because it contains provider ids and secret references, not secret values.
+
+The config supports:
+
+- `secrets.providers`: OpenBao and 1Password provider ids, display names, and CLI commands.
+- `mcp`: default clients, server name, Ciclo command, non-secret `vars`, secret provider bindings, and Claude channel mode for generated MCP configs.
+- `remote`: default runner kind, image, repository path, SSH user, WireGuard settings, provider-specific Kubernetes/AWS Lambda MicroVM/Cloudflare settings, and non-secret `vars`.
+
+Precedence is simple: inline CLI flags and MCP tool payload fields win for the current operation; `.ciclo/config.json` fills any omitted values; Ciclo's built-in defaults apply last. That means the shared config can define the normal Claude/Codex MCP setup, secret provider aliases, and remote runner defaults while a single launch can still override the model, worktree, remote runner kind, or provider-specific field.
+
+Use provider references in `mcp.secretBindings`; do not store raw secret values. Ciclo redacts secret references from `ciclo config show --compact`, launch responses, worker-session listings, audit records, events, and board rows. `vars` are only for non-secret strings. For secrets needed by spawned worker MCP tools, bind a `name` to a configured provider and reference; Ciclo resolves the value only for non-dry-run launches that are authorized to read it. Add `format` only when the generated env var needs a prefix, suffix, or wrapper string.
+
+The same file is read in four places:
+
+- `ciclo mcp install` merges `mcp` defaults into Claude and Codex client config generation.
+- `ciclo mcp stdio` and HTTP MCP startup register configured secret providers.
+- `ciclo_launch_worker_session` applies `mcp` defaults when `configure_mcp` is enabled.
+- `ciclo_launch_remote_runner` applies `remote` defaults before building the runner, WireGuard, remote MCP config, and Herdr attach plan.
 
 Example launch payload:
 
@@ -138,14 +174,58 @@ Example launch payload:
   "loop_id": "review-loop",
   "bead_id": "ciclo-774",
   "model": "gpt-5.5",
+  "isolation": "worktree",
+  "configure_mcp": true,
+  "mcp_clients": ["codex"],
+  "mcp_secret_env": [
+    {
+      "env_name": "API_TOKEN",
+      "provider_id": "onepassword",
+      "secret_ref": "op://Ciclo/API/token",
+      "reason": "worker MCP server needs the API token"
+    }
+  ],
   "prompt": "Use Ciclo MCP as the control plane. Claim scoped work, report progress, ask questions through Ciclo, and record validation evidence before close.",
   "dry_run": true
 }
 ```
 
-Ciclo owns the worker lifecycle. Workers should communicate back through Ciclo MCP tools such as `ciclo_update_work`, `ciclo_ask_operator`, `ciclo_report_feedback`, and `ciclo_close_work`. Use `ciclo_poll_events` with the returned cursor for monitoring state changes, and use `ciclo_board` for the joined operator dashboard.
+Ciclo owns the worker lifecycle. Workers should communicate back through Ciclo MCP tools such as `ciclo_update_work`, `ciclo_ask_operator`, `ciclo_request_secret`, `ciclo_report_feedback`, and `ciclo_close_work`. Use `ciclo_poll_events` with the returned cursor for monitoring state changes, and use `ciclo_board` for the joined operator dashboard.
 Workers should heartbeat through `ciclo_heartbeat_worker_session` while active and may include token and cost deltas. `ciclo_status`, `ciclo_board`, and `ciclo_list_worker_sessions` accept `stale_after_ms` to mark silent running workers as `stalled`.
 For PR-producing loops, pass `expected_pr_after_ms` to `ciclo_board`. If a worker branch has no PR after that deadline, Ciclo emits a `blocker.raised` event with `kind: "expected_pr_missing"` and includes recovery actions on the board row.
+
+When a task closes through `ciclo_close_work`, Ciclo launches a bounded review worker by default. The reviewer verifies the closed task, leaves comments with `ciclo_report_feedback`, records validation with `ciclo_update_work`, and asks the operator when a risk needs a decision. Use `review_dry_run: true` to inspect the planned reviewer, `review_harness_id` to choose `codex` or `claude-code`, or `launch_review: false` only when the operator has explicitly waived post-close review.
+
+### Secret Providers
+
+Ciclo-managed sessions should request task-scoped secrets through MCP instead of asking the operator to paste credentials into chat:
+
+```text
+ciclo_list_secret_providers
+ciclo_request_secret
+ciclo://secret-providers
+```
+
+Built-in providers:
+
+- `openbao`: calls `bao kv get -field=<field> <secret_ref>` and requires `field`.
+- `onepassword`: calls `op read <secret_ref>`, such as `op://Ciclo/API/token`.
+
+Example request:
+
+```json
+{
+  "provider_id": "onepassword",
+  "secret_ref": "op://Ciclo/API/token",
+  "loop_id": "deploy-loop",
+  "bead_id": "ciclo-42",
+  "worker_session_id": "worker-1",
+  "reason": "deploy validation needs the API token",
+  "dry_run": false
+}
+```
+
+The response includes `value` only for a successful non-dry-run request. Audit logs and runtime events keep `provider_id`, provider kind, field, and `secret_ref_hash`; they do not store the secret value or raw secret reference.
 
 ### Remote Runner Sessions
 
@@ -159,6 +239,14 @@ ciclo_list_remote_runners
 ciclo_attach_plan
 ciclo://remote-runners
 ```
+
+Remote runner responses include `mcp_config` when remote MCP setup is enabled. It contains:
+
+- `clients`, `serverName`, `command`, `vars`, and generated install metadata from the project config or one-off launch fields.
+- Fresh `.mcp.json` and/or `.codex/config.toml` artifacts targeted at the remote `repo_path`.
+- A `ciclo mcp install` command to run inside the runner when the remote checkout already has MCP client config and needs a merge instead of replacing files with the rendered artifacts.
+
+Set `configure_mcp: false` only when the remote image or bootstrap process already installs Ciclo MCP for the remote repo. Otherwise leave it enabled so the remote Claude or Codex session can report status, ask questions, request secrets, and close work through Ciclo.
 
 Example Kubernetes runner payload:
 

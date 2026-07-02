@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -16,6 +16,7 @@ import {
   parseSkillInstallOptions,
   type CliIo
 } from "../src/cli.js";
+import { CICLO_VERSION } from "../src/version.js";
 
 function captureIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -41,7 +42,7 @@ test("CLI prints top-level help and version", async () => {
 
   const version = captureIo();
   assert.equal(await main(["node", "ciclo", "--version"], version.io), 0);
-  assert.equal(version.stdout[0], "0.1.0");
+  assert.equal(version.stdout[0], CICLO_VERSION);
 });
 
 test("CLI status and runtime commands emit machine-readable JSON", async () => {
@@ -121,6 +122,50 @@ test("CLI installs project MCP config for Claude and Codex", async () => {
   }
 });
 
+test("CLI config commands initialize and mcp install reads project defaults", async () => {
+  const before = process.cwd();
+  const tempDir = mkdtempSync(join(tmpdir(), "ciclo-config-cli-"));
+  try {
+    process.chdir(tempDir);
+
+    const init = captureIo();
+    assert.equal(await main(["node", "ciclo", "config", "init", "--compact"], init.io), 0);
+    const initialized = JSON.parse(init.stdout[0] ?? "{}") as { found?: boolean; path?: string };
+    assert.equal(initialized.found, true);
+    assert.ok(initialized.path?.endsWith(join(".ciclo", "config.json")));
+
+    const show = captureIo();
+    assert.equal(await main(["node", "ciclo", "config", "show", "--compact"], show.io), 0);
+    const shown = JSON.parse(show.stdout[0] ?? "{}") as { config?: { mcp?: { secretBindings?: readonly { ref?: string }[] } } };
+    assert.equal(shown.config?.mcp?.secretBindings?.[0]?.ref, "[redacted secret ref]");
+
+    mkdirSync(join(tempDir, ".ciclo"), { recursive: true });
+    writeFileSync(join(tempDir, ".ciclo", "config.json"), JSON.stringify({
+      mcp: {
+        clients: ["codex"],
+        serverName: "ciclo_config",
+        command: "ciclo-dev",
+        vars: { CICLO_REUSE_HERDR_SESSION: "true" }
+      }
+    }));
+
+    const install = captureIo();
+    assert.equal(await main(["node", "ciclo", "mcp", "install", "--dry-run", "--compact"], install.io), 0);
+    const installed = JSON.parse(install.stdout[0] ?? "{}") as {
+      serverName?: string;
+      server?: { command?: string; ["env"]?: Record<string, string> };
+      targets?: readonly { client?: string }[];
+    };
+    assert.equal(installed.serverName, "ciclo_config");
+    assert.equal(installed.server?.command, "ciclo-dev");
+    assert.equal(installed.server?.["env"]?.CICLO_REUSE_HERDR_SESSION, "true");
+    assert.deepEqual(installed.targets?.map((target) => target.client), ["codex"]);
+  } finally {
+    process.chdir(before);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("CLI installs Ciclo skills for Claude and Codex", async () => {
   assert.deepEqual(parseSkillInstallOptions([
     "--client",
@@ -180,7 +225,16 @@ test("CLI installs Ciclo skills for Claude and Codex", async () => {
     assert.equal(existsSync(claudeSkill), true);
     assert.equal(existsSync(codexSkill), true);
     assert.equal(existsSync(codexReference), true);
-    assert.match(readFileSync(codexSkill, "utf8"), /ciclo_launch_worker_session/);
+    const codexSkillText = readFileSync(codexSkill, "utf8");
+    const claudeSkillText = readFileSync(claudeSkill, "utf8");
+    const referenceText = readFileSync(codexReference, "utf8");
+    assert.match(codexSkillText, /ciclo_launch_worker_session/);
+    assert.match(codexSkillText, /ciclo skill install --client all/);
+    assert.match(codexSkillText, /configure_mcp: true/);
+    assert.match(codexSkillText, /ciclo_request_secret/);
+    assert.match(codexSkillText, /ciclo_launch_remote_runner/);
+    assert.match(claudeSkillText, /ciclo skill install --client all/);
+    assert.match(referenceText, /ciclo_launch_remote_runner/);
   } finally {
     process.chdir(before);
     rmSync(tempDir, { recursive: true, force: true });
@@ -323,7 +377,7 @@ test("compiled CLI runs when invoked through an npm-style symlink", () => {
     const result = spawnSync(process.execPath, [symlinkPath, "--version"], { encoding: "utf8" });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout.trim(), "0.1.0");
+    assert.equal(result.stdout.trim(), CICLO_VERSION);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }

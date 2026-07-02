@@ -6,6 +6,13 @@ import { fileURLToPath } from "node:url";
 
 import { buildStandaloneStatus } from "./app.js";
 import { runBenchmarkSuite, type BenchmarkRunnerOptions } from "./benchmark-runner.js";
+import {
+  cicloConfigPath,
+  loadCicloProjectConfig,
+  mergeMcpInstallOptionsWithConfig,
+  redactedCicloProjectConfig,
+  writeSampleCicloConfig
+} from "./ciclo-config.js";
 import { runtimeDecision } from "./ciclo-core.js";
 import { runMcpHttpServer, type McpHttpConfig } from "./mcp-http.js";
 import { installCicloMcp, type CicloMcpInstallClient } from "./mcp-install.js";
@@ -22,8 +29,8 @@ import {
 } from "./plugin-manager.js";
 import { buildCicloAttachPlan } from "./remote-runner.js";
 import { installCicloSkills, type CicloSkillInstallClient } from "./skill-install.js";
+import { CICLO_VERSION } from "./version.js";
 
-const VERSION = "0.1.0";
 const DEFAULT_BENCHMARK_DIR = "tests/fixtures/benchmarks";
 
 export interface CliIo {
@@ -51,7 +58,7 @@ export interface CliAttachOptions {
 
 export interface CliMcpInstallOptions {
   readonly projectRoot?: string;
-  readonly clients: readonly CicloMcpInstallClient[];
+  readonly clients?: readonly CicloMcpInstallClient[];
   readonly serverName?: string;
   readonly command?: string;
   readonly claudeChannel?: boolean;
@@ -87,6 +94,7 @@ function usage(): string {
     "  runtime                        Print runtime/product-boundary JSON.",
     "  benchmark [scenario-dir]       Run benchmark scenarios.",
     "  attach [options]               Attach to Ciclo's Herdr session.",
+    "  config <show|init|path>        Manage .ciclo/config.json defaults.",
     "  plugin <subcommand>            Install, list, enable, or disable plugins.",
     "  skill install [options]        Install Ciclo agent skills into a project.",
     "  mcp stdio                      Start the MCP stdio server.",
@@ -141,7 +149,7 @@ function commandHelp(command: string): string {
     return [
       "Usage: ciclo runtime [--compact]",
       "",
-      "Print the runtime decision JSON. Ciclo is the orchestrator; Pi is an internal brain provider."
+      "Print the runtime decision JSON. Ciclo is the orchestrator; OpenAI is the default brain provider through the Pi SDK adapter."
     ].join("\n");
   }
   if (command === "benchmark") {
@@ -179,6 +187,20 @@ function commandHelp(command: string): string {
       "  ciclo plugin disable <package>",
       "",
       "External plugins must include ciclo.plugin.json and export activate(api)."
+    ].join("\n");
+  }
+  if (command === "config") {
+    return [
+      "Usage: ciclo config <show|init|path> [options]",
+      "",
+      "Manage project-level Ciclo configuration stored in .ciclo/config.json.",
+      "",
+      "Commands:",
+      "  ciclo config show [--project <dir>] [--compact]",
+      "  ciclo config init [--project <dir>] [--dry-run] [--compact]",
+      "  ciclo config path [--project <dir>]",
+      "",
+      "The config stores secret provider references, MCP defaults, and remote runner defaults. It should not contain raw secret values."
     ].join("\n");
   }
   if (command === "skill") {
@@ -416,7 +438,7 @@ function parseSkillInstallClient(value: string): readonly CicloSkillInstallClien
 
 export function parseMcpInstallOptions(args: readonly string[]): CliMcpInstallOptions {
   let projectRoot: string | undefined;
-  let clients: readonly CicloMcpInstallClient[] = ["claude"];
+  let clients: readonly CicloMcpInstallClient[] | undefined;
   let serverName: string | undefined;
   let command: string | undefined;
   let claudeChannel = false;
@@ -592,7 +614,9 @@ async function runMcp(args: readonly string[], io: CliIo): Promise<number> {
   }
   if (transport === "install") {
     const options = parseMcpInstallOptions(args.slice(1));
-    printJson(installCicloMcp(options), parseJsonMode(args), io);
+    const root = options.projectRoot ?? process.cwd();
+    const loaded = loadCicloProjectConfig(root);
+    printJson(installCicloMcp(mergeMcpInstallOptionsWithConfig(options, loaded.config)), parseJsonMode(args), io);
     return 0;
   }
   throw new Error(`unknown MCP transport: ${transport}`);
@@ -611,6 +635,52 @@ function runAttach(args: readonly string[], io: CliIo): number {
   }
   const result = spawnSync(plan.command, [...plan.args], { stdio: "inherit" });
   return result.status ?? 1;
+}
+
+function parseProjectAndDryRun(args: readonly string[]): { readonly projectRoot?: string; readonly dryRun: boolean } {
+  let projectRoot: string | undefined;
+  let dryRun = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--project") {
+      projectRoot = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (arg === "--json" || arg === "--compact") continue;
+    throw new Error(`unknown config option: ${arg}`);
+  }
+  return { ...(projectRoot === undefined ? {} : { projectRoot }), dryRun };
+}
+
+function runConfig(args: readonly string[], io: CliIo): number {
+  const subcommand = args[0];
+  if (subcommand === undefined || subcommand === "--help" || subcommand === "-h") {
+    io.stdout(commandHelp("config"));
+    return 0;
+  }
+  const rest = args.slice(1);
+  const parsed = parseProjectAndDryRun(rest);
+  const root = parsed.projectRoot ?? process.cwd();
+  if (subcommand === "path") {
+    printJson({ path: cicloConfigPath(root) }, parseJsonMode(rest), io);
+    return 0;
+  }
+  if (subcommand === "show") {
+    const loaded = loadCicloProjectConfig(root);
+    printJson({ ...loaded, config: redactedCicloProjectConfig(loaded.config) }, parseJsonMode(rest), io);
+    return 0;
+  }
+  if (subcommand === "init") {
+    const initialized = writeSampleCicloConfig(root, parsed.dryRun);
+    printJson({ ...initialized, config: redactedCicloProjectConfig(initialized.config) }, parseJsonMode(rest), io);
+    return 0;
+  }
+  throw new Error(`unknown config subcommand: ${subcommand}`);
 }
 
 function requirePluginPackage(args: readonly string[], index: number, command: string): string {
@@ -706,7 +776,7 @@ export async function main(argv: readonly string[] = process.argv, io: CliIo = d
     }
 
     if (command === "--version" || command === "-v" || command === "version") {
-      io.stdout(VERSION);
+      io.stdout(CICLO_VERSION);
       return 0;
     }
 
@@ -739,6 +809,10 @@ export async function main(argv: readonly string[] = process.argv, io: CliIo = d
 
     if (command === "plugin") {
       return runPlugin(args, io);
+    }
+
+    if (command === "config") {
+      return runConfig(args, io);
     }
 
     if (command === "skill") {

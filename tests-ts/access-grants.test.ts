@@ -12,10 +12,12 @@ import {
 test("roles expose expected default capabilities", () => {
   assert.ok(capabilitiesForRole("owner").includes("access.admin"));
   assert.ok(capabilitiesForRole("operator").includes("command.approve"));
+  assert.ok(capabilitiesForRole("operator").includes("brain.decide"));
   assert.ok(capabilitiesForRole("maintainer").includes("work.close"));
   assert.ok(!capabilitiesForRole("contributor").includes("command.approve"));
   assert.deepEqual(capabilitiesForRole("viewer"), ["status.read"]);
   assert.ok(capabilitiesForRole("agent_service").includes("work.update"));
+  assert.ok(capabilitiesForRole("agent_service").includes("brain.decide"));
 });
 
 test("grant capabilities combine role defaults and explicit capabilities", () => {

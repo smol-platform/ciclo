@@ -1,0 +1,8 @@
+{
+  "schema": "ciclo.plugin.v1",
+  "name": "@example/ciclo-secrets-keychain",
+  "version": "1.0.0",
+  "entrypoint": "./dist/index.js",
+  "capabilities": ["secret-provider"],
+  "secretProviderKinds": ["keychain"]
+}

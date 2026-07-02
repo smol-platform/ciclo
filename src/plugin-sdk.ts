@@ -13,3 +13,11 @@ export {
   type RemoteRunnerProviderPlugin,
   type WireGuardTunnelPlan
 } from "./remote-runner.js";
+
+export {
+  type SecretProviderDescriptor,
+  type SecretProviderKind,
+  type SecretProviderPlugin,
+  type SecretProviderRequest,
+  type SecretProviderResult
+} from "./secret-provider.js";

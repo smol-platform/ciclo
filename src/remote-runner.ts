@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 
 import type { HarnessId } from "./ciclo-core.js";
+import {
+  renderFreshCicloMcpInstallArtifacts,
+  type CicloMcpAdditionalServerConfig,
+  type CicloMcpInstallClient,
+  type CicloMcpInstallResult
+} from "./mcp-install.js";
 import { repoSessionName } from "./repo-session-name.js";
 
 export type BuiltinRemoteRunnerKind = "kubernetes" | "aws-lambda" | "cloudflare";
@@ -33,6 +39,13 @@ export interface RemoteRunnerLaunchRequest {
   readonly sshUser?: string;
   readonly wireGuard?: WireGuardTunnelRequest;
   readonly environment?: Record<string, string>;
+  readonly configureMcp?: boolean;
+  readonly mcpClients?: readonly CicloMcpInstallClient[];
+  readonly mcpServerName?: string;
+  readonly mcpCommand?: string;
+  readonly mcpVars?: Record<string, string>;
+  readonly mcpAdditionalServers?: Record<string, CicloMcpAdditionalServerConfig>;
+  readonly mcpClaudeChannel?: boolean;
   readonly kubernetes?: {
     readonly namespace?: string;
     readonly serviceAccount?: string;
@@ -75,6 +88,24 @@ export interface RemoteRunnerArtifact {
   readonly content: string;
 }
 
+export interface RemoteRunnerMcpConfigPlan {
+  readonly enabled: boolean;
+  readonly projectRoot: string;
+  readonly clients: readonly CicloMcpInstallClient[];
+  readonly serverName: string;
+  readonly command: string;
+  readonly vars: Record<string, string>;
+  readonly varKeys: readonly string[];
+  readonly additionalServers: Record<string, CicloMcpAdditionalServerConfig>;
+  readonly additionalServerNames: readonly string[];
+  readonly claudeChannel?: boolean;
+  readonly install: CicloMcpInstallResult;
+  readonly commands: readonly string[];
+  readonly artifacts: readonly RemoteRunnerArtifact[];
+  readonly warnings: readonly string[];
+  readonly evidence: readonly string[];
+}
+
 export interface CicloAttachPlan {
   readonly session: string;
   readonly remoteTarget?: string;
@@ -102,6 +133,7 @@ export interface RemoteRunnerLaunchPlan {
   readonly herdrRemoteTarget: string;
   readonly wireGuard: WireGuardTunnelPlan;
   readonly attach: CicloAttachPlan;
+  readonly mcpConfig?: RemoteRunnerMcpConfigPlan;
   readonly commands: readonly string[];
   readonly artifacts: readonly RemoteRunnerArtifact[];
   readonly warnings: readonly string[];
@@ -270,6 +302,81 @@ function runnerHostAddress(wireGuard: WireGuardTunnelPlan): string {
 function remoteTarget(input: RemoteRunnerLaunchRequest, wireGuard: WireGuardTunnelPlan): string {
   const user = clean(input.sshUser) ?? "ciclo";
   return `${user}@${runnerHostAddress(wireGuard)}:${input.repoPath}`;
+}
+
+function mcpClientsForRemote(input: RemoteRunnerLaunchRequest): readonly CicloMcpInstallClient[] {
+  if (input.mcpClients !== undefined && input.mcpClients.length > 0) return [...new Set(input.mcpClients)];
+  return input.harnessId === "codex" ? ["codex"] : ["claude"];
+}
+
+function mcpClientArg(clients: readonly CicloMcpInstallClient[]): string {
+  return clients.includes("claude") && clients.includes("codex") ? "all" : clients[0] ?? "claude";
+}
+
+function remoteMcpArtifactName(path: string, projectRoot: string): string {
+  const prefix = projectRoot.endsWith("/") ? projectRoot : `${projectRoot}/`;
+  return path.startsWith(prefix) ? path.slice(prefix.length) : path;
+}
+
+function remoteMcpConfigPlan(input: RemoteRunnerLaunchRequest, repoPath: string): RemoteRunnerMcpConfigPlan | undefined {
+  if (input.configureMcp === false) return undefined;
+  const requestedClients = mcpClientsForRemote(input);
+  const claudeChannel = input.mcpClaudeChannel === true;
+  const clients = claudeChannel && !requestedClients.includes("claude")
+    ? [...requestedClients, "claude" as const]
+    : requestedClients;
+  const serverName = clean(input.mcpServerName) ?? "ciclo";
+  const command = clean(input.mcpCommand) ?? "ciclo";
+  const rendered = renderFreshCicloMcpInstallArtifacts({
+    projectRoot: repoPath,
+    clients,
+    serverName,
+    command,
+    env: input.mcpVars,
+    additionalServers: input.mcpAdditionalServers,
+    ...(claudeChannel ? { claudeChannel } : {}),
+    dryRun: true
+  });
+  const clientArg = mcpClientArg(clients);
+  const installCommand = [
+    "ciclo mcp install",
+    `--client ${clientArg}`,
+    `--project ${shellQuote(repoPath)}`,
+    ...(serverName === "ciclo" ? [] : [`--server-name ${shellQuote(serverName)}`]),
+    ...(command === "ciclo" ? [] : [`--command ${shellQuote(command)}`]),
+    ...(claudeChannel ? ["--claude-channel"] : [])
+  ].join(" ");
+  return {
+    enabled: true,
+    projectRoot: repoPath,
+    clients,
+    serverName,
+    command,
+    vars: input.mcpVars ?? {},
+    varKeys: Object.keys(input.mcpVars ?? {}),
+    additionalServers: input.mcpAdditionalServers ?? {},
+    additionalServerNames: Object.keys(input.mcpAdditionalServers ?? {}),
+    ...(claudeChannel ? { claudeChannel } : {}),
+    install: rendered.install,
+    commands: [installCommand],
+    artifacts: rendered.artifacts.map((artifact) => ({
+      name: remoteMcpArtifactName(artifact.path, repoPath),
+      format: artifact.format,
+      content: artifact.content
+    })),
+    warnings: [
+      "Remote MCP artifacts are rendered for a fresh remote checkout; run the install command inside the runner when existing client config should be merged."
+    ],
+    evidence: [
+      "remote.runner.mcp_config:planned",
+      `remote.runner.mcp_config.server:${serverName}`,
+      `remote.runner.mcp_config.clients:${clients.join(",")}`,
+      `remote.runner.mcp_config.project_root:${repoPath}`,
+      `remote.runner.mcp_config.var_keys:${Object.keys(input.mcpVars ?? {}).length}`,
+      `remote.runner.mcp_config.additional_servers:${Object.keys(input.mcpAdditionalServers ?? {}).length}`,
+      `remote.runner.mcp_config.targets:${rendered.install.targets.length}`
+    ]
+  };
 }
 
 function kubernetesArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGuardTunnelPlan): RemoteRunnerProviderPlan {
@@ -489,6 +596,7 @@ export function buildRemoteRunnerLaunchPlan(
     remoteTarget: herdrRemoteTarget,
     session: herdrSession
   });
+  const mcpConfig = remoteMcpConfigPlan(resolvedInput, repoPath);
   const runnerArtifacts = pluginRegistry.require(input.runnerKind).plan(
     resolvedInput,
     wireGuard
@@ -504,6 +612,7 @@ export function buildRemoteRunnerLaunchPlan(
     `remote.runner.herdr_target:${herdrRemoteTarget}`,
     ...wireGuard.evidence,
     ...attach.evidence,
+    ...(mcpConfig?.evidence ?? []),
     ...runnerArtifacts.evidence,
     ...(input.dryRun === false ? ["remote.runner.launch:intent"] : ["remote.runner.launch:planned"])
   ];
@@ -524,9 +633,10 @@ export function buildRemoteRunnerLaunchPlan(
     herdrRemoteTarget,
     wireGuard,
     attach,
+    ...(mcpConfig === undefined ? {} : { mcpConfig }),
     commands: runnerArtifacts.commands,
-    artifacts: runnerArtifacts.artifacts,
-    warnings: runnerArtifacts.warnings,
+    artifacts: [...runnerArtifacts.artifacts, ...(mcpConfig?.artifacts ?? [])],
+    warnings: [...runnerArtifacts.warnings, ...(mcpConfig?.warnings ?? [])],
     evidence
   };
 }

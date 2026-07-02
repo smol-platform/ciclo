@@ -1,0 +1,104 @@
+{
+  "secrets": {
+    "providers": [
+      {
+        "id": "corp-openbao",
+        "kind": "openbao",
+        "name": "Corporate OpenBao",
+        "command": "bao"
+      },
+      {
+        "id": "team-1password",
+        "kind": "onepassword",
+        "name": "Team 1Password",
+        "command": "op"
+      },
+      {
+        "id": "team-keychain",
+        "kind": "keychain",
+        "name": "Team Keychain Plugin",
+        "pluginProviderId": "keychain-test"
+      }
+    ]
+  },
+  "mcp": {
+    "clients": ["claude", "codex"],
+    "serverName": "ciclo",
+    "command": "ciclo",
+    "vars": {
+      "CICLO_REUSE_HERDR_SESSION": "true"
+    },
+    "additionalServers": {
+      "filesystem": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+        "env": {
+          "MCP_FS_MODE": "workspace"
+        }
+      }
+    },
+    "secretBindings": [
+      {
+        "name": "API_TOKEN",
+        "providerId": "team-1password",
+        "ref": "op://Ciclo/API/token",
+        "reason": "Provide task-scoped API access to spawned worker MCP tools."
+      },
+      {
+        "name": "OPENBAO_TOKEN",
+        "providerId": "corp-openbao",
+        "ref": "secret/data/ciclo/mcp",
+        "field": "token",
+        "reason": "Provide OpenBao-backed access to spawned worker MCP tools."
+      },
+      {
+        "name": "PLUGIN_BACKED_API_TOKEN",
+        "providerId": "team-keychain",
+        "ref": "keychain://ciclo/example-api-token",
+        "format": "Bearer ${secret}",
+        "reason": "Example plugin-backed secret injected into the generated Ciclo MCP server config."
+      }
+    ],
+    "claudeChannel": false
+  },
+  "remote": {
+    "runnerKind": "kubernetes",
+    "image": "ghcr.io/example/ciclo-runner:latest",
+    "repoUrl": "https://github.com/example/project.git",
+    "repoPath": "/workspace/project",
+    "herdrSession": "project",
+    "sshUser": "ciclo",
+    "vars": {
+      "CICLO_REMOTE_MODE": "interactive"
+    },
+    "wireGuard": {
+      "interfaceName": "wg-ciclo",
+      "networkCidr": "10.44.0.0/24",
+      "cicloAddress": "10.44.0.1/24",
+      "runnerAddress": "10.44.0.2/24",
+      "cicloEndpoint": "vpn.example.invalid:51820",
+      "runnerPrivateKeySecretRef": "ciclo/wireguard/runner_private_key",
+      "cicloPublicKeySecretRef": "ciclo/wireguard/ciclo_public_key",
+      "persistentKeepaliveSeconds": 25
+    },
+    "kubernetes": {
+      "namespace": "ciclo-runners",
+      "serviceAccount": "ciclo-runner",
+      "jobName": "ciclo-project-runner"
+    },
+    "awsLambda": {
+      "microVmImageName": "ciclo-project-image",
+      "microVmName": "ciclo-project-runner",
+      "baseImageArn": "arn:aws:lambda:us-east-1:aws:microvm-image/nodejs22",
+      "buildRoleArn": "arn:aws:iam::123456789012:role/ciclo-runner-build",
+      "executionRoleArn": "arn:aws:iam::123456789012:role/ciclo-runner",
+      "sourceS3Uri": "s3://ciclo-runner-artifacts/project.tar",
+      "memoryMb": 2048,
+      "vcpuCount": 2
+    },
+    "cloudflare": {
+      "accountId": "replace-with-account-id",
+      "workerName": "ciclo-project-runner"
+    }
+  }
+}

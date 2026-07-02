@@ -8,6 +8,11 @@ import {
   type CicloRemoteRunnerPluginApi,
   type RemoteRunnerPluginRegistry
 } from "./remote-runner.js";
+import {
+  createSecretProviderPluginApi,
+  SecretProviderRegistry,
+  type CicloSecretProviderPluginApi
+} from "./secret-provider.js";
 
 export const CICLO_PLUGIN_SCHEMA = "ciclo.plugin.v1";
 export const CICLO_PLUGIN_API_VERSION = "0.1";
@@ -21,6 +26,7 @@ export interface CicloPluginManifest {
   readonly entrypoint: string;
   readonly capabilities: readonly string[];
   readonly runnerKinds: readonly string[];
+  readonly secretProviderKinds: readonly string[];
   readonly permissions?: {
     readonly commands?: readonly string[];
     readonly network?: boolean;
@@ -72,6 +78,7 @@ export interface CicloPluginActivationResult {
 
 export interface CicloPluginApi {
   readonly remoteRunners: CicloRemoteRunnerPluginApi["remoteRunners"];
+  readonly secretProviders: CicloSecretProviderPluginApi["secretProviders"];
 }
 
 type PluginModule = {
@@ -111,6 +118,11 @@ function stringList(value: unknown, path: string): readonly string[] {
   return value as readonly string[];
 }
 
+function unsupportedCapabilities(capabilities: readonly string[]): readonly string[] {
+  const supported = new Set(["remote-runner", "secret-provider"]);
+  return capabilities.filter((capability) => !supported.has(capability));
+}
+
 function optionalStringList(record: Record<string, unknown>, key: string, path: string): readonly string[] | undefined {
   const value = record[key];
   return value === undefined ? undefined : stringList(value, path);
@@ -141,7 +153,8 @@ export function parsePluginManifest(raw: unknown): CicloPluginManifest {
     cicloApi: optionalStringValue(record, "cicloApi"),
     entrypoint: stringValue(record, "entrypoint", "plugin manifest"),
     capabilities: stringList(record.capabilities, "plugin manifest.capabilities"),
-    runnerKinds: stringList(record.runnerKinds, "plugin manifest.runnerKinds"),
+    runnerKinds: optionalStringList(record, "runnerKinds", "plugin manifest.runnerKinds") ?? [],
+    secretProviderKinds: optionalStringList(record, "secretProviderKinds", "plugin manifest.secretProviderKinds") ?? [],
     permissions: permissionsRecord === undefined
       ? undefined
       : {
@@ -150,8 +163,18 @@ export function parsePluginManifest(raw: unknown): CicloPluginManifest {
           secrets: optionalStringList(permissionsRecord, "secrets", "plugin manifest.permissions.secrets")
         }
   };
-  if (!manifest.capabilities.includes("remote-runner")) {
-    throw new Error("plugin manifest must include remote-runner capability");
+  const unsupported = unsupportedCapabilities(manifest.capabilities);
+  if (unsupported.length > 0) {
+    throw new Error(`plugin manifest includes unsupported capabilities: ${unsupported.join(", ")}`);
+  }
+  if (!manifest.capabilities.includes("remote-runner") && !manifest.capabilities.includes("secret-provider")) {
+    throw new Error("plugin manifest must include remote-runner or secret-provider capability");
+  }
+  if (manifest.capabilities.includes("remote-runner") && manifest.runnerKinds.length === 0) {
+    throw new Error("plugin manifest remote-runner capability requires runnerKinds");
+  }
+  if (manifest.capabilities.includes("secret-provider") && manifest.secretProviderKinds.length === 0) {
+    throw new Error("plugin manifest secret-provider capability requires secretProviderKinds");
   }
   if (manifest.entrypoint.startsWith("/") || manifest.entrypoint.includes("..")) {
     throw new Error("plugin manifest entrypoint must be a package-relative path");
@@ -249,7 +272,8 @@ export function installPlugin(
       `plugin.installed:${packageName}`,
       `plugin.enabled:${entry.enabled}`,
       `plugin.trusted:${entry.trusted}`,
-      ...manifest.runnerKinds.map((kind) => `plugin.runner_kind:${kind}`)
+      ...manifest.runnerKinds.map((kind) => `plugin.runner_kind:${kind}`),
+      ...manifest.secretProviderKinds.map((kind) => `plugin.secret_provider_kind:${kind}`)
     ]
   };
 }
@@ -269,7 +293,8 @@ export function setPluginEnabled(
 
 async function activateEntry(
   entry: CicloPluginConfigEntry,
-  registry: RemoteRunnerPluginRegistry
+  registry: RemoteRunnerPluginRegistry,
+  secretProviderRegistry?: SecretProviderRegistry
 ): Promise<void> {
   if (!entry.trusted) throw new Error(`plugin is not trusted: ${entry.package}`);
   const pluginPath = entry.path;
@@ -279,12 +304,18 @@ async function activateEntry(
   const module = await import(pathToFileURL(modulePath).href) as PluginModule;
   const activate = module.activate ?? module.default?.activate;
   if (activate === undefined) throw new Error(`plugin does not export activate(api): ${entry.package}`);
-  await activate(createRemoteRunnerPluginApi(registry));
+  const remoteApi = createRemoteRunnerPluginApi(registry);
+  const secretApi = createSecretProviderPluginApi(secretProviderRegistry ?? new SecretProviderRegistry());
+  await activate({
+    remoteRunners: remoteApi.remoteRunners,
+    secretProviders: secretApi.secretProviders
+  });
 }
 
 export async function activateConfiguredPlugins(
   registry: RemoteRunnerPluginRegistry,
-  paths: CicloPluginPaths = defaultPluginPaths()
+  paths: CicloPluginPaths = defaultPluginPaths(),
+  secretProviderRegistry?: SecretProviderRegistry
 ): Promise<CicloPluginActivationResult> {
   const config = readPluginConfig(paths);
   const activated: string[] = [];
@@ -298,7 +329,7 @@ export async function activateConfiguredPlugins(
       continue;
     }
     try {
-      await activateEntry(entry, registry);
+      await activateEntry(entry, registry, secretProviderRegistry);
       activated.push(entry.package);
       evidence.push(`plugin.activated:${entry.package}`);
     } catch (error) {

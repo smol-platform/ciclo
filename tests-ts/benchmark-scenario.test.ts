@@ -180,7 +180,9 @@ test("loads the required worker-session benchmark scenarios", () => {
 
   for (const id of [
     "worker_launch_codex_session",
+    "worker_mcp_secret_env_launch",
     "worker_stop_completed_claude_session",
+    "post_close_launches_review_session",
     "claude_loop_surfaces_blocker",
     "codex_goal_launches_worker",
     "codex_goal_answer_reasonable_question"
@@ -193,10 +195,22 @@ test("loads the required worker-session benchmark scenarios", () => {
   assert.equal(launch.workerSessions[0]?.harnessId, "codex");
   assert.equal(launch.workerSessions[0]?.model, "gpt-5.5");
 
+  const secretEnv = loadBenchmarkScenarioFile(`${fixtureDir}/worker_mcp_secret_env_launch.json`);
+  assert.equal(secretEnv.mcpCalls[0]?.tool, "ciclo_launch_worker_session");
+  assert.equal(Array.isArray(secretEnv.mcpCalls[0]?.arguments.mcp_secret_env), true);
+  assert.ok(secretEnv.expected.requiredActions.includes("resolve_mcp_secret_env"));
+  assert.ok(secretEnv.expected.requiredActions.includes("redact_secret_env_outputs"));
+
   const cleanup = loadBenchmarkScenarioFile(`${fixtureDir}/worker_stop_completed_claude_session.json`);
   assert.equal(cleanup.workerSessions[0]?.state, "completed");
   assert.equal(cleanup.workerSessions[0]?.harnessId, "claude-code");
   assert.equal(cleanup.workerSessions[0]?.cleanupReason, "worker exited successfully");
+
+  const postCloseReview = loadBenchmarkScenarioFile(`${fixtureDir}/post_close_launches_review_session.json`);
+  assert.equal(postCloseReview.mcpCalls[0]?.tool, "ciclo_close_work");
+  assert.equal(postCloseReview.mcpCalls[0]?.arguments.launch_review, true);
+  assert.equal(postCloseReview.workerSessions[0]?.state, "planned");
+  assert.ok(postCloseReview.expected.requiredActions.includes("launch_post_close_review"));
 
   const claudeLoop = loadBenchmarkScenarioFile(`${fixtureDir}/claude_loop_surfaces_blocker.json`);
   assert.equal(claudeLoop.harnessContext[0]?.controlDirective, "/loop");

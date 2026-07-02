@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,8 @@ import test from "node:test";
 import {
   buildWorkerLaunchPlan,
   WorkerSessionSupervisor,
+  type WorkerCommandRunResult,
+  type WorkerCommandRunner,
   type WorkerProcessHandle,
   type WorkerProcessLauncher
 } from "../src/worker-session-supervisor.js";
@@ -85,6 +87,21 @@ class FakeClaudeResolver implements ClaudeBackgroundAgentResolver {
   }
 }
 
+class FakeCommandRunner implements WorkerCommandRunner {
+  readonly runs: { command: string; args: readonly string[]; cwd?: string }[] = [];
+
+  constructor(private readonly result: WorkerCommandRunResult = {
+    status: 0,
+    stdout: JSON.stringify({ workspace_id: "workspace-123" }),
+    stderr: ""
+  }) {}
+
+  run(command: string, args: readonly string[], options: { cwd?: string } = {}): WorkerCommandRunResult {
+    this.runs.push({ command, args, cwd: options.cwd });
+    return this.result;
+  }
+}
+
 test("Codex worker launch plan includes model cwd approval sandbox and prompt", () => {
   withHerdrReuseDisabled(() => {
     const plan = buildWorkerLaunchPlan(
@@ -126,7 +143,7 @@ test("Claude worker launch plan starts background named session with effort", ()
       {
         harnessId: "claude-code",
         loopId: "loop-2",
-        model: "claude-fable-5",
+        model: "Fable 5",
         effort: "high",
         sessionName: "review-worker",
         extraArgs: ["--allowedTools", "mcp__ciclo__ciclo_status"],
@@ -151,6 +168,8 @@ test("Claude worker launch plan starts background named session with effort", ()
       "mcp__ciclo__ciclo_status",
       "Review through Ciclo."
     ]);
+    assert.equal(plan.model, "claude-fable-5");
+    assert.ok(plan.evidence.includes("worker.session.model:claude-fable-5"));
   });
 });
 
@@ -180,6 +199,40 @@ test("worker launch plan can create an isolated worktree cwd", () => {
     assert.equal(plan.cwd, plan.worktree?.path);
     assert.deepEqual(plan.args.slice(0, 4), ["--cd", plan.worktree?.path, "--ask-for-approval", "on-request"]);
     assert.ok(plan.evidence.includes(`worker.worktree.path:${plan.worktree?.path}`));
+  });
+});
+
+test("worker launch plan can configure MCP clients in the worker cwd", () => {
+  withHerdrReuseDisabled(() => {
+    const root = mkdtempSync(join(tmpdir(), "ciclo-mcp-worker-root-"));
+    const plan = buildWorkerLaunchPlan(
+      {
+        harnessId: "codex",
+        loopId: "loop-mcp",
+        prompt: "Work with Ciclo MCP.",
+        configureMcp: true,
+        mcpServerName: "ciclo_local",
+        mcpCommand: "ciclo-dev",
+        mcpAdditionalServers: {
+          filesystem: {
+            command: "npx",
+            args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
+            env: { MCP_FS_MODE: "worker" }
+          }
+        }
+      },
+      root,
+      "worker-mcp"
+    );
+
+    assert.equal(plan.mcpConfig?.enabled, true);
+    assert.deepEqual(plan.mcpConfig?.clients, ["codex"]);
+    assert.equal(plan.mcpConfig?.serverName, "ciclo_local");
+    assert.equal(plan.mcpConfig?.command, "ciclo-dev");
+    assert.deepEqual(plan.mcpConfig?.additionalServerNames, ["filesystem"]);
+    assert.equal(plan.mcpConfig?.install.targets[0]?.client, "codex");
+    assert.equal(existsSync(join(root, ".codex", "config.toml")), false);
+    assert.ok(plan.evidence.includes("worker.mcp_config:planned"));
   });
 });
 
@@ -238,6 +291,104 @@ test("worker session supervisor creates requested git worktree before launch", (
   });
 });
 
+test("Herdr pane worktree launches use Herdr worktree workspace support", () => {
+  withHerdrSessionEnv("operator-main", () => {
+    const root = mkdtempSync(join(tmpdir(), "ciclo-herdr-worktree-root-"));
+    const worktreePath = join(tmpdir(), `ciclo-herdr-worktree-${Date.now()}`);
+    const launcher = new FakeLauncher();
+    const commandRunner = new FakeCommandRunner();
+    const supervisor = new WorkerSessionSupervisor(
+      root,
+      launcher,
+      { now: () => "2026-06-30T00:00:00.000Z" },
+      undefined,
+      undefined,
+      commandRunner
+    );
+
+    const running = supervisor.launch({
+      harnessId: "codex",
+      loopId: "review-loop",
+      beadId: "ciclo-9l0",
+      prompt: "Work through Ciclo.",
+      isolation: "worktree",
+      worktree: {
+        path: worktreePath,
+        branch: "ciclo/ciclo-9l0",
+        base: "main"
+      }
+    });
+
+    assert.equal(running.state, "running");
+    assert.equal(running.launchMode, "herdr_pane");
+    assert.equal(running.worktree?.herdrWorkspaceId, "workspace-123");
+    assert.deepEqual(commandRunner.runs[0], {
+      command: "herdr",
+      cwd: root,
+      args: [
+        "--session",
+        "operator-main",
+        "worktree",
+        "create",
+        "--cwd",
+        root,
+        "--branch",
+        "ciclo/ciclo-9l0",
+        "--base",
+        "main",
+        "--path",
+        worktreePath,
+        "--label",
+        "operator-main-review-loop-ciclo-9l0-codex",
+        "--no-focus",
+        "--json"
+      ]
+    });
+    assert.deepEqual(launcher.launches[0]?.args.slice(0, 9), [
+      "--session",
+      "operator-main",
+      "agent",
+      "start",
+      "operator-main-review-loop-ciclo-9l0-codex",
+      "--workspace",
+      "workspace-123",
+      "--no-focus",
+      "--"
+    ]);
+    assert.ok(!launcher.launches[0]?.args.includes("--cwd"));
+    assert.ok(running.evidence.includes("worker.worktree:herdr_create"));
+    assert.ok(running.evidence.includes("worker.worktree.herdr_workspace:workspace-123"));
+  });
+});
+
+test("worker session supervisor installs MCP config before launching", () => {
+  withHerdrReuseDisabled(() => {
+    const root = mkdtempSync(join(tmpdir(), "ciclo-mcp-launch-root-"));
+    const launcher = new FakeLauncher();
+    const supervisor = new WorkerSessionSupervisor(root, launcher, {
+      now: () => "2026-06-30T00:00:00.000Z"
+    });
+
+    const running = supervisor.launch({
+      harnessId: "codex",
+      loopId: "loop-mcp",
+      prompt: "Use configured MCP.",
+      configureMcp: true,
+      mcpServerName: "ciclo_local",
+      mcpCommand: "ciclo-dev"
+    });
+
+    assert.equal(running.state, "running");
+    assert.equal(running.mcpConfig?.install.installed, true);
+    assert.ok(running.evidence.includes("worker.mcp_config:installed"));
+    const config = readFileSync(join(root, ".codex", "config.toml"), "utf8");
+    assert.match(config, /\[mcp_servers\.ciclo_local\]/u);
+    assert.match(config, /command = "ciclo-dev"/u);
+    assert.match(config, /CICLO_PROJECT_ROOT = /u);
+    assert.equal(launcher.launches[0]?.cwd, root);
+  });
+});
+
 test("worker launch defaults to Herdr pane inside active Herdr session", () => {
   withHerdrSessionEnv("operator-main", () => {
     const claudePlan = buildWorkerLaunchPlan(
@@ -245,6 +396,7 @@ test("worker launch defaults to Herdr pane inside active Herdr session", () => {
         harnessId: "claude-code",
         loopId: "review-loop",
         beadId: "ciclo-9l0",
+        model: "claude fable 5",
         prompt: "Work through Ciclo."
       },
       "/repo",
@@ -269,7 +421,10 @@ test("worker launch defaults to Herdr pane inside active Herdr session", () => {
       "claude"
     ]);
     assert.ok(claudePlan.args.includes("--name"));
+    assert.ok(claudePlan.args.includes("--model"));
+    assert.ok(claudePlan.args.includes("claude-fable-5"));
     assert.ok(!claudePlan.args.includes("--bg"));
+    assert.equal(claudePlan.model, "claude-fable-5");
     assert.ok(claudePlan.evidence.includes("worker.session.launch_mode:herdr_pane"));
 
     const codexPlan = buildWorkerLaunchPlan(

@@ -26,7 +26,9 @@ test("benchmark runner loads the fixture suite in deterministic order", () => {
     "force_compact_blocks_dispatch",
     "remote_runner_kubernetes_wireguard_attach",
     "worker_launch_codex_session",
+    "worker_mcp_secret_env_launch",
     "worker_stop_completed_claude_session",
+    "post_close_launches_review_session",
     "claude_loop_surfaces_blocker",
     "codex_goal_launches_worker",
     "codex_goal_answer_reasonable_question"
@@ -83,6 +85,29 @@ test("fixture candidate preserves worker session evidence", () => {
   assert.ok(candidate.evidence.includes("worker.session.launch:planned"));
   assert.ok(candidate.evidence.includes("worker.session.harness:codex"));
   assert.ok(candidate.actions.some((action) => action.kind === "record_worker_session"));
+});
+
+test("fixture candidate requires post-close review launch", () => {
+  const scenario = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/post_close_launches_review_session.json");
+  const candidate = buildFixtureCandidate(scenario);
+
+  assert.equal(candidate.responseKind, "close_work");
+  assert.ok(candidate.evidence.includes("review.session.reason:task_finished"));
+  assert.ok(candidate.evidence.includes("worker.session.launch:planned"));
+  assert.ok(candidate.actions.some((action) => action.kind === "launch_post_close_review"));
+  assert.ok(candidate.actions.some((action) => action.kind === "record_review_worker_session"));
+});
+
+test("fixture candidate requires MCP secret env resolution without prompt secrets", () => {
+  const scenario = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/worker_mcp_secret_env_launch.json");
+  const candidate = buildFixtureCandidate(scenario);
+
+  assert.equal(candidate.responseKind, "launch_worker_session");
+  assert.ok(candidate.evidence.includes("worker.mcp_config.secret_env:1"));
+  assert.ok(candidate.evidence.includes("mcp.secret_env:resolved"));
+  assert.ok(candidate.actions.some((action) => action.kind === "resolve_mcp_secret_env"));
+  assert.ok(candidate.actions.some((action) => action.kind === "redact_secret_env_outputs"));
+  assert.doesNotMatch(candidate.text, /API_TOKEN=secret|raw secret value/);
 });
 
 test("benchmark scenario report puts deterministic safety before judge scores", async () => {

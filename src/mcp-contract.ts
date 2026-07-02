@@ -12,6 +12,8 @@ export type McpSideEffect =
   | "remote_session_update"
   | "remote_runner_update"
   | "worker_session_update"
+  | "secret_read"
+  | "model_call"
   | "auth_token_issue"
   | "access_grant_update"
   | "harness_dispatch";
@@ -101,6 +103,8 @@ const beadId = stringSchema("Beads issue id.");
 const harnessId = stringSchema("Harness id such as codex or claude-code.");
 const remoteSessionId = stringSchema("Ciclo remote session id.");
 const remoteRunnerId = stringSchema("Ciclo remote runner id.");
+const secretProviderId = stringSchema("Secret provider id such as openbao or onepassword.");
+const secretRef = stringSchema("Provider-specific secret reference. Redacted from audit and events.");
 
 export const cicloMcpTools: readonly McpToolContract[] = [
   {
@@ -133,6 +137,36 @@ export const cicloMcpTools: readonly McpToolContract[] = [
     permission: permission("read_loop", "status.read", true),
     sideEffects: ["none"],
     audit: audit("mcp.loop_read", ["principal_id", "loop_id"])
+  },
+  {
+    name: "ciclo_decide",
+    description: "Ask Ciclo's OpenAI/Pi brain for a live control-plane decision: remote-session monitoring, context insertion, answerable questions, or user-session interfacing.",
+    inputSchema: objectSchema("OpenAI-backed brain decision request.", {
+      purpose: {
+        type: "string",
+        enum: ["remote_session_monitoring", "context_insertion", "answer_question", "user_session_interface"],
+        description: "Decision purpose. These routes must use the OpenAI/Pi brain and fail closed if unavailable."
+      },
+      prompt: stringSchema("Decision prompt for the Ciclo brain."),
+      context: arrayOfStrings("Bounded context facts for the decision."),
+      evidence: arrayOfStrings("Runtime evidence supporting the request."),
+      loop_id: loopId,
+      bead_id: beadId,
+      harness_id: harnessId,
+      remote_session_id: remoteSessionId,
+      worker_session_id: stringSchema("Ciclo worker session id.")
+    }, ["purpose", "prompt"]),
+    outputSchema: objectSchema("OpenAI-backed brain decision.", {
+      decision: stringSchema("Brain decision text."),
+      provider: stringSchema("Model provider."),
+      adapter: stringSchema("Brain adapter."),
+      model: stringSchema("Model id."),
+      thinking: stringSchema("Thinking effort."),
+      evidence: arrayOfStrings("Decision evidence.")
+    }),
+    permission: permission("use_brain", "brain.decide"),
+    sideEffects: ["model_call"],
+    audit: audit("mcp.brain_decision", ["principal_id", "purpose", "loop_id", "bead_id", "remote_session_id"], ["prompt", "context"])
   },
   {
     name: "ciclo_poll_events",
@@ -245,17 +279,27 @@ export const cicloMcpTools: readonly McpToolContract[] = [
     description: "Close a Beads issue only with acceptance evidence, passing validation, policy, and access.",
     inputSchema: objectSchema("Work close request.", {
       bead_id: beadId,
+      loop_id: loopId,
+      harness_id: harnessId,
       final_summary: stringSchema("Final summary."),
       acceptance_evidence: arrayOfStrings("Acceptance evidence."),
-      validation_evidence: { type: "array", items: { type: "object" } }
+      validation_evidence: { type: "array", items: { type: "object" } },
+      launch_review: { type: "boolean", description: "Launch a bounded review worker after a successful close. Defaults to true." },
+      review_harness_id: { type: "string", enum: ["claude-code", "codex"], description: "Harness for the post-close review worker. Defaults to codex." },
+      review_model: stringSchema("Optional model for the review worker. Claude aliases such as fable 5 normalize to claude-fable-5."),
+      review_effort: stringSchema("Optional reasoning or effort level for the review worker."),
+      review_cwd: stringSchema("Optional cwd for the review worker. Defaults to the matching worker cwd or project root."),
+      review_dry_run: { type: "boolean", description: "Plan the review worker without launching it." },
+      review_configure_mcp: { type: "boolean", description: "Install Ciclo MCP config into the review worker cwd before launch. Defaults to true." }
     }, ["bead_id", "final_summary", "acceptance_evidence", "validation_evidence"]),
     outputSchema: objectSchema("Close result.", {
       mutated: { type: "boolean" },
       task: { type: "object" },
-      evidence: arrayOfStrings("Close evidence.")
+      evidence: arrayOfStrings("Close evidence."),
+      review_session: { type: "object", description: "Post-close review launch result when the task was closed." }
     }),
     permission: permission("close_beads_task", "work.close"),
-    sideEffects: ["beads_note", "beads_close", "beads_sync"],
+    sideEffects: ["beads_note", "beads_close", "beads_sync", "harness_dispatch"],
     audit: audit("mcp.work_closed", ["principal_id", "bead_id"], ["final_summary", "acceptance_evidence"])
   },
   {
@@ -402,6 +446,13 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       ssh_user: stringSchema("SSH user exposed over the WireGuard tunnel."),
       wireguard: { type: "object" },
       environment: { type: "object" },
+      configure_mcp: booleanSchema("Generate Ciclo MCP client config artifacts for the remote repository path. Defaults to true when project MCP config exists, otherwise true for remote launches."),
+      mcp_clients: arrayOfStrings("Remote MCP clients to configure: claude, codex. Defaults to the launched harness client or project config."),
+      mcp_server_name: stringSchema("Remote MCP server name. Default: ciclo or project config."),
+      mcp_command: stringSchema("Ciclo command for remote MCP clients to run. Default: ciclo or project config."),
+      mcp_env: { type: "object", description: "Additional non-secret variables to write into the remote Ciclo MCP server config." },
+      mcp_additional_servers: { type: "object", description: "Additional third-party MCP servers to include in generated remote Claude/Codex config. Object keys are server names; values accept command, args, and non-secret env." },
+      mcp_claude_channel: booleanSchema("Enable Claude channel capability in the generated remote MCP config."),
       kubernetes: { type: "object" },
       aws_lambda: { type: "object", description: "AWS Lambda MicroVM options such as microvm_image_name, microvm_image_identifier, microvm_name, source_s3_uri, base_image_arn, build_role_arn, execution_role_arn, memory_mb, and vcpu_count." },
       cloudflare: { type: "object" },
@@ -415,6 +466,7 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       state: stringSchema("Runner lifecycle state."),
       herdr_remote_target: stringSchema("Herdr remote target reachable over WireGuard."),
       attach: { type: "object" },
+      mcp_config: { type: "object" },
       wireguard: { type: "object" },
       commands: arrayOfStrings("Provider commands to apply the plan."),
       artifacts: { type: "array", items: { type: "object" } },
@@ -435,6 +487,45 @@ export const cicloMcpTools: readonly McpToolContract[] = [
     permission: permission("read_status", "status.read", true),
     sideEffects: ["none"],
     audit: audit("mcp.remote_runners_read", ["principal_id", "session_id"])
+  },
+  {
+    name: "ciclo_list_secret_providers",
+    description: "List configured secret provider plugins without returning secret material.",
+    inputSchema: objectSchema("Secret provider list request.", {}),
+    outputSchema: objectSchema("Secret providers.", {
+      secret_providers: { type: "array", items: { type: "object" } },
+      evidence: arrayOfStrings("Provider registry evidence.")
+    }),
+    permission: permission("read_status", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.secret_providers_read", ["principal_id", "session_id"])
+  },
+  {
+    name: "ciclo_request_secret",
+    description: "Resolve a task-scoped secret through an authorized provider such as OpenBao or 1Password, returning the value only to the caller and redacting audit evidence.",
+    inputSchema: objectSchema("Secret request.", {
+      provider_id: secretProviderId,
+      secret_ref: secretRef,
+      field: stringSchema("Optional provider field. Required by the OpenBao CLI provider."),
+      loop_id: loopId,
+      bead_id: beadId,
+      worker_session_id: stringSchema("Worker session requesting the secret."),
+      reason: stringSchema("Why this task needs the secret."),
+      dry_run: booleanSchema("Validate routing without invoking the provider or returning a secret value.")
+    }, ["provider_id", "secret_ref", "reason"]),
+    outputSchema: objectSchema("Secret resolution result.", {
+      resolved: { type: "boolean" },
+      provider_id: secretProviderId,
+      provider_kind: stringSchema("Provider kind."),
+      secret_ref_hash: stringSchema("Stable hash of the secret reference."),
+      field: stringSchema("Requested provider field."),
+      value: stringSchema("Resolved secret value. Present only for successful non-dry-run requests."),
+      reason: stringSchema("Resolution reason."),
+      evidence: arrayOfStrings("Redacted resolution evidence.")
+    }),
+    permission: permission("request_secret", "secret.read"),
+    sideEffects: ["secret_read"],
+    audit: audit("mcp.secret_requested", ["principal_id", "provider_id", "loop_id", "bead_id", "worker_session_id"], ["secret_ref", "value", "reason"])
   },
   {
     name: "ciclo_attach_plan",
@@ -464,7 +555,7 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       bead_id: beadId,
       prompt: stringSchema("Bounded worker prompt."),
       extra_args: arrayOfStrings("Additional harness CLI arguments inserted before the final prompt argument."),
-      model: stringSchema("Harness model id."),
+      model: stringSchema("Harness model id. Claude aliases such as fable 5 normalize to claude-fable-5."),
       effort: stringSchema("Reasoning or effort level."),
       cwd: stringSchema("Worker cwd."),
       session_name: stringSchema("Human-readable worker session name."),
@@ -477,7 +568,19 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       worktree_path: stringSchema("Optional worktree path. Relative paths are resolved from cwd."),
       worktree_branch: stringSchema("Optional branch to create for the worktree."),
       worktree_base: stringSchema("Optional base revision for the worktree."),
-      worktree_force: booleanSchema("Pass --force to git worktree add.")
+      worktree_force: booleanSchema("Pass --force to git worktree add."),
+      configure_mcp: booleanSchema("Install Ciclo MCP client config into the worker cwd or worktree before launch."),
+      mcp_clients: arrayOfStrings("MCP clients to configure: claude, codex. Defaults to the launched harness client."),
+      mcp_server_name: stringSchema("MCP server name to install. Default: ciclo."),
+      mcp_command: stringSchema("Ciclo command for MCP clients to run. Default: ciclo."),
+      mcp_env: { type: "object", description: "Additional non-secret environment variables to write into the configured MCP server." },
+      mcp_additional_servers: { type: "object", description: "Additional third-party MCP servers to install into the launched worker worktree/cwd. Object keys are server names; values accept command, args, and non-secret env." },
+      mcp_secret_env: {
+        type: "array",
+        items: { type: "object" },
+        description: "Secret-backed MCP server environment bindings. Each item accepts env_name, provider_id, secret_ref, optional field, optional format with exactly one ${secret} placeholder, and optional reason."
+      },
+      mcp_claude_channel: booleanSchema("Enable Claude channel capability in the generated MCP config.")
     }, ["harness_id", "loop_id", "prompt"]),
     outputSchema: objectSchema("Worker session launch result.", {
       session_id: stringSchema("Ciclo worker session id."),
@@ -494,12 +597,20 @@ export const cicloMcpTools: readonly McpToolContract[] = [
         base: stringSchema("Worktree base revision."),
         force: booleanSchema("Whether --force is used.")
       }),
+      mcp_config: objectSchema("Installed or planned MCP client config for the worker cwd.", {
+        enabled: booleanSchema("Whether MCP config is enabled for this launch."),
+        projectRoot: stringSchema("Worker project root receiving MCP config."),
+        clients: arrayOfStrings("Configured MCP clients."),
+        serverName: stringSchema("Installed MCP server name."),
+        command: stringSchema("Installed Ciclo command."),
+        install: { type: "object" }
+      }),
       pid: { type: "number", description: "Process id when launched." },
       evidence: arrayOfStrings("Launch evidence.")
     }),
     permission: permission("send_prompt", "work.update"),
     sideEffects: ["worker_session_update", "harness_dispatch"],
-    audit: audit("mcp.worker_session_launched", ["principal_id", "loop_id", "bead_id", "harness_id"], ["prompt", "extra_args"])
+    audit: audit("mcp.worker_session_launched", ["principal_id", "loop_id", "bead_id", "harness_id"], ["prompt", "extra_args", "mcp_command"])
   },
   {
     name: "ciclo_heartbeat_worker_session",
@@ -734,6 +845,14 @@ export const cicloMcpResources: readonly McpResourceContract[] = [
     permission: permission("read_status", "status.read", true),
     cachePolicy: "short_poll",
     audit: audit("mcp.resource.remote_runners", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://secret-providers",
+    description: "Configured secret providers and supported field behavior without secret material.",
+    outputSchema: objectSchema("Secret providers.", { secret_providers: { type: "array", items: { type: "object" } } }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "no_store",
+    audit: audit("mcp.resource.secret_providers", ["principal_id"])
   },
   {
     uriTemplate: "ciclo://worker-sessions",

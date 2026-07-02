@@ -17,6 +17,8 @@ export type AccessCapability =
   | "command.approve"
   | "question.answer"
   | "remote.register"
+  | "secret.read"
+  | "brain.decide"
   | "access.admin";
 
 export type CommandClass = "read_only" | "test" | "build" | "deploy" | "destructive" | string;
@@ -70,16 +72,18 @@ const allCapabilities: readonly AccessCapability[] = [
   "command.approve",
   "question.answer",
   "remote.register",
+  "secret.read",
+  "brain.decide",
   "access.admin"
 ];
 
 const roleCapabilities: Record<AccessRole, readonly AccessCapability[]> = {
   owner: allCapabilities,
-  operator: ["status.read", "question.answer", "command.approve", "remote.register"],
-  maintainer: ["status.read", "work.claim", "work.update", "work.close", "question.answer"],
+  operator: ["status.read", "question.answer", "command.approve", "remote.register", "brain.decide"],
+  maintainer: ["status.read", "work.claim", "work.update", "work.close", "question.answer", "secret.read", "brain.decide"],
   contributor: ["status.read", "work.claim", "work.update"],
   viewer: ["status.read"],
-  agent_service: ["status.read", "work.update", "question.answer"]
+  agent_service: ["status.read", "work.update", "question.answer", "secret.read", "brain.decide"]
 };
 
 function unique<T>(items: readonly T[]): readonly T[] {

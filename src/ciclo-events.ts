@@ -13,6 +13,12 @@ export type CicloEventType =
   | "question.answered"
   | "feedback.reported"
   | "remote_runner.launched"
+  | "remote_session.heartbeat"
+  | "remote_session.stale"
+  | "remote_session.lost"
+  | "heartbeat.tick"
+  | "brain.decision"
+  | "secret.requested"
   | "tracker.synced";
 
 export interface CicloEventInput {

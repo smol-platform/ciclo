@@ -12,23 +12,23 @@ import {
 } from "../src/harness-registry.js";
 import type { PiCommandDefinition, PiToolDefinition } from "../src/pi-types.js";
 
-test("runtime decision is standalone Ciclo orchestrator agent with Pi brain", () => {
+test("runtime decision is standalone Ciclo orchestrator agent with OpenAI brain via Pi", () => {
   assert.equal(runtimeDecision.runtime, "Standalone TypeScript Ciclo orchestrator agent");
   assert.ok(runtimeDecision.entrypoints.includes("standalone CLI: ./src/cli.ts"));
   assert.ok(runtimeDecision.entrypoints.includes("Pi brain adapter: ./src/pi-extension.ts"));
-  assert.ok(runtimeDecision.rationale.some((item) => item.includes("under the covers")));
+  assert.ok(runtimeDecision.rationale.some((item) => item.includes("OpenAI is the default decision provider")));
   assert.ok(runtimeDecision.rationale.some((item) => item.includes("orchestrator agent")));
 });
 
-test("standalone status exposes Ciclo as orchestrator agent and Pi as brain provider", () => {
+test("standalone status exposes Ciclo as orchestrator agent and OpenAI as brain provider", () => {
   const status = buildStandaloneStatus();
   assert.equal(status.app, "ciclo");
   assert.equal(status.runtime, "Standalone TypeScript Ciclo orchestrator agent");
   assert.equal(status.orchestratorAgent, true);
-  assert.deepEqual(status.brain, {
-    provider: "pi",
-    role: "internal_brain_provider"
-  });
+  assert.equal(status.brain.provider, "openai");
+  assert.equal(status.brain.adapter, "pi-sdk");
+  assert.equal(status.brain.role, "primary_orchestration_brain");
+  assert.ok(status.brain.routing.required_for.includes("remote_session_monitoring"));
   assert.equal(status.plan.loopId, "review-demo");
 });
 

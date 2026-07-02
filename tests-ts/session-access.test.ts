@@ -97,4 +97,5 @@ test("session action mutation classification covers work command and remote oper
   assert.equal(isMutatingSessionAction("claim_beads_task"), true);
   assert.equal(isMutatingSessionAction("register_remote_session"), true);
   assert.equal(isMutatingSessionAction("remote_tracker_sync"), true);
+  assert.equal(isMutatingSessionAction("use_brain"), true);
 });

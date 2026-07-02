@@ -1,5 +1,6 @@
 import { planNext, runtimeDecision, type HerdrObservation, type LoopConfig } from "./ciclo-core.js";
 import { createDefaultRegistry } from "./harness-registry.js";
+import { openAiBrainPolicy, type OpenAiBrainStatus } from "./openai-brain.js";
 
 export interface CicloStandaloneStatus {
   readonly ok: true;
@@ -7,8 +8,10 @@ export interface CicloStandaloneStatus {
   readonly runtime: typeof runtimeDecision.runtime;
   readonly orchestratorAgent: true;
   readonly brain: {
-    readonly provider: "pi";
-    readonly role: "internal_brain_provider";
+    readonly provider: "openai";
+    readonly adapter: "pi-sdk";
+    readonly role: "primary_orchestration_brain";
+    readonly routing: OpenAiBrainStatus;
   };
   readonly pluginMatch: ReturnType<ReturnType<typeof createDefaultRegistry>["select"]>;
   readonly plan: ReturnType<typeof planNext>;
@@ -41,8 +44,10 @@ export function buildStandaloneStatus(
     runtime: runtimeDecision.runtime,
     orchestratorAgent: true,
     brain: {
-      provider: "pi",
-      role: "internal_brain_provider"
+      provider: "openai",
+      adapter: "pi-sdk",
+      role: "primary_orchestration_brain",
+      routing: openAiBrainPolicy
     },
     pluginMatch: registry.select(observation, loop),
     plan: planNext(loop, observation)

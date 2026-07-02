@@ -254,6 +254,10 @@ export function runMcpHttpServer(
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(config.port, config.host, () => resolve(server));
+    server.listen(config.port, config.host, () => {
+      runtime.internalHeartbeat?.start();
+      server.once("close", () => runtime.internalHeartbeat?.stop());
+      resolve(server);
+    });
   });
 }

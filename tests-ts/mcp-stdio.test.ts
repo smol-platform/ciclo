@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import test from "node:test";
 
@@ -15,7 +15,16 @@ import { CicloEventStore } from "../src/ciclo-events.js";
 import type { LoopConfig } from "../src/ciclo-core.js";
 import type { PolicyConfig } from "../src/loop-config.js";
 import { OperatorRoutingStore } from "../src/operator-routing.js";
+import { defaultPluginPaths, installPlugin } from "../src/plugin-manager.js";
+import type {
+  OpenAiBrain,
+  OpenAiBrainDecision,
+  OpenAiBrainDecisionInput,
+  OpenAiBrainStatus
+} from "../src/openai-brain.js";
+import { openAiBrainPolicy } from "../src/openai-brain.js";
 import { RemoteRunnerRegistry } from "../src/remote-runner.js";
+import { SecretProviderRegistry, secretRefHash } from "../src/secret-provider.js";
 import type { RepoBoardProvider, RepoBoardStatus } from "../src/repo-board.js";
 import { createSingleUserSession, type CicloSession } from "../src/session-access.js";
 import { TokenRegistry } from "../src/token-store.js";
@@ -25,6 +34,7 @@ import {
   type WorkerProcessLauncher
 } from "../src/worker-session-supervisor.js";
 import {
+  createLocalMcpRuntimeContextWithPlugins,
   handleMcpRequest,
   runMcpStdioServer,
   type CicloMcpRuntimeContext,
@@ -32,6 +42,9 @@ import {
   type JsonRpcResponse,
   type LoopStatus
 } from "../src/mcp-stdio.js";
+import { CICLO_VERSION } from "../src/version.js";
+
+const fixtureSecretPluginPath = resolve("tests/fixtures/plugins/keychain-secrets");
 
 const readyTask: BeadsTaskSnapshot = {
   id: "ciclo-demo.1",
@@ -150,6 +163,27 @@ class FakeRepoBoardProvider implements RepoBoardProvider {
   }
 }
 
+class FakeOpenAiBrain implements OpenAiBrain {
+  readonly inputs: OpenAiBrainDecisionInput[] = [];
+
+  status(): OpenAiBrainStatus {
+    return openAiBrainPolicy;
+  }
+
+  async decide(input: OpenAiBrainDecisionInput): Promise<OpenAiBrainDecision> {
+    this.inputs.push(input);
+    return {
+      provider: "openai",
+      adapter: "pi-sdk",
+      model: openAiBrainPolicy.model,
+      thinking: openAiBrainPolicy.thinking,
+      purpose: input.purpose,
+      text: "Insert a small context pack, then ask the worker to continue.",
+      evidence: ["brain.provider:openai", `brain.purpose:${input.purpose}`]
+    };
+  }
+}
+
 function resultOf(response: JsonRpcResponse | undefined): unknown {
   assert.ok(response);
   assert.ok("result" in response, JSON.stringify(response));
@@ -224,7 +258,7 @@ test("local MCP stdio handler exposes catalog capabilities", async () => {
   const initialize = resultOf(
     await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "initialize" }, service, singleRuntime)
   ) as Record<string, unknown>;
-  assert.deepEqual(initialize.serverInfo, { name: "ciclo", version: "0.1.0" });
+  assert.deepEqual(initialize.serverInfo, { name: "ciclo", version: CICLO_VERSION });
 
   const tools = resultOf(
     await handleMcpRequest({ jsonrpc: "2.0", id: 2, method: "tools/list" }, service, singleRuntime)
@@ -263,6 +297,7 @@ test("local MCP tools answer status loop status and ready work without mutations
   );
   assert.equal(status.app, "ciclo");
   assert.equal(status.live, true);
+  assert.equal((status.brain as { provider?: string }).provider, "openai");
 
   const loop = structuredContent(
     await handleMcpRequest(
@@ -298,6 +333,331 @@ test("local MCP tools answer status loop status and ready work without mutations
   assert.deepEqual(ready.evidence, ["fixture:ready"]);
 });
 
+test("MCP brain decision tool routes control-plane decisions through OpenAI brain", async () => {
+  const eventStore = new CicloEventStore();
+  const brain = new FakeOpenAiBrain();
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    eventStore,
+    openAiBrain: brain
+  };
+
+  const decision = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 61,
+        method: "tools/call",
+        params: {
+          name: "ciclo_decide",
+          arguments: {
+            purpose: "context_insertion",
+            loop_id: "review-loop",
+            bead_id: "ciclo-1",
+            worker_session_id: "worker-1",
+            prompt: "Worker is missing repository context.",
+            context: ["diff touched authz.ts"],
+            evidence: ["worker.question:needs-context"]
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+
+  assert.equal(decision.provider, "openai");
+  assert.equal(decision.decision, "Insert a small context pack, then ask the worker to continue.");
+  assert.equal(brain.inputs[0]?.purpose, "context_insertion");
+  assert.equal(brain.inputs[0]?.prompt, "Worker is missing repository context.");
+  const events = eventStore.poll(0);
+  assert.ok(events.events.some((event) => event.type === "brain.decision"));
+});
+
+test("MCP secret tools resolve through registry while redacting audit and events", async () => {
+  const eventStore = new CicloEventStore();
+  const auditLog: NonNullable<CicloMcpRuntimeContext["auditLog"]> = [];
+  const secretProviderRegistry = new SecretProviderRegistry([
+    {
+      id: "fixture-secrets",
+      kind: "fixture",
+      name: "Fixture Secrets",
+      supportsFields: true,
+      resolve(input) {
+        return {
+          resolved: true,
+          providerId: "fixture-secrets",
+          providerKind: "fixture",
+          secretRefHash: secretRefHash(input.secretRef),
+          field: input.field,
+          value: "super-secret-value",
+          reason: "fixture provider resolved the secret",
+          evidence: [
+            "secret.provider:fixture-secrets",
+            "secret.kind:fixture",
+            `secret.ref_hash:${secretRefHash(input.secretRef)}`,
+            "secret.resolved:true"
+          ]
+        };
+      }
+    }
+  ]);
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    eventStore,
+    auditLog,
+    secretProviderRegistry
+  };
+
+  const listed = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 611,
+        method: "tools/call",
+        params: { name: "ciclo_list_secret_providers", arguments: {} }
+      },
+      service,
+      runtime
+    )
+  );
+  assert.equal((listed.secret_providers as readonly { id?: string }[])[0]?.id, "fixture-secrets");
+
+  const resolved = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 612,
+        method: "tools/call",
+        params: {
+          name: "ciclo_request_secret",
+          arguments: {
+            provider_id: "fixture-secrets",
+            secret_ref: "op://Ciclo/API/token",
+            field: "token",
+            loop_id: "deploy-loop",
+            bead_id: "ciclo-1",
+            worker_session_id: "worker-1",
+            reason: "deploy validation"
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+
+  assert.equal(resolved.resolved, true);
+  assert.equal(resolved.value, "super-secret-value");
+  assert.equal(resolved.secret_ref_hash, secretRefHash("op://Ciclo/API/token"));
+  const serializedAudit = JSON.stringify(auditLog);
+  const serializedEvents = JSON.stringify(eventStore.poll(0));
+  assert.ok(!serializedAudit.includes("super-secret-value"));
+  assert.ok(!serializedAudit.includes("op://Ciclo/API/token"));
+  assert.ok(!serializedEvents.includes("super-secret-value"));
+  assert.ok(!serializedEvents.includes("op://Ciclo/API/token"));
+  assert.ok(serializedEvents.includes("secret.requested"));
+
+  const resource = resourcePayload(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 613, method: "resources/read", params: { uri: "ciclo://secret-providers" } },
+      service,
+      runtime
+    )
+  );
+  assert.equal((resource.secret_providers as readonly { kind?: string }[])[0]?.kind, "fixture");
+});
+
+test("MCP runtime reads secrets through installed secret provider plugins", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ciclo-mcp-secret-plugin-"));
+  try {
+    mkdirSync(join(root, ".ciclo"), { recursive: true });
+    writeFileSync(join(root, ".ciclo", "config.json"), `${JSON.stringify({
+      secrets: {
+        providers: [{
+          id: "team-keychain",
+          kind: "keychain",
+          name: "Team Keychain",
+          pluginProviderId: "keychain-test"
+        }]
+      }
+    }, null, 2)}\n`);
+    installPlugin({
+      packageName: "@example/ciclo-secrets-keychain",
+      path: fixtureSecretPluginPath,
+      trust: true,
+      enable: true,
+      now: "2026-07-02T00:00:00.000Z"
+    }, defaultPluginPaths(root));
+
+    const runtime = await createLocalMcpRuntimeContextWithPlugins(root);
+    const auditLog: NonNullable<CicloMcpRuntimeContext["auditLog"]> = [];
+    const eventStore = new CicloEventStore();
+    const pluginRuntime: CicloMcpRuntimeContext = {
+      ...runtime,
+      auditLog,
+      eventStore
+    };
+
+    const listed = structuredContent(
+      await handleMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 616,
+          method: "tools/call",
+          params: { name: "ciclo_list_secret_providers", arguments: {} }
+        },
+        service,
+        pluginRuntime
+      )
+    );
+    const providers = listed.secret_providers as readonly { id?: string; kind?: string }[];
+    assert.ok(providers.some((provider) => provider.id === "team-keychain" && provider.kind === "keychain"));
+    assert.ok(providers.some((provider) => provider.id === "keychain-test" && provider.kind === "keychain"));
+
+    const resolved = structuredContent(
+      await handleMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 617,
+          method: "tools/call",
+          params: {
+            name: "ciclo_request_secret",
+            arguments: {
+              provider_id: "team-keychain",
+              secret_ref: "keychain://ciclo/demo",
+              field: "token",
+              loop_id: "deploy-loop",
+              bead_id: "ciclo-plugin-secret",
+              reason: "resolve through installed secret provider plugin"
+            }
+          }
+        },
+        service,
+        pluginRuntime
+      )
+    );
+
+    assert.equal(resolved.resolved, true);
+    assert.equal(resolved.provider_id, "team-keychain");
+    assert.equal(resolved.provider_kind, "keychain");
+    assert.equal(resolved.value, "fixture-secret");
+    assert.equal(resolved.secret_ref_hash, "fixture-hash");
+    const serializedAudit = JSON.stringify(auditLog);
+    const serializedEvents = JSON.stringify(eventStore.poll(0));
+    assert.ok(!serializedAudit.includes("fixture-secret"));
+    assert.ok(!serializedAudit.includes("keychain://ciclo/demo"));
+    assert.ok(!serializedEvents.includes("fixture-secret"));
+    assert.ok(!serializedEvents.includes("keychain://ciclo/demo"));
+    assert.ok(serializedEvents.includes("secret.requested"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP worker launch resolves plugin secrets into generated MCP config without leaking responses", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ciclo-mcp-secret-worker-"));
+  try {
+    const eventStore = new CicloEventStore();
+    const auditLog: NonNullable<CicloMcpRuntimeContext["auditLog"]> = [];
+    const secretProviderRegistry = new SecretProviderRegistry([
+      {
+        id: "fixture-secrets",
+        kind: "fixture",
+        name: "Fixture Secrets",
+        supportsFields: true,
+        resolve(input) {
+          return {
+            resolved: true,
+            providerId: "fixture-secrets",
+            providerKind: "fixture",
+            secretRefHash: secretRefHash(input.secretRef),
+            field: input.field,
+            value: "super-secret-value",
+            reason: "fixture provider resolved the secret",
+            evidence: [
+              "secret.provider:fixture-secrets",
+              "secret.kind:fixture",
+              `secret.ref_hash:${secretRefHash(input.secretRef)}`,
+              "secret.resolved:true"
+            ]
+          };
+        }
+      }
+    ]);
+    const supervisor = new WorkerSessionSupervisor(root, new FakeWorkerLauncher(), undefined, eventStore);
+    const runtime: CicloMcpRuntimeContext = {
+      ...singleRuntime,
+      eventStore,
+      auditLog,
+      secretProviderRegistry,
+      workerSupervisor: supervisor
+    };
+
+    const launched = structuredContent(
+      await handleMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 614,
+          method: "tools/call",
+          params: {
+            name: "ciclo_launch_worker_session",
+            arguments: {
+              harness_id: "codex",
+              loop_id: "deploy-loop",
+              bead_id: "ciclo-secret",
+              prompt: "Use Ciclo MCP.",
+              cwd: root,
+              configure_mcp: true,
+              mcp_clients: ["codex"],
+              mcp_secret_env: [
+                {
+                  env_name: "API_TOKEN",
+                  provider_id: "fixture-secrets",
+                  secret_ref: "op://Ciclo/API/token",
+                  format: "Bearer ${secret}",
+                  reason: "provide API token to worker MCP"
+                }
+              ]
+            }
+          }
+        },
+        service,
+        runtime
+      )
+    );
+
+    assert.equal(launched.state, "running");
+    assert.doesNotMatch(JSON.stringify(launched), /super-secret-value/);
+    const mcpConfig = launched.mcp_config as Record<string, unknown>;
+    assert.equal((mcpConfig.secretEnv as readonly { name?: string; formatApplied?: boolean }[])[0]?.name, "API_TOKEN");
+    assert.equal((mcpConfig.secretEnv as readonly { name?: string; formatApplied?: boolean }[])[0]?.formatApplied, true);
+    assert.equal(mcpConfig.secretEnvBindings, undefined);
+
+    const config = readFileSync(join(root, ".codex", "config.toml"), "utf8");
+    assert.match(config, /API_TOKEN = "Bearer super-secret-value"/);
+
+    const listed = structuredContent(
+      await handleMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 615,
+          method: "tools/call",
+          params: { name: "ciclo_list_worker_sessions", arguments: {} }
+        },
+        service,
+        runtime
+      )
+    );
+    assert.doesNotMatch(JSON.stringify(listed), /super-secret-value/);
+    assert.doesNotMatch(JSON.stringify(auditLog), /super-secret-value|op:\/\/Ciclo\/API\/token/);
+    assert.doesNotMatch(JSON.stringify(eventStore.poll(0)), /super-secret-value|op:\/\/Ciclo\/API\/token/);
+    assert.ok(JSON.stringify(eventStore.poll(0)).includes("mcp.secret_env.format:applied"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("MCP worker session tools let Ciclo plan and list managed workers", async () => {
   const eventStore = new CicloEventStore();
   const runtime: CicloMcpRuntimeContext = {
@@ -326,6 +686,17 @@ test("MCP worker session tools let Ciclo plan and list managed workers", async (
             create_worktree: true,
             worktree_path: "../ciclo-mcp-worker",
             worktree_branch: "ciclo-mcp-worker",
+            configure_mcp: true,
+            mcp_clients: ["codex", "claude"],
+            mcp_server_name: "ciclo_worker",
+            mcp_command: "ciclo-dev",
+            mcp_additional_servers: {
+              filesystem: {
+                command: "npx",
+                args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
+                env: { MCP_FS_MODE: "stdio" }
+              }
+            },
             dry_run: true
           }
         }
@@ -343,6 +714,10 @@ test("MCP worker session tools let Ciclo plan and list managed workers", async (
   assert.ok((launched.args as readonly string[]).includes("--profile"));
   assert.equal((launched.worktree as { branch?: string }).branch, "ciclo-mcp-worker");
   assert.equal(launched.cwd, (launched.worktree as { path?: string }).path);
+  assert.deepEqual((launched.mcp_config as { clients?: readonly string[] }).clients, ["codex", "claude"]);
+  assert.equal((launched.mcp_config as { serverName?: string }).serverName, "ciclo_worker");
+  assert.deepEqual((launched.mcp_config as { additionalServerNames?: readonly string[] }).additionalServerNames, ["filesystem"]);
+  assert.equal(((launched.mcp_config as { install?: { targets?: readonly unknown[] } }).install?.targets ?? []).length, 2);
 
   const listed = structuredContent(
     await handleMcpRequest(
@@ -694,7 +1069,15 @@ test("MCP worker sessions expose waiting heartbeat stalled and usage rollups", a
 test("MCP remote runner tools plan WireGuard Herdr runner environments", async () => {
   const runtime: CicloMcpRuntimeContext = {
     ...singleRuntime,
-    remoteRunnerRegistry: new RemoteRunnerRegistry()
+    remoteRunnerRegistry: new RemoteRunnerRegistry(),
+    projectConfig: {
+      mcp: {
+        clients: ["claude", "codex"],
+        serverName: "ciclo_remote",
+        command: "ciclo",
+        vars: { CICLO_REUSE_HERDR_SESSION: "true" }
+      }
+    }
   };
 
   const launched = structuredContent(
@@ -738,6 +1121,9 @@ test("MCP remote runner tools plan WireGuard Herdr runner environments", async (
   assert.equal(launched.provider_name, "kubernetes-job");
   assert.equal(launched.execution_model, "kubernetes_job");
   assert.equal(launched.herdr_remote_target, "ciclo@10.66.0.8:/workspace/project");
+  assert.deepEqual((launched.mcp_config as { clients?: readonly string[] }).clients, ["claude", "codex"]);
+  assert.equal((launched.mcp_config as { serverName?: string }).serverName, "ciclo_remote");
+  assert.ok(((launched.mcp_config as { artifacts?: readonly { name?: string }[] }).artifacts ?? []).some((artifact) => artifact.name === ".mcp.json"));
   assert.ok((launched.commands as readonly string[]).some((command) => command.includes("kubectl")));
 
   const attach = structuredContent(
@@ -1098,6 +1484,56 @@ test("MCP work mutation tools claim update close audit and record idempotency", 
   assert.ok(auditLog.some((entry) => entry.tool === "ciclo_claim_work"));
   assert.ok(auditLog.some((entry) => entry.tool === "ciclo_update_work"));
   assert.ok(auditLog.some((entry) => entry.tool === "ciclo_close_work"));
+});
+
+test("MCP close work launches a bounded review worker after successful task close", async () => {
+  const client = fakeMutationClient(readyTask);
+  const supervisor = new WorkerSessionSupervisor("/repo", new FakeWorkerLauncher());
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    beadsClient: client,
+    loop: activeLoop,
+    policy: supervisedPolicy,
+    workerSupervisor: supervisor
+  };
+
+  const close = structuredContent(
+    await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 221,
+        method: "tools/call",
+        params: {
+          name: "ciclo_close_work",
+          arguments: {
+            loop_id: "review-demo",
+            bead_id: readyTask.id,
+            harness_id: "claude-code",
+            final_summary: "MCP mutation path is complete.",
+            acceptance_evidence: ["claim update close flow covered"],
+            validation_evidence: [{ command: "just check", passed: true, summary: "passed" }],
+            review_harness_id: "codex",
+            review_dry_run: true
+          }
+        }
+      },
+      service,
+      runtime
+    )
+  );
+
+  assert.equal(close.mutated, true);
+  const reviewSession = close.review_session as Record<string, unknown>;
+  assert.equal(reviewSession.launched, true);
+  assert.equal(reviewSession.harnessId, "codex");
+  assert.equal(reviewSession.state, "planned");
+  assert.equal(reviewSession.dryRun, true);
+  const workers = supervisor.list();
+  assert.equal(workers.length, 1);
+  assert.equal(workers[0]?.beadId, readyTask.id);
+  assert.equal(workers[0]?.loopId, "review-demo");
+  assert.equal(workers[0]?.state, "planned");
+  assert.ok(workers[0]?.evidence.some((item) => item === "worker.session.launch:planned"));
 });
 
 test("MCP work mutations enforce loop dry-run policy before Beads ownership changes", async () => {

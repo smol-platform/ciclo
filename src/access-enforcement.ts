@@ -65,6 +65,8 @@ const actionCapabilities: Partial<Record<SessionAccessAction, AccessCapability>>
   register_remote_session: "remote.register",
   remote_tracker_sync: "access.admin",
   answer_agent_question: "question.answer",
+  request_secret: "secret.read",
+  use_brain: "brain.decide",
   grant_access: "access.admin",
   revoke_access: "access.admin"
 };

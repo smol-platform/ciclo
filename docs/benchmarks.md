@@ -1,6 +1,8 @@
 # Ciclo Benchmarks
 
-The benchmark suite is Ciclo's regression harness for orchestration behavior. It gives Ciclo a simulated repository, Beads board, Herdr state, harness transcript, MCP calls, policy, and expected/disallowed behavior, then scores whether Ciclo's response is safe and useful.
+The benchmark suite is Ciclo's regression harness for the OpenAI-backed orchestration brain. It gives Ciclo a simulated repository, Beads board, Herdr state, harness transcript, MCP calls, policy, and expected/disallowed behavior, then scores whether the brain helps the control plane choose safe and useful next actions.
+
+Benchmarks are not a replacement for the live control plane. They exist to gauge how well the OpenAI/Pi brain is helping Ciclo monitor sessions, decide when to insert more context, answer questions from known state, surface uncertainty to the controlling user session, and tune the brain prompt when those decisions regress.
 
 Run the local deterministic suite:
 
@@ -14,7 +16,7 @@ Run the full project gate:
 npm run check
 ```
 
-Run model-backed judging through Pi:
+Run model-backed judging through Pi/OpenAI:
 
 ```bash
 node dist/src/cli.js benchmark --scenario-dir tests/fixtures/benchmarks --judge pi --model openai-codex/gpt-5.5 --thinking high
@@ -87,6 +89,8 @@ Blocked-state handling has one explicit exception: when a scenario marks a harne
 | Scenario | What it tests |
 | --- | --- |
 | `worker_launch_codex_session` | Ciclo plans a supervised Codex worker launch with model, cwd, prompt, and cleanup tracking. |
+| `worker_mcp_secret_env_launch` | A worker launch resolves provider-backed MCP secret bindings, writes them only to generated MCP config, and redacts secret material from prompts, events, and responses. |
+| `post_close_launches_review_session` | Closing a task with acceptance and validation evidence launches a bounded review worker and records the review session for monitoring. |
 | `worker_stop_completed_claude_session` | Ciclo records cleanup for a completed Claude worker while preserving validation evidence. |
 
 ### MCP and Operator Routing
