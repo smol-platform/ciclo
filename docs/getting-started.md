@@ -135,7 +135,14 @@ A launch request includes the harness, loop, prompt, optional Beads issue, model
 
 For Claude Code sessions, `model` accepts `claude-fable-5` directly and normalizes `fable 5`, `Fable 5`, or `claude fable 5` to `claude-fable-5`. Other model ids remain pass-through so new Claude models can be used without a Ciclo release.
 
-Use `mcp_env` only for non-secret MCP server environment variables. When a configured worker MCP server needs a secret, pass `mcp_secret_env` bindings with `env_name`, `provider_id`, `secret_ref`, optional `field`, optional `format`, and `reason`; Ciclo resolves them through secret-provider plugins for non-dry-run launches, applies `format` only after resolution, and redacts values from responses, audit records, events, and worker-session listings. Formats must contain exactly one `${secret}` placeholder, for example `Bearer ${secret}`.
+Use `mcp_env` only for non-secret MCP server environment variables. When the generated Ciclo MCP server needs a secret, pass `mcp_secret_env` bindings with `env_name`, `provider_id`, `secret_ref`, optional `field`, optional `format`, and `reason`; Ciclo resolves them through configured secret providers for non-dry-run launches, applies `format` only after resolution, and redacts values from responses, audit records, events, board rows, and worker-session listings. Formats must contain exactly one `${secret}` placeholder, for example `Bearer ${secret}`.
+
+Additional MCP servers are configured separately with `mcp_additional_servers` or project `mcp.additionalServers`. Raw environment values must be non-secret, but a value may include a Ciclo secret placeholder such as `Bearer ${secret://team-1password/Ciclo/API/token}`. The placeholder host is the configured provider id, the path is the provider secret reference, and `?field=token` or `#token` selects a field for providers such as OpenBao. Ciclo resolves these placeholders through the secret provider registry when it installs the MCP config for a launched session, then redacts install, launch, event, audit, board, and worker-listing output. If a third-party MCP server needs credentials, use one of these patterns:
+
+- Use a Ciclo placeholder in that server's `env` value when Ciclo should resolve the secret at session startup.
+- Configure the server with its own provider-native reference, such as a vault path or `op://` reference, when the server supports it.
+- Launch a wrapper command that reads the secret at runtime and then starts the MCP server without storing the value in Ciclo config.
+- Let the spawned worker call `ciclo_request_secret` through Ciclo MCP for task-scoped use instead of injecting the value into that third-party server.
 
 ### Project Config
 
@@ -157,7 +164,7 @@ The config supports:
 
 Precedence is simple: inline CLI flags and MCP tool payload fields win for the current operation; `.ciclo/config.json` fills any omitted values; Ciclo's built-in defaults apply last. That means the shared config can define the normal Claude/Codex MCP setup, secret provider aliases, and remote runner defaults while a single launch can still override the model, worktree, remote runner kind, or provider-specific field.
 
-Use provider references in `mcp.secretBindings`; do not store raw secret values. Ciclo redacts secret references from `ciclo config show --compact`, launch responses, worker-session listings, audit records, events, and board rows. `vars` are only for non-secret strings. For secrets needed by spawned worker MCP tools, bind a `name` to a configured provider and reference; Ciclo resolves the value only for non-dry-run launches that are authorized to read it. Add `format` only when the generated env var needs a prefix, suffix, or wrapper string.
+Use provider references in `mcp.secretBindings`; do not store raw secret values. Ciclo redacts secret references from `ciclo config show --compact`, launch responses, worker-session listings, audit records, events, and board rows. `vars` are only for non-secret strings. For secrets needed by the generated Ciclo MCP server, bind a `name` to a configured provider and reference; Ciclo resolves the value only for non-dry-run installs or launches that are authorized to read it. Add `format` only when the generated variable needs a prefix, suffix, or wrapper string. For additional MCP servers, keep raw environment values non-secret or use `${secret://provider-id/ref}` placeholders that Ciclo resolves when the generated MCP config is installed.
 
 The same file is read in four places:
 

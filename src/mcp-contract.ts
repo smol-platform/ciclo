@@ -451,7 +451,7 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       mcp_server_name: stringSchema("Remote MCP server name. Default: ciclo or project config."),
       mcp_command: stringSchema("Ciclo command for remote MCP clients to run. Default: ciclo or project config."),
       mcp_env: { type: "object", description: "Additional non-secret variables to write into the remote Ciclo MCP server config." },
-      mcp_additional_servers: { type: "object", description: "Additional third-party MCP servers to include in generated remote Claude/Codex config. Object keys are server names; values accept command, args, and non-secret env." },
+      mcp_additional_servers: { type: "object", description: "Additional third-party MCP servers to include in generated remote Claude/Codex config. Object keys are server names; values accept command, args, and env. Raw env values must be non-secret; values may include ${secret://provider-id/ref} placeholders resolved at session MCP config install time." },
       mcp_claude_channel: booleanSchema("Enable Claude channel capability in the generated remote MCP config."),
       kubernetes: { type: "object" },
       aws_lambda: { type: "object", description: "AWS Lambda MicroVM options such as microvm_image_name, microvm_image_identifier, microvm_name, source_s3_uri, base_image_arn, build_role_arn, execution_role_arn, memory_mb, and vcpu_count." },
@@ -574,7 +574,7 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       mcp_server_name: stringSchema("MCP server name to install. Default: ciclo."),
       mcp_command: stringSchema("Ciclo command for MCP clients to run. Default: ciclo."),
       mcp_env: { type: "object", description: "Additional non-secret environment variables to write into the configured MCP server." },
-      mcp_additional_servers: { type: "object", description: "Additional third-party MCP servers to install into the launched worker worktree/cwd. Object keys are server names; values accept command, args, and non-secret env." },
+      mcp_additional_servers: { type: "object", description: "Additional third-party MCP servers to install into the launched worker worktree/cwd. Object keys are server names; values accept command, args, and env. Raw env values must be non-secret; values may include ${secret://provider-id/ref} placeholders resolved at session MCP config install time." },
       mcp_secret_env: {
         type: "array",
         items: { type: "object" },

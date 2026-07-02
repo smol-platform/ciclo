@@ -18,6 +18,7 @@ import {
   type CicloMcpSecretEnvBinding,
   type CicloMcpSecretEnvInstall
 } from "./mcp-install.js";
+import type { CicloMcpAdditionalServerSecretEnvInstall } from "./mcp-secret-placeholders.js";
 import { activeHerdrSessionName, repoSessionName } from "./repo-session-name.js";
 
 export type WorkerHarnessId = Extract<HarnessId, "claude-code" | "codex">;
@@ -55,6 +56,7 @@ export interface WorkerSessionLaunchRequest {
   readonly mcpCommand?: string;
   readonly mcpEnv?: Record<string, string>;
   readonly mcpAdditionalServers?: Record<string, CicloMcpAdditionalServerConfig>;
+  readonly mcpAdditionalServerSecretEnv?: readonly CicloMcpAdditionalServerSecretEnvInstall[];
   readonly mcpSecretEnv?: readonly CicloMcpSecretEnvBinding[];
   readonly mcpClaudeChannel?: boolean;
 }
@@ -109,6 +111,7 @@ export interface WorkerMcpConfigPlan {
   readonly envKeys: readonly string[];
   readonly additionalServers: Record<string, CicloMcpAdditionalServerConfig>;
   readonly additionalServerNames: readonly string[];
+  readonly additionalServerSecretEnv: readonly CicloMcpAdditionalServerSecretEnvInstall[];
   readonly secretEnv: readonly CicloMcpSecretEnvInstall[];
   readonly secretEnvBindings: readonly CicloMcpSecretEnvBinding[];
   readonly claudeChannel?: boolean;
@@ -399,6 +402,7 @@ function mcpConfigPlan(input: WorkerSessionLaunchRequest, cwd: string): WorkerMc
     command,
     env: input.mcpEnv,
     additionalServers: input.mcpAdditionalServers,
+    additionalServerSecretEnv: input.mcpAdditionalServerSecretEnv,
     secretEnv: input.mcpSecretEnv,
     ...(claudeChannel ? { claudeChannel } : {}),
     dryRun: true
@@ -413,6 +417,7 @@ function mcpConfigPlan(input: WorkerSessionLaunchRequest, cwd: string): WorkerMc
     envKeys: Object.keys(input.mcpEnv ?? {}),
     additionalServers: input.mcpAdditionalServers ?? {},
     additionalServerNames: Object.keys(input.mcpAdditionalServers ?? {}),
+    additionalServerSecretEnv: input.mcpAdditionalServerSecretEnv ?? [],
     secretEnv: install.secretEnv,
     secretEnvBindings: input.mcpSecretEnv ?? [],
     ...(claudeChannel ? { claudeChannel } : {}),
@@ -424,6 +429,7 @@ function mcpConfigPlan(input: WorkerSessionLaunchRequest, cwd: string): WorkerMc
       `worker.mcp_config.project_root:${cwd}`,
       `worker.mcp_config.env_keys:${Object.keys(input.mcpEnv ?? {}).length}`,
       `worker.mcp_config.additional_servers:${Object.keys(input.mcpAdditionalServers ?? {}).length}`,
+      `worker.mcp_config.additional_server_secret_env:${install.additionalServerSecretEnv.length}`,
       `worker.mcp_config.secret_env:${install.secretEnv.length}`,
       `worker.mcp_config.changed:${install.targets.some((target) => target.changed)}`
     ]
@@ -584,6 +590,7 @@ function installMcpConfig(plan: WorkerLaunchPlan): WorkerMcpConfigPlan | undefin
     command: mcpConfig.command,
     env: mcpConfig.env,
     additionalServers: mcpConfig.additionalServers,
+    additionalServerSecretEnv: mcpConfig.additionalServerSecretEnv,
     secretEnv: mcpConfig.secretEnvBindings,
     ...(mcpConfig.claudeChannel === true ? { claudeChannel: true } : {}),
     dryRun: false

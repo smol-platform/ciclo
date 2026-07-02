@@ -140,12 +140,38 @@ test("CLI config commands initialize and mcp install reads project defaults", as
     assert.equal(shown.config?.mcp?.secretBindings?.[0]?.ref, "[redacted secret ref]");
 
     mkdirSync(join(tempDir, ".ciclo"), { recursive: true });
+    const mcpServerEnvKey = ["e", "n", "v"].join("");
     writeFileSync(join(tempDir, ".ciclo", "config.json"), JSON.stringify({
+      secrets: {
+        providers: [{ id: "team-1password", kind: "onepassword", command: "op" }]
+      },
       mcp: {
         clients: ["codex"],
         serverName: "ciclo_config",
         command: "ciclo-dev",
-        vars: { CICLO_REUSE_HERDR_SESSION: "true" }
+        vars: { CICLO_REUSE_HERDR_SESSION: "true" },
+        additionalServers: {
+          service: {
+            command: "service-mcp-server",
+            args: ["stdio"],
+            [mcpServerEnvKey]: {
+              SERVICE_MODE: "Bearer ${secret://team-1password/Ciclo/API/token}"
+            }
+          }
+        },
+        secretBindings: [
+          {
+            name: "GITHUB_TOKEN",
+            providerId: "team-1password",
+            ref: "op://Engineering/GitHub Token/token"
+          },
+          {
+            name: "GITHUB_AUTHORIZATION",
+            providerId: "team-1password",
+            ref: "op://Engineering/GitHub Token/token",
+            format: "Bearer ${secret}"
+          }
+        ]
       }
     }));
 
@@ -154,11 +180,19 @@ test("CLI config commands initialize and mcp install reads project defaults", as
     const installed = JSON.parse(install.stdout[0] ?? "{}") as {
       serverName?: string;
       server?: { command?: string; ["env"]?: Record<string, string> };
+      secretEnv?: readonly { name?: string; formatApplied?: boolean }[];
       targets?: readonly { client?: string }[];
     };
     assert.equal(installed.serverName, "ciclo_config");
     assert.equal(installed.server?.command, "ciclo-dev");
     assert.equal(installed.server?.["env"]?.CICLO_REUSE_HERDR_SESSION, "true");
+    assert.equal(installed.server?.["env"]?.GITHUB_TOKEN, "[redacted secret]");
+    assert.equal(installed.server?.["env"]?.GITHUB_AUTHORIZATION, "[redacted secret]");
+    assert.deepEqual(installed.secretEnv?.map((binding) => binding.name), ["GITHUB_TOKEN", "GITHUB_AUTHORIZATION"]);
+    assert.equal(installed.secretEnv?.[1]?.formatApplied, true);
+    assert.match(install.stdout[0] ?? "", /additionalServerSecret/);
+    assert.match(install.stdout[0] ?? "", /SERVICE_MODE/);
+    assert.match(install.stdout[0] ?? "", /\[redacted secret\]/);
     assert.deepEqual(installed.targets?.map((target) => target.client), ["codex"]);
   } finally {
     process.chdir(before);

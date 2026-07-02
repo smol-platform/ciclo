@@ -86,6 +86,44 @@ test("installs additional MCP servers alongside Ciclo for Claude and Codex", () 
   }
 });
 
+test("redacts additional MCP server secret env values from install results", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "ciclo-mcp-additional-secret-"));
+  try {
+    const result = installCicloMcp({
+      projectRoot,
+      clients: ["claude"],
+      additionalServers: {
+        service: {
+          command: "service-mcp-server",
+          args: ["stdio"],
+          env: { SERVICE_MODE: "fixture-resolved-value" }
+        }
+      },
+      additionalServerSecretEnv: [
+        {
+          serverName: "service",
+          envName: "SERVICE_MODE",
+          providerId: "fixture",
+          providerKind: "test",
+          secretRefHash: "abc123",
+          evidence: ["secret.fixture"]
+        }
+      ]
+    });
+
+    assert.equal(result.additionalServers.service?.["env"].SERVICE_MODE, "[redacted secret]");
+    assert.equal(result.additionalServerSecretEnv[0]?.serverName, "service");
+    assert.doesNotMatch(JSON.stringify(result), /fixture-resolved-value/u);
+
+    const config = JSON.parse(readFileSync(join(projectRoot, ".mcp.json"), "utf8")) as {
+      mcpServers?: Record<string, { readonly ["env"]?: Record<string, string> }>;
+    };
+    assert.equal(config.mcpServers?.service?.["env"]?.SERVICE_MODE, "fixture-resolved-value");
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
 test("installs Claude MCP config with optional channel mode", () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "ciclo-mcp-claude-channel-"));
   try {

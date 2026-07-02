@@ -7,6 +7,7 @@ import {
   type CicloMcpInstallClient,
   type CicloMcpInstallResult
 } from "./mcp-install.js";
+import type { CicloMcpAdditionalServerSecretEnvInstall } from "./mcp-secret-placeholders.js";
 import { repoSessionName } from "./repo-session-name.js";
 
 export type BuiltinRemoteRunnerKind = "kubernetes" | "aws-lambda" | "cloudflare";
@@ -45,6 +46,7 @@ export interface RemoteRunnerLaunchRequest {
   readonly mcpCommand?: string;
   readonly mcpVars?: Record<string, string>;
   readonly mcpAdditionalServers?: Record<string, CicloMcpAdditionalServerConfig>;
+  readonly mcpAdditionalServerSecretEnv?: readonly CicloMcpAdditionalServerSecretEnvInstall[];
   readonly mcpClaudeChannel?: boolean;
   readonly kubernetes?: {
     readonly namespace?: string;
@@ -98,6 +100,7 @@ export interface RemoteRunnerMcpConfigPlan {
   readonly varKeys: readonly string[];
   readonly additionalServers: Record<string, CicloMcpAdditionalServerConfig>;
   readonly additionalServerNames: readonly string[];
+  readonly additionalServerSecretEnv: readonly CicloMcpAdditionalServerSecretEnvInstall[];
   readonly claudeChannel?: boolean;
   readonly install: CicloMcpInstallResult;
   readonly commands: readonly string[];
@@ -334,6 +337,7 @@ function remoteMcpConfigPlan(input: RemoteRunnerLaunchRequest, repoPath: string)
     command,
     env: input.mcpVars,
     additionalServers: input.mcpAdditionalServers,
+    additionalServerSecretEnv: input.mcpAdditionalServerSecretEnv,
     ...(claudeChannel ? { claudeChannel } : {}),
     dryRun: true
   });
@@ -356,6 +360,7 @@ function remoteMcpConfigPlan(input: RemoteRunnerLaunchRequest, repoPath: string)
     varKeys: Object.keys(input.mcpVars ?? {}),
     additionalServers: input.mcpAdditionalServers ?? {},
     additionalServerNames: Object.keys(input.mcpAdditionalServers ?? {}),
+    additionalServerSecretEnv: input.mcpAdditionalServerSecretEnv ?? [],
     ...(claudeChannel ? { claudeChannel } : {}),
     install: rendered.install,
     commands: [installCommand],

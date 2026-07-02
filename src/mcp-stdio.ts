@@ -27,6 +27,10 @@ import type { AccessScope } from "./access-grants.js";
 import { cicloMcpPrompts, cicloMcpResources, cicloMcpTools, type McpPromptContract } from "./mcp-contract.js";
 import type { CicloMcpAdditionalServerConfig, CicloMcpInstallClient, CicloMcpSecretEnvBinding } from "./mcp-install.js";
 import {
+  resolveMcpAdditionalServerSecretPlaceholders,
+  type CicloMcpAdditionalServerSecretEnvInstall
+} from "./mcp-secret-placeholders.js";
+import {
   OperatorRoutingStore,
   type FeedbackSeverity,
   type QuestionUrgency
@@ -52,7 +56,8 @@ import { activateConfiguredPlugins, defaultPluginPaths } from "./plugin-manager.
 import { GitHubCliRepoBoardProvider, type RepoBoardProvider, type RepoBoardStatus } from "./repo-board.js";
 import {
   createDefaultSecretProviderRegistry,
-  SecretProviderRegistry
+  SecretProviderRegistry,
+  type SecretProviderResult
 } from "./secret-provider.js";
 import {
   launchTaskReviewSession,
@@ -648,6 +653,74 @@ async function resolveMcpSecretEnvBindings(input: {
   return resolved;
 }
 
+async function resolveAdditionalMcpServerSecretEnv(input: {
+  readonly additionalServers?: Record<string, CicloMcpAdditionalServerConfig>;
+  readonly runtime: CicloMcpRuntimeContext;
+  readonly loopId?: string;
+  readonly beadId?: string;
+  readonly workerSessionId?: string;
+  readonly dryRun: boolean;
+}): Promise<{
+  readonly additionalServers?: Record<string, CicloMcpAdditionalServerConfig>;
+  readonly secretEnv: readonly CicloMcpAdditionalServerSecretEnvInstall[];
+}> {
+  const registry = input.runtime.secretProviderRegistry ?? createDefaultSecretProviderRegistry();
+  return await resolveMcpAdditionalServerSecretPlaceholders({
+    additionalServers: input.additionalServers,
+    dryRun: input.dryRun,
+    loopId: input.loopId,
+    beadId: input.beadId,
+    workerSessionId: input.workerSessionId,
+    resolveSecret: async (request): Promise<SecretProviderResult> => {
+      const accessRequest = {
+        action: "request_secret" as const,
+        scope: { loopId: input.loopId, beadId: input.beadId },
+        allowUnauthenticated: false
+      };
+      const authorization = authorizeClientRequest(input.runtime.auth, accessRequest);
+      input.runtime.accessAuditLog?.push(buildAuthorizationAuditRecord(input.runtime.auth, accessRequest, authorization));
+      if (authorization.decision === "deny") {
+        throw new Error(`access denied for MCP additional server secret ${request.providerId}: ${authorization.reason}`);
+      }
+      const result = await registry.resolve({
+        providerId: request.providerId,
+        secretRef: request.secretRef,
+        field: request.field,
+        loopId: input.loopId,
+        beadId: input.beadId,
+        workerSessionId: input.workerSessionId,
+        principalId: authorization.principalId,
+        reason: request.reason,
+        dryRun: input.dryRun
+      });
+      auditMutation({
+        runtime: input.runtime,
+        tool: "mcp.additional_server.secret",
+        action: "request_secret",
+        authorization,
+        reason: result.reason,
+        evidence: result.evidence
+      });
+      appendRuntimeEvent(input.runtime, {
+        type: "secret.requested",
+        loopId: input.loopId,
+        beadId: input.beadId,
+        workerSessionId: input.workerSessionId,
+        evidence: result.evidence,
+        data: {
+          provider_id: result.providerId,
+          provider_kind: result.providerKind,
+          secret_ref_hash: result.secretRefHash,
+          field: result.field,
+          target: "mcp_additional_server_env",
+          resolved: result.resolved
+        }
+      });
+      return result;
+    }
+  });
+}
+
 function promptArguments(prompt: McpPromptContract): readonly { readonly name: string; readonly required: boolean }[] {
   const properties = prompt.argumentsSchema.properties ?? {};
   const required = new Set(prompt.argumentsSchema.required ?? []);
@@ -848,8 +921,20 @@ function publicMcpConfig(
   config: ReturnType<WorkerSessionSupervisor["list"]>[number]["mcpConfig"]
 ): Record<string, unknown> | undefined {
   if (config === undefined) return undefined;
-  const { env: _env, secretEnvBindings: _secretEnvBindings, ...safeConfig } = config;
-  return safeConfig;
+  const { env: _env, secretEnvBindings: _secretEnvBindings, additionalServerSecretEnv: _additionalServerSecretEnv, ...safeConfig } = config;
+  const additionalServers: Record<string, CicloMcpAdditionalServerConfig> = {};
+  for (const [name, server] of Object.entries(config.additionalServers)) {
+    additionalServers[name] = {
+      command: server.command,
+      args: [...server.args],
+      env: { ...server.env }
+    };
+  }
+  for (const binding of config.additionalServerSecretEnv) {
+    const server = additionalServers[binding.serverName];
+    if (server !== undefined) server.env[binding.envName] = "[redacted secret]";
+  }
+  return { ...safeConfig, additionalServers };
 }
 
 function publicWorkerSession(
@@ -1518,8 +1603,17 @@ async function callTool(
       },
       dryRun: booleanParam(params, "dry_run", true)
     }, runtime.projectConfig ?? {});
+    const remoteAdditionalServerSecrets = await resolveAdditionalMcpServerSecretEnv({
+      additionalServers: launchRequest.mcpAdditionalServers,
+      runtime,
+      loopId: launchRequest.loopId,
+      beadId: launchRequest.beadId,
+      dryRun: launchRequest.dryRun ?? true
+    });
     const result = registry.launch({
       ...launchRequest,
+      mcpAdditionalServers: remoteAdditionalServerSecrets.additionalServers,
+      mcpAdditionalServerSecretEnv: remoteAdditionalServerSecrets.secretEnv,
       runnerKind: remoteRunnerKindParam(launchRequest.runnerKind)
     });
     auditMutation({
@@ -1642,7 +1736,7 @@ async function callTool(
       beadId,
       dryRun
     });
-    const result = supervisor.launch(mergeWorkerLaunchWithConfig({
+    const mergedLaunch = mergeWorkerLaunchWithConfig({
       harnessId: workerHarnessParam(stringParam(params, "harness_id")),
       loopId,
       beadId,
@@ -1666,7 +1760,19 @@ async function callTool(
       mcpAdditionalServers: mcpAdditionalServersParam(params),
       mcpSecretEnv,
       mcpClaudeChannel: optionalBooleanParam(params, "mcp_claude_channel")
-    }, runtime.projectConfig ?? {}));
+    }, runtime.projectConfig ?? {});
+    const additionalServerSecrets = await resolveAdditionalMcpServerSecretEnv({
+      additionalServers: mergedLaunch.mcpAdditionalServers,
+      runtime,
+      loopId,
+      beadId,
+      dryRun
+    });
+    const result = supervisor.launch({
+      ...mergedLaunch,
+      mcpAdditionalServers: additionalServerSecrets.additionalServers,
+      mcpAdditionalServerSecretEnv: additionalServerSecrets.secretEnv
+    });
     auditMutation({
       runtime,
       tool: name,

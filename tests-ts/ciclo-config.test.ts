@@ -6,15 +6,17 @@ import test from "node:test";
 
 import {
   createSecretProviderRegistryFromConfig,
+  configMcpSecretEnvBindings,
   loadCicloProjectConfig,
   mergeMcpInstallOptionsWithConfig,
   mergeRemoteRunnerLaunchWithConfig,
   mergeWorkerLaunchWithConfig,
   parseCicloProjectConfigText,
   redactedCicloProjectConfig,
+  resolveConfigMcpSecretEnvBindings,
   writeSampleCicloConfig
 } from "../src/ciclo-config.js";
-import { secretRefHash } from "../src/secret-provider.js";
+import { SecretProviderRegistry, secretRefHash } from "../src/secret-provider.js";
 
 test("loads project config for secrets MCP and remote defaults", () => {
   const config = parseCicloProjectConfigText(JSON.stringify({
@@ -140,6 +142,10 @@ test("config merges into MCP install worker and remote requests", () => {
       serverName: "ciclo_configured",
       command: "ciclo-dev",
       vars: { CICLO_REUSE_HERDR_SESSION: "true", EXTRA_MODE: "config" },
+      secretBindings: [
+        { name: "GITHUB_TOKEN", providerId: "onepassword", ref: "op://Engineering/GitHub Token/token" },
+        { name: "GITHUB_AUTHORIZATION", providerId: "onepassword", ref: "op://Engineering/GitHub Token/token", format: "Bearer ${secret}" }
+      ],
       additionalServers: {
         filesystem: {
           command: "npx",
@@ -164,6 +170,9 @@ test("config merges into MCP install worker and remote requests", () => {
   assert.equal(install.serverName, "ciclo_configured");
   assert.equal(install.command, "ciclo-dev");
   assert.equal(install.env?.EXTRA_MODE, "config");
+  assert.deepEqual(install.secretEnv?.map((binding) => binding.name), ["GITHUB_TOKEN", "GITHUB_AUTHORIZATION"]);
+  assert.equal(install.secretEnv?.[1]?.format, "Bearer ${secret}");
+  assert.equal(install.secretEnv?.[1]?.secretRefHash, secretRefHash("op://Engineering/GitHub Token/token"));
   assert.equal(install.additionalServers?.filesystem?.command, "npx");
 
   const worker = mergeWorkerLaunchWithConfig({
@@ -175,6 +184,7 @@ test("config merges into MCP install worker and remote requests", () => {
   assert.equal(worker.mcpServerName, "ciclo_configured");
   assert.equal(worker.mcpEnv?.CICLO_REUSE_HERDR_SESSION, "true");
   assert.equal(worker.mcpAdditionalServers?.filesystem?.["env"].MCP_FS_MODE, "config");
+  assert.deepEqual(worker.mcpSecretEnv?.map((binding) => binding.name), ["GITHUB_TOKEN", "GITHUB_AUTHORIZATION"]);
 
   const remote = mergeRemoteRunnerLaunchWithConfig({
     runnerKind: "",
@@ -190,6 +200,49 @@ test("config merges into MCP install worker and remote requests", () => {
   assert.equal(remote.environment?.CICLO_REMOTE_MODE, "config");
   assert.equal(remote.mcpAdditionalServers?.filesystem?.command, "npx");
   assert.equal(remote.cloudflare?.workerName, "ciclo-worker");
+});
+
+test("config MCP secret env bindings resolve through a registry without leaking refs", async () => {
+  const config = parseCicloProjectConfigText(JSON.stringify({
+    mcp: {
+      secretBindings: [
+        {
+          name: "GITHUB_AUTHORIZATION",
+          providerId: "fixture",
+          ref: "op://Engineering/GitHub Token/token",
+          format: "Bearer ${secret}",
+          reason: "provide GitHub auth"
+        }
+      ]
+    }
+  }));
+  const unresolved = configMcpSecretEnvBindings(config);
+  assert.equal(unresolved[0]?.name, "GITHUB_AUTHORIZATION");
+  assert.equal(unresolved[0]?.value, undefined);
+  assert.equal(unresolved[0]?.secretRefHash, secretRefHash("op://Engineering/GitHub Token/token"));
+
+  const registry = new SecretProviderRegistry([
+    {
+      id: "fixture",
+      kind: "test",
+      name: "Fixture Secret Provider",
+      resolve(input) {
+        return {
+          resolved: true,
+          providerId: "fixture",
+          providerKind: "test",
+          secretRefHash: secretRefHash(input.secretRef),
+          value: "ghp_fixture",
+          reason: "fixture resolved",
+          evidence: ["secret.provider:fixture", "secret.resolved:true"]
+        };
+      }
+    }
+  ]);
+  const resolved = await resolveConfigMcpSecretEnvBindings({ config, registry, dryRun: false });
+  assert.equal(resolved[0]?.value, "ghp_fixture");
+  assert.equal(resolved[0]?.format, "Bearer ${secret}");
+  assert.doesNotMatch(JSON.stringify(resolved), /op:\/\/Engineering\/GitHub Token\/token/u);
 });
 
 test("loads .ciclo config from a project root", () => {

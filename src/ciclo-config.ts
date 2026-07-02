@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-import type { CicloMcpAdditionalServerConfig, CicloMcpInstallClient, CicloMcpInstallOptions } from "./mcp-install.js";
+import type { CicloMcpAdditionalServerConfig, CicloMcpInstallClient, CicloMcpInstallOptions, CicloMcpSecretEnvBinding } from "./mcp-install.js";
 import type { RemoteRunnerLaunchRequest, WireGuardTunnelRequest } from "./remote-runner.js";
 import {
   createDefaultSecretProviderRegistry,
@@ -468,6 +468,59 @@ export function configMcpSecretBindingParams(config: CicloProjectConfig): readon
   }));
 }
 
+export function configMcpSecretEnvBindings(config: CicloProjectConfig): readonly CicloMcpSecretEnvBinding[] {
+  return (config.mcp?.secretBindings ?? []).map((binding) => ({
+    name: binding.name,
+    providerId: binding.providerId,
+    providerKind: "configured",
+    secretRefHash: secretRefHash(binding.ref),
+    ...(binding.field === undefined ? {} : { field: binding.field }),
+    ...(binding.format === undefined ? {} : { format: binding.format }),
+    evidence: [
+      `secret.provider:${binding.providerId}`,
+      `secret.ref_hash:${secretRefHash(binding.ref)}`,
+      `mcp.secret_env:${binding.name}`,
+      "mcp.secret_env:configured"
+    ]
+  }));
+}
+
+export async function resolveConfigMcpSecretEnvBindings(input: {
+  readonly config: CicloProjectConfig;
+  readonly registry: SecretProviderRegistry;
+  readonly dryRun: boolean;
+}): Promise<readonly CicloMcpSecretEnvBinding[]> {
+  const resolved: CicloMcpSecretEnvBinding[] = [];
+  for (const binding of input.config.mcp?.secretBindings ?? []) {
+    const result = await input.registry.resolve({
+      providerId: binding.providerId,
+      secretRef: binding.ref,
+      field: binding.field,
+      reason: binding.reason ?? `provide ${binding.name} to configured MCP server`,
+      dryRun: input.dryRun
+    });
+    if (!input.dryRun && (!result.resolved || result.value === undefined)) {
+      throw new Error(`MCP secret env ${binding.name} was not resolved: ${result.reason}`);
+    }
+    resolved.push({
+      name: binding.name,
+      value: input.dryRun ? undefined : result.value,
+      providerId: result.providerId,
+      providerKind: result.providerKind,
+      secretRefHash: result.secretRefHash,
+      field: result.field,
+      ...(binding.format === undefined ? {} : { format: binding.format }),
+      evidence: [
+        ...result.evidence,
+        `mcp.secret_env:${binding.name}`,
+        ...(binding.format === undefined ? [] : ["mcp.secret_env.format:applied"]),
+        input.dryRun ? "mcp.secret_env:dry_run" : "mcp.secret_env:resolved"
+      ]
+    });
+  }
+  return resolved;
+}
+
 export function mergeVars(configValues: Record<string, string> | undefined, overrideValues: Record<string, string> | undefined): Record<string, string> | undefined {
   const merged = { ...(configValues ?? {}), ...(overrideValues ?? {}) };
   return Object.keys(merged).length === 0 ? undefined : merged;
@@ -489,6 +542,7 @@ export function mergeMcpInstallOptionsWithConfig(options: CicloMcpInstallOptions
     serverName: options.serverName ?? mcp?.serverName,
     command: options.command ?? mcp?.command,
     env: mergeVars(mcp?.vars, options.env),
+    secretEnv: options.secretEnv ?? configMcpSecretEnvBindings(config),
     additionalServers: mergeAdditionalServers(mcp?.additionalServers, options.additionalServers),
     claudeChannel: options.claudeChannel ?? mcp?.claudeChannel
   };
@@ -504,6 +558,7 @@ export function mergeWorkerLaunchWithConfig(input: WorkerSessionLaunchRequest, c
     mcpCommand: input.mcpCommand ?? mcp?.command,
     mcpEnv: mergeVars(mcp?.vars, input.mcpEnv),
     mcpAdditionalServers: mergeAdditionalServers(mcp?.additionalServers, input.mcpAdditionalServers),
+    mcpSecretEnv: input.mcpSecretEnv ?? configMcpSecretEnvBindings(config),
     mcpClaudeChannel: input.mcpClaudeChannel ?? mcp?.claudeChannel
   };
 }

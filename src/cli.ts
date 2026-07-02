@@ -11,11 +11,13 @@ import {
   loadCicloProjectConfig,
   mergeMcpInstallOptionsWithConfig,
   redactedCicloProjectConfig,
+  resolveConfigMcpSecretEnvBindings,
   writeSampleCicloConfig
 } from "./ciclo-config.js";
 import { runtimeDecision } from "./ciclo-core.js";
 import { runMcpHttpServer, type McpHttpConfig } from "./mcp-http.js";
 import { installCicloMcp, type CicloMcpInstallClient } from "./mcp-install.js";
+import { resolveMcpAdditionalServerSecretPlaceholders } from "./mcp-secret-placeholders.js";
 import {
   createLocalMcpReadService,
   createLocalMcpRuntimeContextWithPlugins,
@@ -616,7 +618,33 @@ async function runMcp(args: readonly string[], io: CliIo): Promise<number> {
     const options = parseMcpInstallOptions(args.slice(1));
     const root = options.projectRoot ?? process.cwd();
     const loaded = loadCicloProjectConfig(root);
-    printJson(installCicloMcp(mergeMcpInstallOptionsWithConfig(options, loaded.config)), parseJsonMode(args), io);
+    const runtime = await createLocalMcpRuntimeContextWithPlugins(root);
+    if (runtime.secretProviderRegistry === undefined) throw new Error("MCP install secret provider registry is unavailable");
+    const secretProviderRegistry = runtime.secretProviderRegistry;
+    const merged = mergeMcpInstallOptionsWithConfig({
+      ...options,
+      secretEnv: await resolveConfigMcpSecretEnvBindings({
+        config: loaded.config,
+        registry: secretProviderRegistry,
+        dryRun: options.dryRun
+      })
+    }, loaded.config);
+    const additionalServerSecrets = await resolveMcpAdditionalServerSecretPlaceholders({
+      additionalServers: merged.additionalServers,
+      dryRun: options.dryRun,
+      resolveSecret: async (request) => await secretProviderRegistry.resolve({
+        providerId: request.providerId,
+        secretRef: request.secretRef,
+        field: request.field,
+        reason: request.reason,
+        dryRun: options.dryRun
+      })
+    });
+    printJson(installCicloMcp({
+      ...merged,
+      additionalServers: additionalServerSecrets.additionalServers,
+      additionalServerSecretEnv: additionalServerSecrets.secretEnv
+    }), parseJsonMode(args), io);
     return 0;
   }
   throw new Error(`unknown MCP transport: ${transport}`);

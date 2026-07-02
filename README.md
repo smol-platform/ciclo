@@ -163,7 +163,12 @@ Use `mcp.secretBindings` when the generated Ciclo MCP server config needs secret
 }
 ```
 
-For non-dry-run installs and worker launches, Ciclo resolves those bindings through the secret provider and writes the value into the generated `ciclo` server environment in `.mcp.json` or `.codex/config.toml`; install and launch responses stay redacted. Add `format` when the target variable needs a prefix, suffix, or wrapper string. The format must contain exactly one `${secret}` placeholder, for example `Bearer ${secret}`. Additional MCP server environment maps are still non-secret. If a third-party MCP server needs sensitive values, use provider-native secret references, a wrapper command, or a Ciclo-mediated secret request rather than putting raw values in config.
+For non-dry-run installs and worker launches, Ciclo resolves those bindings through the secret provider and writes the value into the generated `ciclo` server environment in `.mcp.json` or `.codex/config.toml`; install and launch responses stay redacted. Add `format` when the target variable needs a prefix, suffix, or wrapper string. The format must contain exactly one `${secret}` placeholder, for example `Bearer ${secret}`.
+
+MCP server secret support has two paths:
+
+- Ciclo MCP server environment: use project `mcp.secretBindings` or launch-time `mcp_secret_env`. Ciclo resolves the provider reference, optionally applies `format`, writes the final value only into the generated MCP client config, and redacts responses, events, audit records, board rows, and worker listings.
+- Additional MCP servers: project `mcp.additionalServers` and launch-time `mcp_additional_servers` accept environment maps where raw values must be non-secret. When a third-party server needs a Ciclo-managed secret, put a placeholder in the value, such as `Bearer ${secret://team-1password/Ciclo/API/token}`. The placeholder host is the configured provider id, the path is the provider secret reference, and `?field=token` or `#token` can select a field for providers such as OpenBao. Ciclo resolves placeholders when it installs the MCP config for a new session and redacts install, launch, event, audit, board, and worker-listing output.
 
 Workers can request scoped secrets through Ciclo instead of asking the operator to paste values:
 

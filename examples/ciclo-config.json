@@ -35,6 +35,13 @@
         "env": {
           "MCP_FS_MODE": "workspace"
         }
+      },
+      "github": {
+        "command": "github-mcp-server",
+        "args": ["stdio"],
+        "env": {
+          "GITHUB_PERSONAL_ACCESS_TOKEN": "Bearer ${secret://team-1password/Ciclo/API/token}"
+        }
       }
     },
     "secretBindings": [

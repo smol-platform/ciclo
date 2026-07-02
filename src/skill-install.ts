@@ -149,13 +149,20 @@ Use \`ciclo_launch_worker_session\` to decide which MCP tools a spawned Claude o
 - Set \`mcp_claude_channel: true\` when a spawned Claude worker should expose Ciclo through Claude channel integration.
 - Put only non-secret MCP server environment in \`mcp_env\`; use it for flags such as \`CICLO_REUSE_HERDR_SESSION\` or provider mode switches.
 - Put secret-backed environment in \`mcp_secret_env\`; Ciclo resolves the values through configured secret providers at launch time and redacts them everywhere else.
-- Put additional third-party MCP servers in \`mcp_additional_servers\` when the launched worker should receive more than Ciclo MCP. The object is keyed by server name; each value accepts \`command\`, \`args\`, and a non-secret environment map. Ciclo writes those servers into the generated \`.mcp.json\` and/or \`.codex/config.toml\` in the worker cwd or worktree.
+- Put additional third-party MCP servers in \`mcp_additional_servers\` when the launched worker should receive more than Ciclo MCP. The object is keyed by server name; each value accepts \`command\`, \`args\`, and an environment map. Raw env values must be non-secret; values may include \`\${secret://provider-id/ref}\` placeholders that Ciclo resolves through configured secret providers when it installs the MCP config for the new session. Ciclo writes those servers into the generated \`.mcp.json\` and/or \`.codex/config.toml\` in the worker cwd or worktree.
 
 The generated config gives the worker Ciclo MCP tools, resources, prompts, enabled plugin capabilities, and configured additional MCP servers. Prefer \`.ciclo/config.json\` or launch payloads over manual generated-config edits so worktree and remote sessions stay reproducible.
 
-Config file mapping: \`.ciclo/config.json\` uses \`mcp.clients\`, \`mcp.serverName\`, \`mcp.command\`, \`mcp.vars\`, \`mcp.additionalServers\`, \`mcp.secretBindings\`, and \`mcp.claudeChannel\`; it uses \`secrets.providers\` for built-in and plugin-backed provider ids; it uses \`remote\` for remote runner defaults. Inline MCP tool arguments override config defaults for one launch. \`vars\` and additional server environment maps are non-secret strings; \`secretBindings\` are provider references that Ciclo resolves only for authorized non-dry-run launches and redacts everywhere else.
+Config file mapping: \`.ciclo/config.json\` uses \`mcp.clients\`, \`mcp.serverName\`, \`mcp.command\`, \`mcp.vars\`, \`mcp.additionalServers\`, \`mcp.secretBindings\`, and \`mcp.claudeChannel\`; it uses \`secrets.providers\` for built-in and plugin-backed provider ids; it uses \`remote\` for remote runner defaults. Inline MCP tool arguments override config defaults for one launch. \`vars\` and raw additional server environment values are non-secret strings; additional server env values may include \`\${secret://provider-id/ref}\` placeholders; \`secretBindings\` are provider references that Ciclo resolves only for authorized non-dry-run launches and redacts everywhere else.
 
-Use \`mcp.secretBindings\` when the generated Ciclo MCP server config needs a secret-backed environment variable. The binding \`name\` becomes an env var on the generated \`ciclo\` MCP server entry, and \`providerId\`/\`ref\` identify the configured provider reference to resolve. Add \`format\` when the env var needs a wrapper string such as \`Bearer \${secret}\`; formats must contain exactly one \`\${secret}\` placeholder. Provider ids can point at built-in providers or plugin-backed aliases from \`secrets.providers[].pluginProviderId\`. Additional MCP server environment maps stay non-secret; use a provider-native reference, wrapper command, or Ciclo secret request flow when a third-party MCP server needs sensitive material.
+Use \`mcp.secretBindings\` when the generated Ciclo MCP server config needs a secret-backed environment variable. The binding \`name\` becomes an env var on the generated \`ciclo\` MCP server entry, and \`providerId\`/\`ref\` identify the configured provider reference to resolve. Add \`format\` when the env var needs a wrapper string such as \`Bearer \${secret}\`; formats must contain exactly one \`\${secret}\` placeholder. Provider ids can point at built-in providers or plugin-backed aliases from \`secrets.providers[].pluginProviderId\`. For additional MCP servers, keep raw env values non-secret or use \`\${secret://provider-id/ref}\` placeholders.
+
+MCP server secret support has a strict boundary:
+
+- Use \`mcp.secretBindings\` or launch-time \`mcp_secret_env\` only for secrets that should be injected into the generated \`ciclo\` MCP server environment.
+- Keep raw additional MCP server environment values non-secret. Ciclo resolves \`\${secret://provider-id/ref}\` placeholders at MCP config install time for new sessions.
+- For third-party MCP server credentials, prefer Ciclo placeholders, provider-native references, a wrapper command that fetches the secret at runtime, or task-scoped \`ciclo_request_secret\` calls from the worker.
+- Never put raw secret values in \`mcp.vars\`, additional server environment maps, prompts, Beads notes, feedback, tracker sync, board output, or progress updates.
 
 When operating as a worker, request secrets by reference:
 
@@ -346,7 +353,20 @@ Project-level additional MCP servers are configured under \`mcp.additionalServer
 }
 \`\`\`
 
-These entries are not Ciclo plugins and do not add tools to the Ciclo control plane. They are copied into the launched worker's Claude/Codex MCP config so that worker session can call those third-party MCP servers directly. Keep the environment map non-secret; use command wrappers, provider-native secret references, or Ciclo secret request flow when a server needs sensitive values.
+These entries are not Ciclo plugins and do not add tools to the Ciclo control plane. They are copied into the launched worker's Claude/Codex MCP config so that worker session can call those third-party MCP servers directly. Keep raw environment values non-secret. When a third-party server needs a Ciclo-managed secret, use a placeholder such as \`Bearer \${secret://team-1password/Ciclo/API/token}\` in the env value; Ciclo resolves it through the configured provider when it installs the MCP config for the new session and redacts responses, events, audit records, board rows, and worker listings. The placeholder host is the provider id, the path is the provider secret reference, and \`?field=token\` or \`#token\` selects a field.
+
+### MCP Server Secret Support
+
+Ciclo supports secret-backed environment variables for the generated \`ciclo\` MCP server entry, and supports \`\${secret://provider-id/ref}\` replacements inside additional MCP server environment values.
+
+Use this path when the Ciclo MCP server itself needs credentials or when a worker should receive a secret through Ciclo's controlled MCP surface:
+
+- Project defaults: \`mcp.secretBindings[]\` in \`.ciclo/config.json\`.
+- One-off launch overrides: \`mcp_secret_env[]\` in \`ciclo_launch_worker_session\`.
+- Required fields: \`name\` or \`env_name\`, \`providerId\` or \`provider_id\`, and \`ref\` or \`secret_ref\`.
+- Optional fields: \`field\`, \`format\`, and \`reason\`.
+- \`format\` must contain exactly one \`\${secret}\` placeholder and is applied only after the provider returns the value.
+- Dry runs do not resolve the provider value. Non-dry-run installs and launches require \`secret.read\` authorization.
 
 Use \`mcp.secretBindings\` when the generated Ciclo MCP server entry itself needs secret-backed environment variables. The binding name becomes an env var on the generated \`ciclo\` server entry in \`.mcp.json\` or \`.codex/config.toml\`; the secret value is resolved only for authorized non-dry-run installs or launches and is redacted from responses, audit records, and events. Add \`format\` when the target variable needs a wrapper string, such as \`Bearer \${secret}\`; the format must contain exactly one \`\${secret}\` placeholder.
 
@@ -394,7 +414,7 @@ The generated Claude config shape is equivalent to:
 }
 \`\`\`
 
-Do not put the secret value into \`mcp.vars\`, additional MCP server environment maps, prompt text, Beads notes, or tracker sync. Treat \`format\` as a template, not a place for another secret. If a third-party MCP server needs a token directly, prefer that server's native secret-reference support or a wrapper command that obtains the token without writing it into project config.
+Do not put the secret value into \`mcp.vars\`, additional MCP server environment maps, prompt text, Beads notes, or tracker sync. Treat \`format\` as a template, not a place for another secret. If a third-party MCP server needs a token directly, prefer that server's native secret-reference support or a wrapper command that obtains the token without writing it into project config. Another valid pattern is for the spawned worker to call \`ciclo_request_secret\` for task-scoped use and avoid injecting that credential into the third-party server.
 
 \`\`\`json
 {
@@ -441,12 +461,12 @@ Field behavior:
 - \`mcp_command\` changes the command the spawned client runs for Ciclo MCP; use it for wrappers or non-standard installs.
 - \`mcp_claude_channel\` enables Claude channel integration for spawned Claude sessions.
 - \`mcp_env\` writes non-secret environment variables into the generated Ciclo MCP server config.
-- \`mcp_additional_servers\` writes extra third-party MCP server entries into the launched worker config. The object is keyed by server name; values accept \`command\`, \`args\`, and non-secret \`env\`. Per-launch entries override project config entries with the same name.
+- \`mcp_additional_servers\` writes extra third-party MCP server entries into the launched worker config. The object is keyed by server name; values accept \`command\`, \`args\`, and \`env\`. Raw env values must be non-secret; values may include \`\${secret://provider-id/ref}\` placeholders that Ciclo resolves at session MCP config install time. Per-launch entries override project config entries with the same name.
 - \`mcp_secret_env\` writes secret-backed environment variables into the generated config only on non-dry-run launches. Ciclo resolves each binding through \`provider_id\`, \`secret_ref\`, and optional \`field\`; optional \`format\` wraps the resolved value and must contain exactly one \`\${secret}\` placeholder; the response and audit trail stay redacted.
 
 The installer-generated MCP config exposes Ciclo's MCP tools, resources, prompts, and enabled plugin capabilities to the spawned worker. If the worker needs unrelated third-party MCP servers, install those servers into the target project through their own installer before launching, or expose the capability through a Ciclo plugin that the worker can reach via Ciclo MCP. Avoid manual edits to generated worker config; they are hard to reproduce across worktrees and remote runners.
 
-Use \`mcp_env\` only for non-secret environment variables. Use \`mcp_secret_env\` when a configured MCP server needs a secret; Ciclo resolves each binding through \`provider_id\` and \`secret_ref\`, applies optional \`format\`, writes the resulting value into the generated MCP client config only for non-dry-run launches, and redacts the value from responses, worker-session listings, audit records, and events. The caller needs \`secret.read\`.
+Use \`mcp_env\` only for non-secret environment variables. Use \`mcp_secret_env\` when the generated Ciclo MCP server needs a secret; Ciclo resolves each binding through \`provider_id\` and \`secret_ref\`, applies optional \`format\`, writes the resulting value into the generated MCP client config only for non-dry-run launches, and redacts the value from responses, worker-session listings, audit records, and events. The caller needs \`secret.read\`. Do not use \`mcp_secret_env\` to target additional MCP servers; put \`\${secret://provider-id/ref}\` placeholders in those server env values when Ciclo should resolve the secret at session startup.
 
 Heartbeat while working:
 
@@ -625,8 +645,9 @@ Only trust plugins after the operator accepts the package source and behavior. E
 - Dry-run worker launches first; include \`configure_mcp: true\` unless the worker already has project MCP config, include \`extra_args\` for harness-specific flags, and prefer \`isolation: "worktree"\` when the worker should run in an isolated git worktree.
 - Use \`.ciclo/config.json\` for shared secret-provider, MCP, and remote-runner defaults. Inspect it with \`ciclo config show --compact\`; create a starter file with \`ciclo config init\`. Explicit MCP tool arguments override config defaults.
 - Configure spawned worker MCP tools through \`ciclo_launch_worker_session\`: use \`mcp_clients\` for Claude/Codex config targets, \`mcp_server_name\` for a non-default Ciclo server id, \`mcp_command\` for a non-default Ciclo binary or wrapper, \`mcp_env\` for non-secret MCP server env, \`mcp_secret_env\` for secret-backed MCP server env, and \`mcp_claude_channel\` for Claude channel integration.
-- Configure additional third-party MCP servers for launched worktrees or remote sessions with project \`mcp.additionalServers\` or per-launch \`mcp_additional_servers\`. Each server is keyed by name and accepts \`command\`, \`args\`, and a non-secret environment map; Ciclo writes those entries into generated \`.mcp.json\` and/or \`.codex/config.toml\` alongside the Ciclo MCP server.
-- Use \`mcp.secretBindings\` in \`.ciclo/config.json\` when the generated Ciclo MCP server config needs secret-backed environment variables. Provider ids can point at built-in providers or plugin-backed aliases from \`secrets.providers[].pluginProviderId\`; optional \`format\` can wrap a resolved value and must contain exactly one \`\${secret}\` placeholder; additional MCP server environment maps remain non-secret.
+- Configure additional third-party MCP servers for launched worktrees or remote sessions with project \`mcp.additionalServers\` or per-launch \`mcp_additional_servers\`. Each server is keyed by name and accepts \`command\`, \`args\`, and an environment map; raw values must be non-secret, but values may include \`\${secret://provider-id/ref}\` placeholders that Ciclo resolves through configured secret providers when it installs generated \`.mcp.json\` and/or \`.codex/config.toml\` for the new session.
+- Use \`mcp.secretBindings\` in \`.ciclo/config.json\` when the generated Ciclo MCP server config needs secret-backed environment variables. Provider ids can point at built-in providers or plugin-backed aliases from \`secrets.providers[].pluginProviderId\`; optional \`format\` can wrap a resolved value and must contain exactly one \`\${secret}\` placeholder. For additional MCP servers, keep raw env values non-secret or use \`\${secret://provider-id/ref}\` placeholders.
+- Treat \`mcp_secret_env\` and \`mcp.secretBindings\` as secret injection for the generated \`ciclo\` MCP server entry only. For third-party MCP server credentials, use \`\${secret://provider-id/ref}\` env placeholders, provider-native references, wrapper commands, or task-scoped \`ciclo_request_secret\`; do not place raw values in additional server environment maps.
 - The generated MCP config gives workers Ciclo tools, resources, prompts, enabled plugin capabilities, and any configured additional MCP servers. Prefer config or launch payloads over manual generated-config edits so worktree and remote sessions stay reproducible.
 - When Ciclo MCP is running inside Herdr, local Claude/Codex workers launch as visible Herdr agent panes by default. With \`isolation: "worktree"\`, Ciclo uses \`herdr worktree create/open\` and starts the pane with the returned Herdr workspace id. Ciclo MCP runs an internal heartbeat for sessions it owns; use \`ciclo_decide\` when a monitoring, context, question-answering, or operator-interface decision needs OpenAI judgment. Set \`CICLO_REUSE_HERDR_SESSION=false\` before starting MCP only when direct process launches are required.
 - Use Beads IDs in mutating calls.

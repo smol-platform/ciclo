@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
+import type { CicloMcpAdditionalServerSecretEnvInstall } from "./mcp-secret-placeholders.js";
+
 export type CicloMcpInstallClient = "claude" | "codex";
 
 export interface CicloMcpServerConfig {
@@ -40,6 +42,7 @@ export interface CicloMcpInstallOptions {
   readonly env?: Record<string, string>;
   readonly secretEnv?: readonly CicloMcpSecretEnvBinding[];
   readonly additionalServers?: Record<string, CicloMcpAdditionalServerConfig>;
+  readonly additionalServerSecretEnv?: readonly CicloMcpAdditionalServerSecretEnvInstall[];
   readonly claudeChannel?: boolean;
   readonly dryRun?: boolean;
 }
@@ -70,6 +73,7 @@ export interface CicloMcpInstallResult {
   readonly server: CicloMcpServerConfig;
   readonly additionalServers: Record<string, CicloMcpAdditionalServerConfig>;
   readonly secretEnv: readonly CicloMcpSecretEnvInstall[];
+  readonly additionalServerSecretEnv: readonly CicloMcpAdditionalServerSecretEnvInstall[];
   readonly claudeChannel?: CicloClaudeChannelInstall;
   readonly targets: readonly CicloMcpInstallTargetResult[];
   readonly nextSteps: readonly string[];
@@ -172,6 +176,25 @@ function redactSecretEnv(config: CicloMcpServerConfig, secretEnv: readonly Ciclo
   const redacted = { ...config.env };
   for (const binding of secretEnv) redacted[binding.name] = "[redacted secret]";
   return { ...config, env: redacted };
+}
+
+function redactAdditionalServerSecretEnv(
+  servers: Record<string, CicloMcpAdditionalServerConfig>,
+  secretEnv: readonly CicloMcpAdditionalServerSecretEnvInstall[]
+): Record<string, CicloMcpAdditionalServerConfig> {
+  const redacted: Record<string, CicloMcpAdditionalServerConfig> = {};
+  for (const [name, server] of Object.entries(servers)) {
+    redacted[name] = {
+      command: server.command,
+      args: [...server.args],
+      env: { ...server.env }
+    };
+  }
+  for (const binding of secretEnv) {
+    const server = redacted[binding.serverName];
+    if (server !== undefined) server.env[binding.envName] = "[redacted secret]";
+  }
+  return redacted;
 }
 
 function serverConfig(
@@ -307,7 +330,9 @@ export function installCicloMcp(options: CicloMcpInstallOptions = {}): CicloMcpI
   const dryRun = options.dryRun ?? false;
   const claudeChannelEnabled = options.claudeChannel === true;
   const secretEnv = options.secretEnv ?? [];
+  const additionalServerSecretEnv = options.additionalServerSecretEnv ?? [];
   const additionalServers = normalizeAdditionalServers(options.additionalServers, serverName);
+  const redactedAdditionalServers = redactAdditionalServerSecretEnv(additionalServers, additionalServerSecretEnv);
   if (claudeChannelEnabled && !clients.includes("claude")) {
     throw new Error("--claude-channel requires --client claude or --client all");
   }
@@ -331,8 +356,9 @@ export function installCicloMcp(options: CicloMcpInstallOptions = {}): CicloMcpI
     projectRoot,
     serverName,
     server: redactedConfig,
-    additionalServers,
+    additionalServers: redactedAdditionalServers,
     secretEnv: secretEnvInstall(secretEnv),
+    additionalServerSecretEnv,
     ...(claudeChannel === undefined ? {} : { claudeChannel }),
     targets,
     nextSteps: [

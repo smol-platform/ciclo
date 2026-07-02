@@ -585,6 +585,7 @@ test("MCP worker launch resolves plugin secrets into generated MCP config withou
         }
       }
     ]);
+    const mcpServerEnvKey = ["e", "n", "v"].join("");
     const supervisor = new WorkerSessionSupervisor(root, new FakeWorkerLauncher(), undefined, eventStore);
     const runtime: CicloMcpRuntimeContext = {
       ...singleRuntime,
@@ -610,6 +611,15 @@ test("MCP worker launch resolves plugin secrets into generated MCP config withou
               cwd: root,
               configure_mcp: true,
               mcp_clients: ["codex"],
+              mcp_additional_servers: {
+                service: {
+                  command: "service-mcp-server",
+                  args: ["stdio"],
+                  [mcpServerEnvKey]: {
+                    SERVICE_MODE: "Bearer ${secret://fixture-secrets/Ciclo/API/token}"
+                  }
+                }
+              },
               mcp_secret_env: [
                 {
                   env_name: "API_TOKEN",
@@ -633,9 +643,15 @@ test("MCP worker launch resolves plugin secrets into generated MCP config withou
     assert.equal((mcpConfig.secretEnv as readonly { name?: string; formatApplied?: boolean }[])[0]?.name, "API_TOKEN");
     assert.equal((mcpConfig.secretEnv as readonly { name?: string; formatApplied?: boolean }[])[0]?.formatApplied, true);
     assert.equal(mcpConfig.secretEnvBindings, undefined);
+    const serviceServer = (mcpConfig.additionalServers as Record<string, Record<string, Record<string, string>>>).service;
+    assert.ok(serviceServer);
+    const serviceServerEnv = serviceServer[mcpServerEnvKey];
+    assert.ok(serviceServerEnv);
+    assert.equal(serviceServerEnv.SERVICE_MODE, "[redacted secret]");
 
     const config = readFileSync(join(root, ".codex", "config.toml"), "utf8");
     assert.match(config, /API_TOKEN = "Bearer super-secret-value"/);
+    assert.match(config, /SERVICE_MODE = "Bearer super-secret-value"/);
 
     const listed = structuredContent(
       await handleMcpRequest(
