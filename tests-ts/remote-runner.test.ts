@@ -68,9 +68,15 @@ test("Kubernetes remote runner plan includes WireGuard tunnel Herdr attach and j
   ]);
   assert.equal(plan.wireGuard.interfaceName, "wg-ciclo");
   assert.match(plan.wireGuard.runnerConfig, /Endpoint = 198\.51\.100\.10:51820/);
-  assert.match(plan.artifacts[0]?.content ?? "", /kind: Job/);
-  assert.match(plan.artifacts[0]?.content ?? "", /command: \["\/bin\/bash", "-lc"\]/);
-  assert.doesNotMatch(plan.artifacts[0]?.content ?? "", /command: \["\/bin\/sh", "-lc"\]/);
+  const jobArtifact = plan.artifacts.find((artifact) => artifact.name === "ciclo-remote-1.job.yaml");
+  const wireGuardSecretArtifact = plan.artifacts.find((artifact) => artifact.name === "ciclo-remote-1.wireguard-secret.yaml");
+  assert.match(jobArtifact?.content ?? "", /kind: Job/);
+  assert.match(jobArtifact?.content ?? "", /command: \["\/bin\/bash", "-lc"\]/);
+  assert.doesNotMatch(jobArtifact?.content ?? "", /command: \["\/bin\/sh", "-lc"\]/);
+  assert.match(jobArtifact?.content ?? "", /mountPath: \/ciclo\/wg/);
+  assert.match(jobArtifact?.content ?? "", /secretName: ciclo-remote-1-wireguard/);
+  assert.match(wireGuardSecretArtifact?.content ?? "", /kind: Secret/);
+  assert.match(wireGuardSecretArtifact?.content ?? "", /runner\.conf: \|/);
   assert.ok(plan.commands.some((command) => command.includes("kubectl -n ciclo-runners apply")));
   assert.ok(plan.evidence.includes("remote.runner.wireguard:planned"));
   assert.equal(plan.mcpConfig?.projectRoot, "/workspace/project");
@@ -229,7 +235,8 @@ test("remote runner defaults reuse active Herdr session", () => {
 
     assert.equal(plan.herdrSession, "operator-main");
     assert.deepEqual(plan.attach.args, ["--remote", "ciclo@10.55.0.7:/workspace/project", "--session", "operator-main"]);
-    assert.match(plan.artifacts[0]?.content ?? "", /operator-main/);
+    const jobArtifact = plan.artifacts.find((artifact) => artifact.name === "runner-1.job.yaml");
+    assert.match(jobArtifact?.content ?? "", /operator-main/);
   });
 });
 

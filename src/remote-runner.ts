@@ -230,6 +230,11 @@ function envLines(environment: Record<string, string> | undefined): string {
     .join("\n");
 }
 
+function indentBlock(value: string, spaces: number): string {
+  const prefix = " ".repeat(spaces);
+  return value.split("\n").map((line) => `${prefix}${line}`).join("\n");
+}
+
 function wireGuardPlan(input: RemoteRunnerLaunchRequest): WireGuardTunnelPlan {
   const request = input.wireGuard ?? {};
   const interfaceName = clean(request.interfaceName) ?? "wg-ciclo";
@@ -388,8 +393,20 @@ function kubernetesArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGu
   const namespace = clean(input.kubernetes?.namespace) ?? "ciclo";
   const jobName = clean(input.kubernetes?.jobName) ?? input.runnerId ?? "ciclo-runner";
   const serviceAccount = clean(input.kubernetes?.serviceAccount) ?? "ciclo-runner";
+  const wireGuardSecretName = `${jobName}-wireguard`;
   const extraEnv = envLines(input.environment);
   const herdrSession = clean(input.herdrSession) ?? repoSessionName();
+  const wireGuardSecret = [
+    "apiVersion: v1",
+    "kind: Secret",
+    "metadata:",
+    `  name: ${wireGuardSecretName}`,
+    `  namespace: ${namespace}`,
+    "type: Opaque",
+    "stringData:",
+    "  runner.conf: |",
+    indentBlock(wireGuard.runnerConfig, 4)
+  ].join("\n");
   const manifest = [
     "apiVersion: batch/v1",
     "kind: Job",
@@ -414,20 +431,33 @@ function kubernetesArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGu
     `            - name: CICLO_WIREGUARD_INTERFACE\n              value: ${JSON.stringify(wireGuard.interfaceName)}`,
     ...(extraEnv.length === 0 ? [] : [extraEnv]),
     "          command: [\"/bin/bash\", \"-lc\"]",
+    "          volumeMounts:",
+    "            - name: wireguard-config",
+    "              mountPath: /ciclo/wg",
+    "              readOnly: true",
     "          args:",
     "            - |",
     "              set -euo pipefail",
     "              install -m 0600 /ciclo/wg/runner.conf /etc/wireguard/wg-ciclo.conf",
     "              wg-quick up wg-ciclo",
     "              herdr session start \"$CICLO_HERDR_SESSION\" --cwd \"$CICLO_REPO_PATH\"",
-    "              tail -f /dev/null"
+    "              tail -f /dev/null",
+    "      volumes:",
+    "        - name: wireguard-config",
+    "          secret:",
+    `            secretName: ${wireGuardSecretName}`,
+    "            defaultMode: 384"
   ].join("\n");
   return {
     providerName: "kubernetes-job",
     executionModel: "kubernetes_job",
-    artifacts: [{ name: `${jobName}.job.yaml`, format: "yaml", content: manifest }],
+    artifacts: [
+      { name: `${jobName}.wireguard-secret.yaml`, format: "yaml", content: wireGuardSecret },
+      { name: `${jobName}.job.yaml`, format: "yaml", content: manifest }
+    ],
     commands: [
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
+      `kubectl -n ${namespace} apply -f ${jobName}.wireguard-secret.yaml`,
       `kubectl -n ${namespace} apply -f ${jobName}.job.yaml`
     ],
     warnings: [],
