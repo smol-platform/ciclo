@@ -413,7 +413,7 @@ function kubernetesArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGu
     `            - name: CICLO_REPO_PATH\n              value: ${JSON.stringify(input.repoPath)}`,
     `            - name: CICLO_WIREGUARD_INTERFACE\n              value: ${JSON.stringify(wireGuard.interfaceName)}`,
     ...(extraEnv.length === 0 ? [] : [extraEnv]),
-    "          command: [\"/bin/sh\", \"-lc\"]",
+    "          command: [\"/bin/bash\", \"-lc\"]",
     "          args:",
     "            - |",
     "              set -euo pipefail",

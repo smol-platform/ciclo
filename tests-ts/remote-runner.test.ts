@@ -69,6 +69,8 @@ test("Kubernetes remote runner plan includes WireGuard tunnel Herdr attach and j
   assert.equal(plan.wireGuard.interfaceName, "wg-ciclo");
   assert.match(plan.wireGuard.runnerConfig, /Endpoint = 198\.51\.100\.10:51820/);
   assert.match(plan.artifacts[0]?.content ?? "", /kind: Job/);
+  assert.match(plan.artifacts[0]?.content ?? "", /command: \["\/bin\/bash", "-lc"\]/);
+  assert.doesNotMatch(plan.artifacts[0]?.content ?? "", /command: \["\/bin\/sh", "-lc"\]/);
   assert.ok(plan.commands.some((command) => command.includes("kubectl -n ciclo-runners apply")));
   assert.ok(plan.evidence.includes("remote.runner.wireguard:planned"));
   assert.equal(plan.mcpConfig?.projectRoot, "/workspace/project");
