@@ -312,7 +312,7 @@ Use `ciclo_launch_remote_runner` for planning remote runnable environments. Prov
   "loop_id": "review-loop",
   "bead_id": "project-remote-1",
   "harness_id": "codex",
-  "image": "ghcr.io/example/ciclo-runner:latest",
+  "image": "ghcr.io/smol-platform/ciclo:latest",
   "repo_path": "/workspace/project",
   "prompt": "Use Ciclo MCP and report progress.",
   "dry_run": true

@@ -46,6 +46,15 @@ just check
 
 The primary implementation runtime is a standalone TypeScript Ciclo orchestrator agent. OpenAI is the default decision provider for live orchestration, reached through the Pi SDK adapter; Pi is not Ciclo's product boundary. Ciclo uses the OpenAI brain for remote-session monitoring, deciding when to insert more context, answering questions it can reason about from known state, and interfacing with the controlling user session. Short, specific CLI utilities such as help, status, install, and deterministic benchmark runs can remain local. [src/cli.ts](/Users/ztaylor/repos/workspaces/ciclo/src/cli.ts) and MCP/daemon entrypoints are Ciclo's user-facing surfaces. The earlier Python package under `src/ciclo` remains transitional support for Herdr/config fixtures until equivalent TypeScript adapters replace it.
 
+## Image Builds
+
+GitHub Actions builds the Ciclo runner image on pull requests and publishes `ghcr.io/smol-platform/ciclo` from `main`, release tags, and manual workflow runs. The image contains the Ciclo CLI, Ciclo MCP entrypoints, Herdr, SSH, Git, and WireGuard tools; layer harness CLIs and auth bootstrap on top when a remote runner needs Claude Code, Codex, or cloud-specific tools preinstalled.
+
+```bash
+docker build -t ciclo:dev .
+docker run ciclo:dev --version
+```
+
 ## Using Ciclo
 
 Build once, then either run the built CLI directly or expose the package binary with `npm link`:

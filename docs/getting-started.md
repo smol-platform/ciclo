@@ -278,6 +278,13 @@ Remote runner responses include `mcp_config` when remote MCP setup is enabled. I
 
 Set `configure_mcp: false` only when the remote image or bootstrap process already installs Ciclo MCP for the remote repo. Otherwise leave it enabled so the remote Claude or Codex session can report status, ask questions, request secrets, and close work through Ciclo.
 
+Ciclo publishes a base remote runner image to `ghcr.io/smol-platform/ciclo`. It includes the Ciclo CLI, Ciclo MCP servers, Herdr, SSH, Git, and WireGuard tools. Layer harness CLIs and auth bootstrap on top of it when your remote environment needs Claude Code, Codex, or cloud-specific tooling preinstalled.
+
+```bash
+docker build -t ciclo:dev .
+docker run ciclo:dev --version
+```
+
 Example Kubernetes runner payload:
 
 ```json
@@ -287,7 +294,7 @@ Example Kubernetes runner payload:
   "loop_id": "review-loop",
   "bead_id": "ciclo-remote.1",
   "harness_id": "codex",
-  "image": "ghcr.io/example/ciclo-runner:latest",
+  "image": "ghcr.io/smol-platform/ciclo:latest",
   "repo_path": "/workspace/ciclo",
   "prompt": "Use Ciclo MCP and report progress.",
   "herdr_session": "ciclo",

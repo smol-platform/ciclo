@@ -655,7 +655,7 @@ export const sampleCicloProjectConfig: CicloProjectConfig = {
   },
   remote: {
     runnerKind: "kubernetes",
-    image: "ghcr.io/example/ciclo-runner:latest",
+    image: "ghcr.io/smol-platform/ciclo:latest",
     repoPath: "/workspace/project",
     sshUser: "ciclo",
     wireGuard: {
