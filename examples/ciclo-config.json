@@ -66,6 +66,14 @@
         "reason": "Example plugin-backed secret injected into the generated Ciclo MCP server config."
       }
     ],
+    "workerSecretBindings": [
+      {
+        "name": "GITHUB_TOKEN",
+        "providerId": "team-1password",
+        "ref": "op://Ciclo/GitHub/token",
+        "reason": "Provide GitHub CLI access to spawned worker shell tools."
+      }
+    ],
     "claudeChannel": false
   },
   "remote": {

@@ -104,8 +104,8 @@ test("fixture candidate requires MCP secret env resolution without prompt secret
 
   assert.equal(candidate.responseKind, "launch_worker_session");
   assert.ok(candidate.evidence.includes("worker.mcp_config.secret_env:1"));
-  assert.ok(candidate.evidence.includes("mcp.secret_env:resolved"));
-  assert.ok(candidate.actions.some((action) => action.kind === "resolve_mcp_secret_env"));
+  assert.ok(candidate.evidence.includes("mcp.secret_env:runtime_exec"));
+  assert.ok(candidate.actions.some((action) => action.kind === "configure_runtime_secret_exec"));
   assert.ok(candidate.actions.some((action) => action.kind === "redact_secret_env_outputs"));
   assert.doesNotMatch(candidate.text, /API_TOKEN=secret|raw secret value/);
 });

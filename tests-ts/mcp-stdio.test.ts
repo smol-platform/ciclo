@@ -628,6 +628,14 @@ test("MCP worker launch resolves plugin secrets into generated MCP config withou
                   format: "Bearer ${secret}",
                   reason: "provide API token to worker MCP"
                 }
+              ],
+              worker_secret_env: [
+                {
+                  env_name: "GRAFANA_URL",
+                  provider_id: "fixture-secrets",
+                  secret_ref: "op://Ciclo/Grafana/url",
+                  reason: "provide Grafana URL to worker shell"
+                }
               ]
             }
           }
@@ -638,6 +646,10 @@ test("MCP worker launch resolves plugin secrets into generated MCP config withou
     );
 
     assert.equal(launched.state, "running");
+    assert.equal(launched.command, "ciclo");
+    assert.deepEqual((launched.args as readonly string[]).slice(0, 3), ["secret", "exec", "--binding"]);
+    const workerInfo = launched["worker_secret_env"] as { ["envNames"]?: readonly string[] };
+    assert.equal(workerInfo["envNames"]?.[0], "GRAFANA_URL");
     assert.doesNotMatch(JSON.stringify(launched), /super-secret-value/);
     const mcpConfig = launched.mcp_config as Record<string, unknown>;
     assert.equal((mcpConfig.secretEnv as readonly { name?: string; formatApplied?: boolean }[])[0]?.name, "API_TOKEN");
@@ -650,8 +662,11 @@ test("MCP worker launch resolves plugin secrets into generated MCP config withou
     assert.equal(serviceServerEnv.SERVICE_MODE, "[redacted secret]");
 
     const config = readFileSync(join(root, ".codex", "config.toml"), "utf8");
-    assert.match(config, /API_TOKEN = "Bearer super-secret-value"/);
-    assert.match(config, /SERVICE_MODE = "Bearer super-secret-value"/);
+    assert.match(config, /args = \["secret", "exec", "--binding"/);
+    assert.match(config, /service-mcp-server/);
+    assert.doesNotMatch(config, /super-secret-value/);
+    assert.doesNotMatch(config, /API_TOKEN = /);
+    assert.doesNotMatch(config, /SERVICE_MODE = "Bearer super-secret-value"/);
 
     const listed = structuredContent(
       await handleMcpRequest(

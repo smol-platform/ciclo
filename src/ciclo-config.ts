@@ -39,6 +39,7 @@ export interface CicloConfigMcp {
   readonly vars?: Record<string, string>;
   readonly additionalServers?: Record<string, CicloMcpAdditionalServerConfig>;
   readonly secretBindings?: readonly CicloConfigMcpSecretBinding[];
+  readonly workerSecretBindings?: readonly CicloConfigMcpSecretBinding[];
   readonly claudeChannel?: boolean;
 }
 
@@ -236,6 +237,8 @@ function parseMcp(root: Record<string, unknown>): CicloConfigMcp | undefined {
   const record = objectValue(root.mcp, "mcp");
   const secretBindingValue = record.secret_bindings ?? record.secretBindings;
   if (secretBindingValue !== undefined && !Array.isArray(secretBindingValue)) throw new Error("mcp.secret_bindings must be an array");
+  const workerSecretBindingValue = record.worker_secret_bindings ?? record.workerSecretBindings;
+  if (workerSecretBindingValue !== undefined && !Array.isArray(workerSecretBindingValue)) throw new Error("mcp.worker_secret_bindings must be an array");
   const clients = clientList(record, "clients");
   const serverName = optionalStringAny(record, ["server_name", "serverName"]);
   const command = optionalString(record, "command");
@@ -249,6 +252,7 @@ function parseMcp(root: Record<string, unknown>): CicloConfigMcp | undefined {
     ...(vars === undefined ? {} : { vars }),
     ...(additionalServers === undefined ? {} : { additionalServers }),
     ...(secretBindingValue === undefined ? {} : { secretBindings: secretBindingValue.map(parseMcpSecretBinding) }),
+    ...(workerSecretBindingValue === undefined ? {} : { workerSecretBindings: workerSecretBindingValue.map(parseMcpSecretBinding) }),
     ...(claudeChannel === undefined ? {} : { claudeChannel })
   };
 }
@@ -357,14 +361,20 @@ export function loadCicloProjectConfig(projectRoot = process.cwd(), explicitPath
 }
 
 export function redactedCicloProjectConfig(config: CicloProjectConfig): CicloProjectConfig {
+  const mcp = config.mcp === undefined
+    ? undefined
+    : {
+        ...config.mcp,
+        ...(config.mcp.secretBindings === undefined ? {} : {
+          secretBindings: config.mcp.secretBindings.map((binding) => ({ ...binding, ref: "[redacted secret ref]" }))
+        }),
+        ...(config.mcp.workerSecretBindings === undefined ? {} : {
+          workerSecretBindings: config.mcp.workerSecretBindings.map((binding) => ({ ...binding, ref: "[redacted secret ref]" }))
+        })
+      };
   return {
     ...config,
-    ...(config.mcp?.secretBindings === undefined ? {} : {
-      mcp: {
-        ...config.mcp,
-        secretBindings: config.mcp.secretBindings.map((binding) => ({ ...binding, ref: "[redacted secret ref]" }))
-      }
-    })
+    ...(mcp === undefined ? {} : { mcp })
   };
 }
 
@@ -468,10 +478,22 @@ export function configMcpSecretBindingParams(config: CicloProjectConfig): readon
   }));
 }
 
+export function configWorkerSecretBindingParams(config: CicloProjectConfig): readonly Record<string, string>[] {
+  return (config.mcp?.workerSecretBindings ?? []).map((binding) => ({
+    name: binding.name,
+    provider_id: binding.providerId,
+    ref: binding.ref,
+    ...(binding.field === undefined ? {} : { field: binding.field }),
+    ...(binding.format === undefined ? {} : { format: binding.format }),
+    ...(binding.reason === undefined ? {} : { reason: binding.reason })
+  }));
+}
+
 export function configMcpSecretEnvBindings(config: CicloProjectConfig): readonly CicloMcpSecretEnvBinding[] {
   return (config.mcp?.secretBindings ?? []).map((binding) => ({
     name: binding.name,
     providerId: binding.providerId,
+    secretRef: binding.ref,
     providerKind: "configured",
     secretRefHash: secretRefHash(binding.ref),
     ...(binding.field === undefined ? {} : { field: binding.field }),
@@ -481,6 +503,24 @@ export function configMcpSecretEnvBindings(config: CicloProjectConfig): readonly
       `secret.ref_hash:${secretRefHash(binding.ref)}`,
       `mcp.secret_env:${binding.name}`,
       "mcp.secret_env:configured"
+    ]
+  }));
+}
+
+export function configWorkerSecretEnvBindings(config: CicloProjectConfig): readonly CicloMcpSecretEnvBinding[] {
+  return (config.mcp?.workerSecretBindings ?? []).map((binding) => ({
+    name: binding.name,
+    providerId: binding.providerId,
+    secretRef: binding.ref,
+    providerKind: "configured",
+    secretRefHash: secretRefHash(binding.ref),
+    ...(binding.field === undefined ? {} : { field: binding.field }),
+    ...(binding.format === undefined ? {} : { format: binding.format }),
+    evidence: [
+      `secret.provider:${binding.providerId}`,
+      `secret.ref_hash:${secretRefHash(binding.ref)}`,
+      `worker.secret_env:${binding.name}`,
+      "worker.secret_env:configured"
     ]
   }));
 }
@@ -559,6 +599,7 @@ export function mergeWorkerLaunchWithConfig(input: WorkerSessionLaunchRequest, c
     mcpEnv: mergeVars(mcp?.vars, input.mcpEnv),
     mcpAdditionalServers: mergeAdditionalServers(mcp?.additionalServers, input.mcpAdditionalServers),
     mcpSecretEnv: input.mcpSecretEnv ?? configMcpSecretEnvBindings(config),
+    workerSecretEnv: input.workerSecretEnv ?? configWorkerSecretEnvBindings(config),
     mcpClaudeChannel: input.mcpClaudeChannel ?? mcp?.claudeChannel
   };
 }
@@ -609,6 +650,7 @@ export const sampleCicloProjectConfig: CicloProjectConfig = {
       }
     },
     secretBindings: [{ name: "EXAMPLE_API_TOKEN", providerId: "onepassword", ref: "op://Ciclo/API/token", format: "Bearer ${secret}", reason: "example reference for spawned MCP tools" }],
+    workerSecretBindings: [{ name: "EXAMPLE_GITHUB_TOKEN", providerId: "onepassword", ref: "op://Ciclo/GitHub/token", reason: "example reference for spawned worker shell tools" }],
     claudeChannel: false
   },
   remote: {

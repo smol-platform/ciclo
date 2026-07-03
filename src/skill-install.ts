@@ -142,25 +142,28 @@ Use \`ciclo_launch_worker_session\` to decide which MCP tools a spawned Claude o
 
 - Prefer repository defaults in \`.ciclo/config.json\` when the project has shared MCP, secret-provider, or remote-runner settings. Use \`ciclo config show --compact\` to inspect redacted defaults and \`ciclo config init\` to create a starter file.
 - Use \`examples/ciclo-config.json\` in the Ciclo repository as the reference shape for provider aliases, MCP secret bindings, remote runner defaults, WireGuard settings, and provider-specific runner blocks.
+- Use \`ciclo launch codex\` or \`ciclo launch claude\` when the operator wants a ready-to-go local Herdr session with Ciclo MCP and all configured additional MCP servers installed before the harness starts. The default session and first pane are named for the project; use \`--session\`, \`--pane-name\`, \`--no-attach\`, or \`--terminal\` only when the operator needs a different shape. Dry-run with \`ciclo launch codex --dry-run --compact\` to inspect the MCP install plan, Herdr command, and harness command without writing files or starting a session.
 - Set \`configure_mcp: true\` to install the Ciclo MCP server into the worker cwd or generated worktree before launch.
 - Set \`mcp_clients\` to the clients that should receive the config: \`["claude"]\`, \`["codex"]\`, or \`["claude", "codex"]\`. If omitted, Ciclo configures the client matching \`harness_id\`.
 - Set \`mcp_server_name\` only when the project needs a non-default server id. Default is \`ciclo\`.
 - Set \`mcp_command\` only when workers must run a non-default Ciclo binary or wrapper. Default is \`ciclo\`.
 - Set \`mcp_claude_channel: true\` when a spawned Claude worker should expose Ciclo through Claude channel integration.
 - Put only non-secret MCP server environment in \`mcp_env\`; use it for flags such as \`CICLO_REUSE_HERDR_SESSION\` or provider mode switches.
-- Put secret-backed environment in \`mcp_secret_env\`; Ciclo resolves the values through configured secret providers at launch time and redacts them everywhere else.
-- Put additional third-party MCP servers in \`mcp_additional_servers\` when the launched worker should receive more than Ciclo MCP. The object is keyed by server name; each value accepts \`command\`, \`args\`, and an environment map. Raw env values must be non-secret; values may include \`\${secret://provider-id/ref}\` placeholders that Ciclo resolves through configured secret providers when it installs the MCP config for the new session. Ciclo writes those servers into the generated \`.mcp.json\` and/or \`.codex/config.toml\` in the worker cwd or worktree.
+- Put secret-backed Ciclo MCP server environment in \`mcp_secret_env\`; Ciclo writes a runtime wrapper and resolves the values only for the generated Ciclo MCP subprocess.
+- Put worker shell credentials in \`worker_secret_env\` when Claude/Codex tools such as \`gh\`, \`git\`, or \`curl\` need them. Ciclo wraps the launched harness command so only the worker process tree receives those variables.
+- Put additional third-party MCP servers in \`mcp_additional_servers\` when the launched worker should receive more than Ciclo MCP. The object is keyed by server name; each value accepts \`command\`, \`args\`, and an environment map. Raw env values must be non-secret; values may include \`\${secret://provider-id/ref}\` placeholders that Ciclo converts into runtime wrappers for the target MCP server. Ciclo writes those servers into the generated \`.mcp.json\` and/or \`.codex/config.toml\` in the worker cwd or worktree without resolved secret values.
 
 The generated config gives the worker Ciclo MCP tools, resources, prompts, enabled plugin capabilities, and configured additional MCP servers. Prefer \`.ciclo/config.json\` or launch payloads over manual generated-config edits so worktree and remote sessions stay reproducible.
 
-Config file mapping: \`.ciclo/config.json\` uses \`mcp.clients\`, \`mcp.serverName\`, \`mcp.command\`, \`mcp.vars\`, \`mcp.additionalServers\`, \`mcp.secretBindings\`, and \`mcp.claudeChannel\`; it uses \`secrets.providers\` for built-in and plugin-backed provider ids; it uses \`remote\` for remote runner defaults. Inline MCP tool arguments override config defaults for one launch. \`vars\` and raw additional server environment values are non-secret strings; additional server env values may include \`\${secret://provider-id/ref}\` placeholders; \`secretBindings\` are provider references that Ciclo resolves only for authorized non-dry-run launches and redacts everywhere else.
+Config file mapping: \`.ciclo/config.json\` uses \`mcp.clients\`, \`mcp.serverName\`, \`mcp.command\`, \`mcp.vars\`, \`mcp.additionalServers\`, \`mcp.secretBindings\`, \`mcp.workerSecretBindings\`, and \`mcp.claudeChannel\`; it uses \`secrets.providers\` for built-in and plugin-backed provider ids; it uses \`remote\` for remote runner defaults. Inline MCP tool arguments override config defaults for one launch. \`vars\` and raw additional server environment values are non-secret strings; additional server env values may include \`\${secret://provider-id/ref}\` placeholders; \`secretBindings\` and \`workerSecretBindings\` are provider references that Ciclo stores as runtime wrappers rather than resolved values.
 
-Use \`mcp.secretBindings\` when the generated Ciclo MCP server config needs a secret-backed environment variable. The binding \`name\` becomes an env var on the generated \`ciclo\` MCP server entry, and \`providerId\`/\`ref\` identify the configured provider reference to resolve. Add \`format\` when the env var needs a wrapper string such as \`Bearer \${secret}\`; formats must contain exactly one \`\${secret}\` placeholder. Provider ids can point at built-in providers or plugin-backed aliases from \`secrets.providers[].pluginProviderId\`. For additional MCP servers, keep raw env values non-secret or use \`\${secret://provider-id/ref}\` placeholders.
+Use \`mcp.secretBindings\` when the generated Ciclo MCP server config needs a secret-backed environment variable. The binding \`name\` becomes an env var resolved by the generated \`ciclo secret exec\` wrapper, and \`providerId\`/\`ref\` identify the configured provider reference to resolve. Add \`format\` when the env var needs a wrapper string such as \`Bearer \${secret}\`; formats must contain exactly one \`\${secret}\` placeholder. Provider ids can point at built-in providers or plugin-backed aliases from \`secrets.providers[].pluginProviderId\`. For additional MCP servers, keep raw env values non-secret or use \`\${secret://provider-id/ref}\` placeholders.
 
 MCP server secret support has a strict boundary:
 
-- Use \`mcp.secretBindings\` or launch-time \`mcp_secret_env\` only for secrets that should be injected into the generated \`ciclo\` MCP server environment.
-- Keep raw additional MCP server environment values non-secret. Ciclo resolves \`\${secret://provider-id/ref}\` placeholders at MCP config install time for new sessions.
+- Use \`mcp.secretBindings\` or launch-time \`mcp_secret_env\` only for secrets that should be injected into the generated \`ciclo\` MCP server subprocess.
+- Use project \`mcp.workerSecretBindings\` or launch-time \`worker_secret_env\` for credentials the worker shell itself needs.
+- Keep raw additional MCP server environment values non-secret. Ciclo turns \`\${secret://provider-id/ref}\` placeholders into runtime wrappers for new sessions.
 - For third-party MCP server credentials, prefer Ciclo placeholders, provider-native references, a wrapper command that fetches the secret at runtime, or task-scoped \`ciclo_request_secret\` calls from the worker.
 - Never put raw secret values in \`mcp.vars\`, additional server environment maps, prompts, Beads notes, feedback, tracker sync, board output, or progress updates.
 
@@ -171,9 +174,9 @@ When operating as a worker, request secrets by reference:
 3. Prefer provider references such as OpenBao paths/fields or 1Password \`op://\` references; do not ask the operator to paste values.
 4. Use the returned value only for the command that needs it, then avoid echoing it in validation output, Beads notes, feedback, tracker sync, or transcripts.
 
-When a worker MCP server needs a secret as an environment variable, use \`mcp_secret_env\` on \`ciclo_launch_worker_session\` instead of \`mcp_env\` or prompt text. Each binding should include \`env_name\`, \`provider_id\`, \`secret_ref\`, optional \`field\`, optional \`format\`, and \`reason\`. Ciclo resolves the secret through the configured provider only for non-dry-run launches, applies \`format\` only after resolution, writes the resulting string into the generated MCP client config, and redacts it from launch responses, worker-session listings, audit records, and events. The caller must be authorized for \`secret.read\`.
+When the generated Ciclo MCP server needs a secret as an environment variable, use \`mcp_secret_env\` on \`ciclo_launch_worker_session\` instead of \`mcp_env\` or prompt text. When the worker shell needs the credential, use \`worker_secret_env\` instead. Each binding should include \`env_name\`, \`provider_id\`, \`secret_ref\`, optional \`field\`, optional \`format\`, and \`reason\`. Ciclo resolves the secret through the configured provider only inside the runtime wrapper for the intended process and redacts it from launch responses, worker-session listings, audit records, and events. The caller must be authorized for \`secret.read\`.
 
-Ciclo reuses the active Herdr session when detected. Local Claude/Codex workers launched through Ciclo then run as visible Herdr agent panes, so the operator can attach to the overall Ciclo session and watch them. With \`isolation: "worktree"\`, local pane launches use \`herdr worktree create/open\` and then start the agent with the returned Herdr workspace id; direct launches outside Herdr use \`git worktree add\`. Ciclo MCP also runs an internal heartbeat for sessions it owns; use \`ciclo_decide\` when a monitoring, context, question-answering, or operator-interface decision needs OpenAI judgment. If Herdr pane reuse is not wanted, start the MCP server with \`CICLO_REUSE_HERDR_SESSION=false\` to use direct process launches and repo-name fallback.
+Ciclo reuses the active Herdr session when detected. Local Claude/Codex workers launched through Ciclo then run as visible Herdr agent panes, so the operator can attach to the overall Ciclo session and watch them. With \`isolation: "worktree"\`, local pane launches use fresh \`herdr worktree create\` workspaces and then start the agent with the returned Herdr workspace id; existing Herdr worktree paths fail instead of reopening stale workspace state. Direct launches outside Herdr use \`git worktree add\`. Ciclo MCP also runs an internal heartbeat for sessions it owns; use \`ciclo_decide\` when a monitoring, context, question-answering, or operator-interface decision needs OpenAI judgment. If Herdr pane reuse is not wanted, start the MCP server with \`CICLO_REUSE_HERDR_SESSION=false\` to use direct process launches and repo-name fallback.
 
 ## Remote Pattern
 
@@ -317,7 +320,7 @@ Always dry-run first:
 }
 \`\`\`
 
-After operator approval, send the same payload with \`dry_run: false\`. Use \`extra_args\` for harness-specific CLI flags, \`configure_mcp: true\` to install Ciclo MCP config into the worker cwd or worktree before launch, and \`isolation: "worktree"\` when the worker should run in an isolated git worktree. Ciclo resolves a default sibling worktree path unless \`worktree_path\` is provided and defaults bead branches to \`ciclo/<bead-id>\`. When Ciclo is inside Herdr, worktree-isolated local pane launches use \`herdr worktree create/open\` and start the agent with the returned Herdr workspace id.
+After operator approval, send the same payload with \`dry_run: false\`. Use \`extra_args\` for harness-specific CLI flags, \`configure_mcp: true\` to install Ciclo MCP config into the worker cwd or worktree before launch, and \`isolation: "worktree"\` when the worker should run in an isolated git worktree. Ciclo resolves a default sibling worktree path unless \`worktree_path\` is provided and defaults bead branches to \`ciclo/<bead-id>\`. When Ciclo is inside Herdr, worktree-isolated local pane launches use fresh \`herdr worktree create\` workspaces and start the agent with the returned Herdr workspace id; existing Herdr worktree paths fail instead of reopening stale workspace state.
 
 For Claude Code workers, \`model\` may be \`claude-fable-5\`, \`fable 5\`, \`Fable 5\`, or \`claude fable 5\`; Ciclo normalizes those aliases to \`claude-fable-5\` before launching Claude. Other model ids pass through unchanged.
 
@@ -353,22 +356,24 @@ Project-level additional MCP servers are configured under \`mcp.additionalServer
 }
 \`\`\`
 
-These entries are not Ciclo plugins and do not add tools to the Ciclo control plane. They are copied into the launched worker's Claude/Codex MCP config so that worker session can call those third-party MCP servers directly. Keep raw environment values non-secret. When a third-party server needs a Ciclo-managed secret, use a placeholder such as \`Bearer \${secret://team-1password/Ciclo/API/token}\` in the env value; Ciclo resolves it through the configured provider when it installs the MCP config for the new session and redacts responses, events, audit records, board rows, and worker listings. The placeholder host is the provider id, the path is the provider secret reference, and \`?field=token\` or \`#token\` selects a field.
+These entries are not Ciclo plugins and do not add tools to the Ciclo control plane. They are copied into the launched worker's Claude/Codex MCP config so that worker session can call those third-party MCP servers directly. Keep raw environment values non-secret. When a third-party server needs a Ciclo-managed secret, use a placeholder such as \`Bearer \${secret://team-1password/Ciclo/API/token}\` in the env value; Ciclo converts it into a \`ciclo secret exec\` runtime wrapper so only that server subprocess receives the resolved value. The placeholder host is the provider id, the path is the provider secret reference, and \`?field=token\` or \`#token\` selects a field.
 
 ### MCP Server Secret Support
 
-Ciclo supports secret-backed environment variables for the generated \`ciclo\` MCP server entry, and supports \`\${secret://provider-id/ref}\` replacements inside additional MCP server environment values.
+Ciclo supports secret-backed environment variables for the generated \`ciclo\` MCP server entry, supports worker process secret variables, and supports \`\${secret://provider-id/ref}\` replacements inside additional MCP server environment values. Generated config stores runtime wrappers and provider references, not resolved values.
 
 Use this path when the Ciclo MCP server itself needs credentials or when a worker should receive a secret through Ciclo's controlled MCP surface:
 
 - Project defaults: \`mcp.secretBindings[]\` in \`.ciclo/config.json\`.
-- One-off launch overrides: \`mcp_secret_env[]\` in \`ciclo_launch_worker_session\`.
+- One-off Ciclo MCP server overrides: \`mcp_secret_env[]\` in \`ciclo_launch_worker_session\`.
+- Project worker shell defaults: \`mcp.workerSecretBindings[]\` in \`.ciclo/config.json\`.
+- One-off worker shell overrides: \`worker_secret_env[]\` in \`ciclo_launch_worker_session\`.
 - Required fields: \`name\` or \`env_name\`, \`providerId\` or \`provider_id\`, and \`ref\` or \`secret_ref\`.
 - Optional fields: \`field\`, \`format\`, and \`reason\`.
 - \`format\` must contain exactly one \`\${secret}\` placeholder and is applied only after the provider returns the value.
-- Dry runs do not resolve the provider value. Non-dry-run installs and launches require \`secret.read\` authorization.
+- Dry runs do not resolve the provider value. Non-dry-run installs and launches require \`secret.read\` authorization before writing runtime wrappers.
 
-Use \`mcp.secretBindings\` when the generated Ciclo MCP server entry itself needs secret-backed environment variables. The binding name becomes an env var on the generated \`ciclo\` server entry in \`.mcp.json\` or \`.codex/config.toml\`; the secret value is resolved only for authorized non-dry-run installs or launches and is redacted from responses, audit records, and events. Add \`format\` when the target variable needs a wrapper string, such as \`Bearer \${secret}\`; the format must contain exactly one \`\${secret}\` placeholder.
+Use \`mcp.secretBindings\` when the generated Ciclo MCP server entry itself needs secret-backed environment variables. The binding name becomes an env var resolved by the generated \`ciclo secret exec\` wrapper; the secret value is only visible to the Ciclo MCP server subprocess. Add \`format\` when the target variable needs a wrapper string, such as \`Bearer \${secret}\`; the format must contain exactly one \`\${secret}\` placeholder.
 
 \`\`\`json
 {
@@ -461,12 +466,13 @@ Field behavior:
 - \`mcp_command\` changes the command the spawned client runs for Ciclo MCP; use it for wrappers or non-standard installs.
 - \`mcp_claude_channel\` enables Claude channel integration for spawned Claude sessions.
 - \`mcp_env\` writes non-secret environment variables into the generated Ciclo MCP server config.
-- \`mcp_additional_servers\` writes extra third-party MCP server entries into the launched worker config. The object is keyed by server name; values accept \`command\`, \`args\`, and \`env\`. Raw env values must be non-secret; values may include \`\${secret://provider-id/ref}\` placeholders that Ciclo resolves at session MCP config install time. Per-launch entries override project config entries with the same name.
-- \`mcp_secret_env\` writes secret-backed environment variables into the generated config only on non-dry-run launches. Ciclo resolves each binding through \`provider_id\`, \`secret_ref\`, and optional \`field\`; optional \`format\` wraps the resolved value and must contain exactly one \`\${secret}\` placeholder; the response and audit trail stay redacted.
+- \`mcp_additional_servers\` writes extra third-party MCP server entries into the launched worker config. The object is keyed by server name; values accept \`command\`, \`args\`, and \`env\`. Raw env values must be non-secret; values may include \`\${secret://provider-id/ref}\` placeholders that Ciclo turns into runtime wrappers. Per-launch entries override project config entries with the same name.
+- \`mcp_secret_env\` writes runtime-wrapped secret-backed environment variables for the generated Ciclo MCP server. Ciclo resolves each binding through \`provider_id\`, \`secret_ref\`, and optional \`field\` only when that server subprocess starts; optional \`format\` wraps the resolved value and must contain exactly one \`\${secret}\` placeholder; the response and audit trail stay redacted.
+- \`worker_secret_env\` wraps the launched Claude/Codex harness process when shell tools need credentials. Use this for \`gh\`, \`git\`, \`curl\`, deploy CLIs, or other commands run by the agent shell.
 
 The installer-generated MCP config exposes Ciclo's MCP tools, resources, prompts, and enabled plugin capabilities to the spawned worker. If the worker needs unrelated third-party MCP servers, install those servers into the target project through their own installer before launching, or expose the capability through a Ciclo plugin that the worker can reach via Ciclo MCP. Avoid manual edits to generated worker config; they are hard to reproduce across worktrees and remote runners.
 
-Use \`mcp_env\` only for non-secret environment variables. Use \`mcp_secret_env\` when the generated Ciclo MCP server needs a secret; Ciclo resolves each binding through \`provider_id\` and \`secret_ref\`, applies optional \`format\`, writes the resulting value into the generated MCP client config only for non-dry-run launches, and redacts the value from responses, worker-session listings, audit records, and events. The caller needs \`secret.read\`. Do not use \`mcp_secret_env\` to target additional MCP servers; put \`\${secret://provider-id/ref}\` placeholders in those server env values when Ciclo should resolve the secret at session startup.
+Use \`mcp_env\` only for non-secret environment variables. Use \`mcp_secret_env\` when the generated Ciclo MCP server needs a secret; use \`worker_secret_env\` when the launched worker shell needs a secret. The caller needs \`secret.read\`. Do not use \`mcp_secret_env\` to target additional MCP servers; put \`\${secret://provider-id/ref}\` placeholders in those server env values when Ciclo should provide the secret at server startup.
 
 Heartbeat while working:
 
@@ -570,6 +576,84 @@ const CODEX_OPENAI_AGENT = `interface:
   default_prompt: "Use Ciclo MCP to inspect status, claim work, ask questions, launch workers, and close work with validation evidence."
 `;
 
+const RELEASE_SKILL = [
+  "---",
+  "name: release",
+  "description: \"Use when the user invokes /release or asks Claude or Codex to cut a repository release: update local state from remote, run release gates, create a new git tag, publish the branch and tag to the remote, and create a GitHub release with gh.\"",
+  "---",
+  "",
+  "# Release",
+  "",
+  "Use this skill to publish a GitHub-backed repository release. A direct `/release` request grants authority to fetch, fast-forward the local branch, create a tag, publish the current release branch and tag, and create a GitHub release when the target version and branch are unambiguous. Do not force-publish, rewrite tags, bypass gates, or publish from a dirty worktree.",
+  "",
+  "## Workflow",
+  "",
+  "1. Establish the release target.",
+  "   - Prefer an explicit tag from the user, such as `/release v0.2.0`.",
+  "   - If no tag is supplied, derive it from the repository canonical version file only when obvious, such as `package.json`, `pyproject.toml`, or an existing project version module.",
+  "   - Normalize release tags to the repository convention. If the repo has existing `v*` tags, use `v<version>`.",
+  "   - Stop and ask when the tag, release branch, prerelease status, or notes source is unclear.",
+  "",
+  "2. Verify local and remote state before changing anything.",
+  "   ```bash",
+  "   git status --short",
+  "   git remote -v",
+  "   git branch --show-current",
+  "   git fetch --tags --prune origin",
+  "   git pull --ff-only origin \"$(git branch --show-current)\"",
+  "   git status --short",
+  "   ```",
+  "   Stop if the worktree is dirty, the branch cannot fast-forward, the remote is missing, or the user is not on the intended release branch.",
+  "",
+  "3. Check that the tag is new.",
+  "   ```bash",
+  "   git rev-parse -q --verify \"refs/tags/<tag>\"",
+  "   git ls-remote --tags origin \"<tag>\"",
+  "   ```",
+  "   Stop if either command finds the tag. Never delete or move an existing release tag unless the user explicitly asks for repair and approves the exact risk.",
+  "",
+  "4. Run the repository release gate.",
+  "   - Use the repo documented full gate first, such as `just check`, `devenv shell ciclo-check`, `npm test`, or the release instructions in project docs.",
+  "   - If no gate is documented, run the narrowest build/test commands that prove the package can be released.",
+  "   - Stop on any failure and report the failing command.",
+  "",
+  "5. Create and publish the release.",
+  "   ```bash",
+  "   git tag -a \"<tag>\" -m \"Release <tag>\"",
+  "   git \\",
+  "     push origin \"$(git branch --show-current)\"",
+  "   git \\",
+  "     push origin \"<tag>\"",
+  "   gh release create \"<tag>\" --target \"$(git branch --show-current)\" --title \"Release <tag>\" --generate-notes",
+  "   gh release view \"<tag>\" --json url,tagName,isDraft,isPrerelease",
+  "   ```",
+  "   Use `--prerelease` only when the tag or user request clearly indicates a prerelease. Use `--draft` only when requested.",
+  "",
+  "6. Report the result.",
+  "   - Include the tag, branch, validation command and result, published remote, and GitHub release URL.",
+  "   - Include any local changes still present after release. There should normally be none.",
+  "",
+  "## Safety Rules",
+  "",
+  "- Do not release from a dirty worktree.",
+  "- Do not create a release from unpublished or unvalidated changes unless the user explicitly confirms that this is the release branch state.",
+  "- Do not use forced publishing, `git tag -f`, `gh release delete`, or tag deletion in normal release flow.",
+  "- Do not paste tokens or credentials into commands. If `gh` is not authenticated, stop and ask the user to authenticate.",
+  "- If this repo uses Beads, close only release-specific work that was actually completed and include release validation evidence."
+].join("\n");
+
+const RELEASE_OPENAI_AGENT = `interface:
+  display_name: "Release"
+  short_description: "Cut tags and publish GitHub releases"
+  default_prompt: "Use $release to cut a repository tag, publish it, and create a GitHub release."
+`;
+
+const CLAUDE_RELEASE_COMMAND = [
+  "Use the release skill to cut and publish a GitHub release.",
+  "",
+  "If the user supplied arguments after `/release`, treat them as the requested tag, prerelease/draft flags, or release-note instructions. Follow the release skill exactly: update local state from remote, require a clean worktree, run the release gate, create a new annotated tag, publish the branch and tag to origin, create the GitHub release with `gh release create`, verify it with `gh release view`, and report the release URL."
+].join("\n");
+
 const CLAUDE_SKILL = `---
 name: ciclo-mcp
 description: "Use Ciclo MCP as the control plane for Claude-driven repository work: status, Beads work, worker launches with MCP config, Herdr panes, worktrees, remote runners, secret providers, event/board monitoring, tracker sync, and closeout evidence."
@@ -644,19 +728,20 @@ Only trust plugins after the operator accepts the package source and behavior. E
 - Keep the current Claude session operator-facing; ask Ciclo to launch bounded workers for implementation.
 - Dry-run worker launches first; include \`configure_mcp: true\` unless the worker already has project MCP config, include \`extra_args\` for harness-specific flags, and prefer \`isolation: "worktree"\` when the worker should run in an isolated git worktree.
 - Use \`.ciclo/config.json\` for shared secret-provider, MCP, and remote-runner defaults. Inspect it with \`ciclo config show --compact\`; create a starter file with \`ciclo config init\`. Explicit MCP tool arguments override config defaults.
-- Configure spawned worker MCP tools through \`ciclo_launch_worker_session\`: use \`mcp_clients\` for Claude/Codex config targets, \`mcp_server_name\` for a non-default Ciclo server id, \`mcp_command\` for a non-default Ciclo binary or wrapper, \`mcp_env\` for non-secret MCP server env, \`mcp_secret_env\` for secret-backed MCP server env, and \`mcp_claude_channel\` for Claude channel integration.
-- Configure additional third-party MCP servers for launched worktrees or remote sessions with project \`mcp.additionalServers\` or per-launch \`mcp_additional_servers\`. Each server is keyed by name and accepts \`command\`, \`args\`, and an environment map; raw values must be non-secret, but values may include \`\${secret://provider-id/ref}\` placeholders that Ciclo resolves through configured secret providers when it installs generated \`.mcp.json\` and/or \`.codex/config.toml\` for the new session.
-- Use \`mcp.secretBindings\` in \`.ciclo/config.json\` when the generated Ciclo MCP server config needs secret-backed environment variables. Provider ids can point at built-in providers or plugin-backed aliases from \`secrets.providers[].pluginProviderId\`; optional \`format\` can wrap a resolved value and must contain exactly one \`\${secret}\` placeholder. For additional MCP servers, keep raw env values non-secret or use \`\${secret://provider-id/ref}\` placeholders.
-- Treat \`mcp_secret_env\` and \`mcp.secretBindings\` as secret injection for the generated \`ciclo\` MCP server entry only. For third-party MCP server credentials, use \`\${secret://provider-id/ref}\` env placeholders, provider-native references, wrapper commands, or task-scoped \`ciclo_request_secret\`; do not place raw values in additional server environment maps.
+- Use \`ciclo launch codex\` or \`ciclo launch claude\` when the operator wants a ready-to-go local Herdr session with Ciclo MCP and configured additional MCP servers installed before the harness starts. The default session and first pane are named for the project; use \`--session\`, \`--pane-name\`, \`--no-attach\`, or \`--terminal\` only when the operator needs a different shape. Dry-run with \`ciclo launch codex --dry-run --compact\` to inspect the redacted install plan, Herdr command, and harness command.
+- Configure spawned worker MCP tools through \`ciclo_launch_worker_session\`: use \`mcp_clients\` for Claude/Codex config targets, \`mcp_server_name\` for a non-default Ciclo server id, \`mcp_command\` for a non-default Ciclo binary or wrapper, \`mcp_env\` for non-secret MCP server env, \`mcp_secret_env\` for secret-backed Ciclo MCP server env, \`worker_secret_env\` for credentials needed by the launched agent shell, and \`mcp_claude_channel\` for Claude channel integration.
+- Configure additional third-party MCP servers for launched worktrees or remote sessions with project \`mcp.additionalServers\` or per-launch \`mcp_additional_servers\`. Each server is keyed by name and accepts \`command\`, \`args\`, and an environment map; raw values must be non-secret, but values may include \`\${secret://provider-id/ref}\` placeholders that Ciclo converts into runtime wrappers in generated \`.mcp.json\` and/or \`.codex/config.toml\` for the new session.
+- Use \`mcp.secretBindings\` in \`.ciclo/config.json\` when the generated Ciclo MCP server config needs secret-backed environment variables; use \`mcp.workerSecretBindings\` for credentials needed by the launched worker shell. Provider ids can point at built-in providers or plugin-backed aliases from \`secrets.providers[].pluginProviderId\`; optional \`format\` can wrap a resolved value and must contain exactly one \`\${secret}\` placeholder. Ciclo writes runtime wrappers, not resolved values, into generated config.
+- Treat \`mcp_secret_env\` and \`mcp.secretBindings\` as secret injection for the generated \`ciclo\` MCP server subprocess only. Use \`mcp.workerSecretBindings\` or \`worker_secret_env\` when \`gh\`, \`git\`, \`curl\`, or other worker shell tools need credentials. For third-party MCP server credentials, use \`\${secret://provider-id/ref}\` env placeholders, provider-native references, wrapper commands, or task-scoped \`ciclo_request_secret\`; do not place raw values in additional server environment maps.
 - The generated MCP config gives workers Ciclo tools, resources, prompts, enabled plugin capabilities, and any configured additional MCP servers. Prefer config or launch payloads over manual generated-config edits so worktree and remote sessions stay reproducible.
-- When Ciclo MCP is running inside Herdr, local Claude/Codex workers launch as visible Herdr agent panes by default. With \`isolation: "worktree"\`, Ciclo uses \`herdr worktree create/open\` and starts the pane with the returned Herdr workspace id. Ciclo MCP runs an internal heartbeat for sessions it owns; use \`ciclo_decide\` when a monitoring, context, question-answering, or operator-interface decision needs OpenAI judgment. Set \`CICLO_REUSE_HERDR_SESSION=false\` before starting MCP only when direct process launches are required.
+- When Ciclo MCP is running inside Herdr, local Claude/Codex workers launch as visible Herdr agent panes by default. With \`isolation: "worktree"\`, Ciclo uses fresh \`herdr worktree create\` workspaces and starts the pane with the returned Herdr workspace id; existing Herdr worktree paths fail instead of reopening stale workspace state. Ciclo MCP runs an internal heartbeat for sessions it owns; use \`ciclo_decide\` when a monitoring, context, question-answering, or operator-interface decision needs OpenAI judgment. Set \`CICLO_REUSE_HERDR_SESSION=false\` before starting MCP only when direct process launches are required.
 - Use Beads IDs in mutating calls.
 - Do not edit \`.beads/issues.jsonl\` or bypass Ciclo for claims/closeout.
 - Use \`ciclo_report_feedback\` for findings and warnings.
 - Use \`ciclo_sync_remote_trackers\` only when Beads-native tracker sync is configured and authorized.
 - Use \`ciclo_list_secret_providers\` and \`ciclo_request_secret\` for configured secret references; ask the operator only when the provider, reference, or authorization is missing.
 - Prefer provider references such as OpenBao paths/fields or 1Password \`op://\` references; never paste secret values into Beads, tracker sync, feedback, progress notes, or transcripts.
-- Use \`mcp_secret_env\` on \`ciclo_launch_worker_session\` when a configured worker MCP server needs a secret environment variable; use optional \`format\` such as \`Bearer \${secret}\` only when the target variable needs a wrapper string; do not put secret values in \`mcp_env\`, prompts, or notes.
+- Use \`mcp_secret_env\` on \`ciclo_launch_worker_session\` when the generated Ciclo MCP server needs a secret environment variable; use \`worker_secret_env\` when the launched agent shell needs credentials; use optional \`format\` such as \`Bearer \${secret}\` only when the target variable needs a wrapper string; do not put secret values in \`mcp_env\`, prompts, or notes.
 - For remote work, use \`ciclo_attach_plan\`, \`ciclo_launch_remote_runner\`, and remote session registration/heartbeat/detach tools; remote observation must go through Herdr remote attach over SSH. Keep remote MCP setup enabled unless the remote image already installs Ciclo MCP; \`mcp_config\` includes generated \`.mcp.json\` and/or \`.codex/config.toml\` artifacts for the remote repo, including configured additional MCP servers.
 - Ask the operator before destructive commands, deploys, permission prompts, or scope expansion.
 `;
@@ -679,16 +764,22 @@ function installCodexSkill(projectRoot: string, dryRun: boolean): CicloSkillInst
   const files = [
     { path: join(projectRoot, ".agents", "skills", "ciclo-mcp", "SKILL.md"), content: CODEX_SKILL },
     { path: join(projectRoot, ".agents", "skills", "ciclo-mcp", "references", "mcp-workflows.md"), content: CODEX_WORKFLOWS },
-    { path: join(projectRoot, ".agents", "skills", "ciclo-mcp", "agents", "openai.yaml"), content: CODEX_OPENAI_AGENT }
+    { path: join(projectRoot, ".agents", "skills", "ciclo-mcp", "agents", "openai.yaml"), content: CODEX_OPENAI_AGENT },
+    { path: join(projectRoot, ".agents", "skills", "release", "SKILL.md"), content: RELEASE_SKILL },
+    { path: join(projectRoot, ".agents", "skills", "release", "agents", "openai.yaml"), content: RELEASE_OPENAI_AGENT }
   ];
   const changed = files.map((file) => writeIfChanged(file.path, file.content, dryRun)).some(Boolean);
   return { client: "codex", paths: files.map((file) => file.path), changed, dryRun };
 }
 
 function installClaudeSkill(projectRoot: string, dryRun: boolean): CicloSkillInstallTargetResult {
-  const path = join(projectRoot, ".claude", "skills", "ciclo-mcp.md");
-  const changed = writeIfChanged(path, CLAUDE_SKILL, dryRun);
-  return { client: "claude", paths: [path], changed, dryRun };
+  const files = [
+    { path: join(projectRoot, ".claude", "skills", "ciclo-mcp.md"), content: CLAUDE_SKILL },
+    { path: join(projectRoot, ".claude", "skills", "release.md"), content: RELEASE_SKILL },
+    { path: join(projectRoot, ".claude", "commands", "release.md"), content: CLAUDE_RELEASE_COMMAND }
+  ];
+  const changed = files.map((file) => writeIfChanged(file.path, file.content, dryRun)).some(Boolean);
+  return { client: "claude", paths: files.map((file) => file.path), changed, dryRun };
 }
 
 export function installCicloSkills(options: CicloSkillInstallOptions = {}): CicloSkillInstallResult {
@@ -707,7 +798,8 @@ export function installCicloSkills(options: CicloSkillInstallOptions = {}): Cicl
     nextSteps: [
       "Run ciclo mcp install --client all --project <repo> if the project does not already expose Ciclo MCP.",
       "Restart Claude or Codex if it does not hot-reload project skills.",
-      "Ask the session to use the ciclo-mcp skill and Ciclo MCP for work claims, worker launches, and closeout evidence."
+      "Ask the session to use the ciclo-mcp skill and Ciclo MCP for work claims, worker launches, and closeout evidence.",
+      "Use /release or the release skill when a repository release should tag, publish, and create a GitHub release."
     ]
   };
 }

@@ -89,7 +89,7 @@ Blocked-state handling has one explicit exception: when a scenario marks a harne
 | Scenario | What it tests |
 | --- | --- |
 | `worker_launch_codex_session` | Ciclo plans a supervised Codex worker launch with model, cwd, prompt, and cleanup tracking. |
-| `worker_mcp_secret_env_launch` | A worker launch resolves provider-backed MCP secret bindings, writes them only to generated MCP config, and redacts secret material from prompts, events, and responses. |
+| `worker_mcp_secret_env_launch` | A worker launch keeps provider-backed secret bindings as runtime-scoped wrappers for the intended MCP or worker process, while redacting secret material from prompts, generated config values, events, and responses. |
 | `post_close_launches_review_session` | Closing a task with acceptance and validation evidence launches a bounded review worker and records the review session for monitoring. |
 | `worker_stop_completed_claude_session` | Ciclo records cleanup for a completed Claude worker while preserving validation evidence. |
 

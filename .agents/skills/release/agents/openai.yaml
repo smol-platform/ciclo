@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release"
+  short_description: "Cut tags and publish GitHub releases"
+  default_prompt: "Use $release to cut a repository tag, publish it, and create a GitHub release."

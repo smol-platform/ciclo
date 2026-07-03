@@ -102,7 +102,7 @@ ciclo skill install --client all --project /path/to/project
 ciclo skill install --client claude --project /path/to/project --dry-run --compact
 ```
 
-Claude skill installs write `.claude/skills/ciclo-mcp.md`. Codex-compatible installs write `.agents/skills/ciclo-mcp/`.
+Claude skill installs write `.claude/skills/ciclo-mcp.md`, `.claude/skills/release.md`, and `.claude/commands/release.md`. Codex-compatible installs write `.agents/skills/ciclo-mcp/` and `.agents/skills/release/`. Use `/release <tag>` in Claude, or the `release` skill in Codex, to run the guarded tag, remote publish, and GitHub release workflow.
 
 For the full operator workflow, see [onboarding-project.md](onboarding-project.md).
 
@@ -131,13 +131,28 @@ ciclo://events
 ciclo://board
 ```
 
-A launch request includes the harness, loop, prompt, optional Beads issue, model, effort, cwd, `extra_args`, `isolation`, worktree options, MCP config options, and `dry_run`. Use `dry_run: true` to inspect the launch command, planned worktree, and planned MCP client config without starting a process. Use `isolation: "worktree"` for bead-level fan-out; Ciclo defaults the branch to `ciclo/<bead-id>` unless `worktree_branch` is set. When running inside Herdr, Ciclo uses `herdr worktree create/open` and starts the local pane with the returned Herdr workspace id; outside Herdr, it uses `git worktree add`. Use `configure_mcp: true` when the worker should receive Ciclo MCP config in its cwd or worktree before launch.
+To join a Ciclo-enabled project from your terminal instead of asking an existing Claude/Codex session to spawn a worker, run:
+
+```bash
+ciclo launch codex
+ciclo launch codex --session infra-blocks
+ciclo launch claude --model claude-fable-5
+ciclo launch codex --prompt "Review the repo" -- --full-auto
+ciclo launch claude --dry-run --compact
+ciclo launch codex --terminal
+```
+
+`ciclo launch` installs the selected client MCP config for the current project first, including the Ciclo server, project `mcp.additionalServers`, `mcp.secretBindings`, and additional-server `${secret://provider-id/ref}` placeholders. Non-dry-run launches write `.mcp.json` or `.codex/config.toml`, start the selected harness as the first pane in a named Herdr session, and attach to that session. Secret-backed entries are written as `ciclo secret exec` runtime wrappers that resolve provider references only when the intended child process starts, so generated config files do not contain resolved secret values. By default the Herdr session and first pane are named after the project directory; use `--session`, `--pane-name`, or `--no-attach` to tune the wrapper, and use `--terminal` only when you explicitly want the harness process in the current terminal. Use dry-run to inspect the redacted MCP install plan, Herdr command, and exact harness command without writing files or starting Claude/Codex.
+
+A launch request includes the harness, loop, prompt, optional Beads issue, model, effort, cwd, `extra_args`, `isolation`, worktree options, MCP config options, and `dry_run`. Use `dry_run: true` to inspect the launch command, planned worktree, and planned MCP client config without starting a process. Use `isolation: "worktree"` for bead-level fan-out; Ciclo defaults the branch to `ciclo/<bead-id>` unless `worktree_branch` is set. When running inside Herdr, Ciclo uses fresh `herdr worktree create` workspaces and starts the local pane with the returned Herdr workspace id; outside Herdr, it uses `git worktree add`. Existing Herdr worktree paths fail instead of reopening stale workspace state. Use `configure_mcp: true` when the worker should receive Ciclo MCP config in its cwd or worktree before launch.
 
 For Claude Code sessions, `model` accepts `claude-fable-5` directly and normalizes `fable 5`, `Fable 5`, or `claude fable 5` to `claude-fable-5`. Other model ids remain pass-through so new Claude models can be used without a Ciclo release.
 
-Use `mcp_env` only for non-secret MCP server environment variables. When the generated Ciclo MCP server needs a secret, pass `mcp_secret_env` bindings with `env_name`, `provider_id`, `secret_ref`, optional `field`, optional `format`, and `reason`; Ciclo resolves them through configured secret providers for non-dry-run launches, applies `format` only after resolution, and redacts values from responses, audit records, events, board rows, and worker-session listings. Formats must contain exactly one `${secret}` placeholder, for example `Bearer ${secret}`.
+Use `mcp_env` only for non-secret MCP server environment variables. When the generated Ciclo MCP server needs a secret, pass `mcp_secret_env` bindings with `env_name`, `provider_id`, `secret_ref`, optional `field`, optional `format`, and `reason`; Ciclo writes a runtime wrapper around the generated Ciclo MCP server command, resolves the value only for that subprocess, and redacts values from responses, audit records, events, board rows, and worker-session listings. Formats must contain exactly one `${secret}` placeholder, for example `Bearer ${secret}`.
 
-Additional MCP servers are configured separately with `mcp_additional_servers` or project `mcp.additionalServers`. Raw environment values must be non-secret, but a value may include a Ciclo secret placeholder such as `Bearer ${secret://team-1password/Ciclo/API/token}`. The placeholder host is the configured provider id, the path is the provider secret reference, and `?field=token` or `#token` selects a field for providers such as OpenBao. Ciclo resolves these placeholders through the secret provider registry when it installs the MCP config for a launched session, then redacts install, launch, event, audit, board, and worker-listing output. If a third-party MCP server needs credentials, use one of these patterns:
+Use `worker_secret_env` when the launched Claude/Codex worker shell needs credentials for tools such as `gh`, `git`, or `curl`. These bindings use the same fields as `mcp_secret_env`, but Ciclo wraps the harness command itself so the worker process tree receives the variables. Do not use `mcp_secret_env` for shell credentials; those variables belong to the Ciclo MCP subprocess, not the agent shell.
+
+Additional MCP servers are configured separately with `mcp_additional_servers` or project `mcp.additionalServers`. Raw environment values must be non-secret, but a value may include a Ciclo secret placeholder such as `Bearer ${secret://team-1password/Ciclo/API/token}`. The placeholder host is the configured provider id, the path is the provider secret reference, and `?field=token` or `#token` selects a field for providers such as OpenBao. Ciclo wraps that additional server command with `ciclo secret exec`, so only that MCP server subprocess receives the resolved variable. If a third-party MCP server needs credentials, use one of these patterns:
 
 - Use a Ciclo placeholder in that server's `env` value when Ciclo should resolve the secret at session startup.
 - Configure the server with its own provider-native reference, such as a vault path or `op://` reference, when the server supports it.
@@ -159,12 +174,12 @@ Use [examples/ciclo-config.json](/Users/ztaylor/repos/workspaces/ciclo/examples/
 The config supports:
 
 - `secrets.providers`: OpenBao and 1Password provider ids, display names, and CLI commands.
-- `mcp`: default clients, server name, Ciclo command, non-secret `vars`, secret provider bindings, and Claude channel mode for generated MCP configs.
+- `mcp`: default clients, server name, Ciclo command, non-secret `vars`, secret provider bindings for Ciclo MCP server subprocesses, `workerSecretBindings` for spawned worker shells, and Claude channel mode for generated MCP configs.
 - `remote`: default runner kind, image, repository path, SSH user, WireGuard settings, provider-specific Kubernetes/AWS Lambda MicroVM/Cloudflare settings, and non-secret `vars`.
 
 Precedence is simple: inline CLI flags and MCP tool payload fields win for the current operation; `.ciclo/config.json` fills any omitted values; Ciclo's built-in defaults apply last. That means the shared config can define the normal Claude/Codex MCP setup, secret provider aliases, and remote runner defaults while a single launch can still override the model, worktree, remote runner kind, or provider-specific field.
 
-Use provider references in `mcp.secretBindings`; do not store raw secret values. Ciclo redacts secret references from `ciclo config show --compact`, launch responses, worker-session listings, audit records, events, and board rows. `vars` are only for non-secret strings. For secrets needed by the generated Ciclo MCP server, bind a `name` to a configured provider and reference; Ciclo resolves the value only for non-dry-run installs or launches that are authorized to read it. Add `format` only when the generated variable needs a prefix, suffix, or wrapper string. For additional MCP servers, keep raw environment values non-secret or use `${secret://provider-id/ref}` placeholders that Ciclo resolves when the generated MCP config is installed.
+Use provider references in `mcp.secretBindings` and `mcp.workerSecretBindings`; do not store raw secret values. Ciclo redacts secret references from `ciclo config show --compact`, launch responses, worker-session listings, audit records, events, and board rows. `vars` are only for non-secret strings. For secrets needed by the generated Ciclo MCP server, bind a `name` to a configured provider and reference under `secretBindings`; for secrets needed by the launched agent shell, use `workerSecretBindings`. Ciclo writes runtime wrappers that resolve the value only when the intended process starts. Add `format` only when the generated variable needs a prefix, suffix, or wrapper string. For additional MCP servers, keep raw environment values non-secret or use `${secret://provider-id/ref}` placeholders that Ciclo turns into runtime wrappers.
 
 The same file is read in four places:
 
@@ -190,6 +205,14 @@ Example launch payload:
       "provider_id": "onepassword",
       "secret_ref": "op://Ciclo/API/token",
       "reason": "worker MCP server needs the API token"
+    }
+  ],
+  "worker_secret_env": [
+    {
+      "env_name": "GITHUB_TOKEN",
+      "provider_id": "onepassword",
+      "secret_ref": "op://Ciclo/GitHub/token",
+      "reason": "worker shell needs gh access"
     }
   ],
   "prompt": "Use Ciclo MCP as the control plane. Claim scoped work, report progress, ask questions through Ciclo, and record validation evidence before close.",

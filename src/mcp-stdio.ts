@@ -57,6 +57,7 @@ import { GitHubCliRepoBoardProvider, type RepoBoardProvider, type RepoBoardStatu
 import {
   createDefaultSecretProviderRegistry,
   SecretProviderRegistry,
+  secretRefHash,
   type SecretProviderResult
 } from "./secret-provider.js";
 import {
@@ -74,6 +75,7 @@ import {
 import { CICLO_VERSION } from "./version.js";
 import {
   configMcpSecretBindingParams,
+  configWorkerSecretBindingParams,
   createSecretProviderRegistryFromConfig,
   loadCicloProjectConfig,
   mergeRemoteRunnerLaunchWithConfig,
@@ -370,6 +372,13 @@ function mcpSecretEnvRequests(params: unknown): readonly McpSecretEnvRequest[] {
   });
 }
 
+function workerSecretEnvRequests(params: unknown): readonly McpSecretEnvRequest[] {
+  const input = asRecord(params).worker_secret_env;
+  if (input === undefined) return [];
+  if (!Array.isArray(input)) throw new Error("worker_secret_env must be an array");
+  return mcpSecretEnvRequests({ mcp_secret_env: input });
+}
+
 function worktreeParam(params: unknown):
   | { readonly create: boolean; readonly path?: string; readonly branch?: string; readonly base?: string; readonly force?: boolean }
   | undefined {
@@ -577,7 +586,6 @@ async function resolveMcpSecretEnvBindings(input: {
   ];
   if (requests.length === 0) return [];
 
-  const registry = input.runtime.secretProviderRegistry ?? createDefaultSecretProviderRegistry();
   const resolved: CicloMcpSecretEnvBinding[] = [];
   for (const request of requests) {
     const accessRequest = {
@@ -591,24 +599,17 @@ async function resolveMcpSecretEnvBindings(input: {
       throw new Error(`access denied for MCP secret env ${request.name}: ${authorization.reason}`);
     }
 
-    const result = await registry.resolve({
-      providerId: request.providerId,
-      secretRef: request.secretRef,
-      field: request.field,
-      loopId: input.loopId,
-      beadId: input.beadId,
-      workerSessionId: input.workerSessionId,
-      principalId: authorization.principalId,
-      reason: request.reason ?? `provide ${request.name} to configured MCP server`,
-      dryRun: input.dryRun
-    });
     auditMutation({
       runtime: input.runtime,
       tool: "ciclo_launch_worker_session.mcp_secret_env",
       action: "request_secret",
       authorization,
-      reason: result.reason,
-      evidence: result.evidence
+      reason: request.reason ?? `provide ${request.name} to configured MCP server`,
+      evidence: [
+        `secret.provider:${request.providerId}`,
+        `secret.ref_hash:${secretRefHash(request.secretRef)}`,
+        "mcp.secret_env:runtime_exec"
+      ]
     });
     appendRuntimeEvent(input.runtime, {
       type: "secret.requested",
@@ -616,37 +617,115 @@ async function resolveMcpSecretEnvBindings(input: {
       beadId: input.beadId,
       workerSessionId: input.workerSessionId,
       evidence: [
-        ...result.evidence,
+        `secret.provider:${request.providerId}`,
+        `secret.ref_hash:${secretRefHash(request.secretRef)}`,
+        "mcp.secret_env:runtime_exec",
         ...(request.format === undefined ? [] : ["mcp.secret_env.format:applied"])
       ],
       data: {
-        provider_id: result.providerId,
-        provider_kind: result.providerKind,
-        secret_ref_hash: result.secretRefHash,
-        field: result.field,
+        provider_id: request.providerId,
+        provider_kind: "runtime",
+        secret_ref_hash: secretRefHash(request.secretRef),
+        field: request.field,
         env_name: request.name,
         target: "mcp_env",
         format_applied: request.format !== undefined,
-        resolved: result.resolved
+        resolved: false,
+        delivery: "runtime_exec"
       }
     });
 
-    if (!input.dryRun && (!result.resolved || result.value === undefined)) {
-      throw new Error(`MCP secret env ${request.name} was not resolved: ${result.reason}`);
-    }
     resolved.push({
       name: request.name,
-      value: input.dryRun ? undefined : result.value,
-      providerId: result.providerId,
-      providerKind: result.providerKind,
-      secretRefHash: result.secretRefHash,
-      field: result.field,
+      providerId: request.providerId,
+      secretRef: request.secretRef,
+      providerKind: "runtime",
+      secretRefHash: secretRefHash(request.secretRef),
+      field: request.field,
       format: request.format,
       evidence: [
-        ...result.evidence,
+        `secret.provider:${request.providerId}`,
+        `secret.ref_hash:${secretRefHash(request.secretRef)}`,
         `mcp.secret_env:${request.name}`,
         ...(request.format === undefined ? [] : ["mcp.secret_env.format:applied"]),
-        input.dryRun ? "mcp.secret_env:dry_run" : "mcp.secret_env:resolved"
+        "mcp.secret_env:runtime_exec"
+      ]
+    });
+  }
+  return resolved;
+}
+
+async function resolveWorkerSecretEnvBindings(input: {
+  readonly params: unknown;
+  readonly runtime: CicloMcpRuntimeContext;
+  readonly loopId?: string;
+  readonly beadId?: string;
+  readonly workerSessionId?: string;
+}): Promise<readonly CicloMcpSecretEnvBinding[]> {
+  const requests = [
+    ...workerSecretEnvRequests({ worker_secret_env: configWorkerSecretBindingParams(input.runtime.projectConfig ?? {}) }),
+    ...workerSecretEnvRequests(input.params)
+  ];
+  if (requests.length === 0) return [];
+
+  const resolved: CicloMcpSecretEnvBinding[] = [];
+  for (const request of requests) {
+    const accessRequest = {
+      action: "request_secret" as const,
+      scope: { loopId: input.loopId, beadId: input.beadId },
+      allowUnauthenticated: false
+    };
+    const authorization = authorizeClientRequest(input.runtime.auth, accessRequest);
+    input.runtime.accessAuditLog?.push(buildAuthorizationAuditRecord(input.runtime.auth, accessRequest, authorization));
+    if (authorization.decision === "deny") {
+      throw new Error(`access denied for worker secret env ${request.name}: ${authorization.reason}`);
+    }
+    const evidence = [
+      `secret.provider:${request.providerId}`,
+      `secret.ref_hash:${secretRefHash(request.secretRef)}`,
+      "worker.secret_env:runtime_exec",
+      ...(request.format === undefined ? [] : ["worker.secret_env.format:applied"])
+    ];
+    auditMutation({
+      runtime: input.runtime,
+      tool: "ciclo_launch_worker_session.worker_secret_env",
+      action: "request_secret",
+      authorization,
+      reason: request.reason ?? `provide ${request.name} to worker process`,
+      evidence
+    });
+    appendRuntimeEvent(input.runtime, {
+      type: "secret.requested",
+      loopId: input.loopId,
+      beadId: input.beadId,
+      workerSessionId: input.workerSessionId,
+      evidence,
+      data: {
+        provider_id: request.providerId,
+        provider_kind: "runtime",
+        secret_ref_hash: secretRefHash(request.secretRef),
+        field: request.field,
+        env_name: request.name,
+        target: "worker_process_env",
+        format_applied: request.format !== undefined,
+        resolved: false,
+        delivery: "runtime_exec"
+      }
+    });
+    resolved.push({
+      name: request.name,
+      providerId: request.providerId,
+      secretRef: request.secretRef,
+      providerKind: "runtime",
+      secretRefHash: secretRefHash(request.secretRef),
+      field: request.field,
+      format: request.format,
+      evidence: [
+        `secret.provider:${request.providerId}`,
+        `secret.ref_hash:${secretRefHash(request.secretRef)}`,
+        `worker.secret_env:${request.name}`,
+        ...(request.format === undefined ? [] : ["worker.secret_env.format:applied"]),
+        "worker.secret_env:runtime_exec"
       ]
     });
   }
@@ -1736,6 +1815,12 @@ async function callTool(
       beadId,
       dryRun
     });
+    const workerSecretEnv = await resolveWorkerSecretEnvBindings({
+      params,
+      runtime,
+      loopId,
+      beadId
+    });
     const mergedLaunch = mergeWorkerLaunchWithConfig({
       harnessId: workerHarnessParam(stringParam(params, "harness_id")),
       loopId,
@@ -1759,6 +1844,7 @@ async function callTool(
       mcpEnv: mcpEnvParam(params),
       mcpAdditionalServers: mcpAdditionalServersParam(params),
       mcpSecretEnv,
+      workerSecretEnv,
       mcpClaudeChannel: optionalBooleanParam(params, "mcp_claude_channel")
     }, runtime.projectConfig ?? {});
     const additionalServerSecrets = await resolveAdditionalMcpServerSecretEnv({
@@ -1791,6 +1877,7 @@ async function callTool(
       cwd: result.cwd,
       worktree: result.worktree,
       mcp_config: publicMcpConfig(result.mcpConfig),
+      worker_secret_env: result.workerSecretEnv,
       pid: result.pid,
       session_name: result.sessionName,
       launch_mode: result.launchMode,

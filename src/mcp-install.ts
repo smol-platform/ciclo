@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import type { CicloMcpAdditionalServerSecretEnvInstall } from "./mcp-secret-placeholders.js";
+import { secretExecArgs, type RuntimeSecretEnvBinding } from "./secret-env-runtime.js";
 
 export type CicloMcpInstallClient = "claude" | "codex";
 
@@ -17,6 +18,7 @@ export interface CicloMcpSecretEnvBinding {
   readonly name: string;
   readonly value?: string;
   readonly providerId: string;
+  readonly secretRef?: string;
   readonly providerKind: string;
   readonly secretRefHash: string;
   readonly field?: string;
@@ -124,24 +126,20 @@ function assertSecretEnvFormat(name: string, format: string | undefined): void {
   }
 }
 
-function formattedSecretEnvValue(name: string, value: string, format: string | undefined): string {
-  assertSecretEnvFormat(name, format);
-  return format === undefined ? value : format.replace("${secret}", value);
-}
-
-function secretEnvValues(secretEnv: readonly CicloMcpSecretEnvBinding[], dryRun: boolean): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const binding of secretEnv) {
-    assertEnvName(binding.name);
-    assertSecretEnvFormat(binding.name, binding.format);
-    if (binding.value === undefined) {
-      if (!dryRun) throw new Error(`MCP secret env ${binding.name} was not resolved`);
-      env[binding.name] = "[ciclo secret unresolved]";
-    } else {
-      env[binding.name] = formattedSecretEnvValue(binding.name, binding.value, binding.format);
+function runtimeSecretEnvBindings(secretEnv: readonly CicloMcpSecretEnvBinding[]): readonly RuntimeSecretEnvBinding[] {
+  return secretEnv.map((binding) => {
+    if (binding.secretRef === undefined) {
+      throw new Error(`MCP secret env ${binding.name} requires a provider secret reference for runtime-scoped delivery`);
     }
-  }
-  return env;
+    return {
+      name: binding.name,
+      providerId: binding.providerId,
+      secretRef: binding.secretRef,
+      ...(binding.field === undefined ? {} : { field: binding.field }),
+      ...(binding.format === undefined ? {} : { format: binding.format }),
+      reason: `provide ${binding.name} to configured MCP server`
+    };
+  });
 }
 
 function extraEnvValues(env: Record<string, string> | undefined): Record<string, string> {
@@ -202,16 +200,21 @@ function serverConfig(
   command: string,
   claudeChannel: boolean,
   env: Record<string, string> | undefined,
-  secretEnv: readonly CicloMcpSecretEnvBinding[],
-  dryRun: boolean
+  secretEnv: readonly CicloMcpSecretEnvBinding[]
 ): CicloMcpServerConfig {
+  for (const binding of secretEnv) {
+    assertEnvName(binding.name);
+    assertSecretEnvFormat(binding.name, binding.format);
+  }
+  const args = secretEnv.length === 0
+    ? ["mcp", "stdio"]
+    : secretExecArgs(runtimeSecretEnvBindings(secretEnv), command, ["mcp", "stdio"]);
   return {
     command,
-    args: ["mcp", "stdio"],
+    args,
     env: {
       CICLO_PROJECT_ROOT: projectRoot,
       ...extraEnvValues(env),
-      ...secretEnvValues(secretEnv, dryRun),
       ...(claudeChannel ? { CICLO_CLAUDE_CHANNEL: "true" } : {})
     }
   };
@@ -336,7 +339,7 @@ export function installCicloMcp(options: CicloMcpInstallOptions = {}): CicloMcpI
   if (claudeChannelEnabled && !clients.includes("claude")) {
     throw new Error("--claude-channel requires --client claude or --client all");
   }
-  const config = serverConfig(projectRoot, command, claudeChannelEnabled, options.env, secretEnv, dryRun);
+  const config = serverConfig(projectRoot, command, claudeChannelEnabled, options.env, secretEnv);
   const redactedConfig = redactSecretEnv(config, secretEnv);
   const claudeChannel: CicloClaudeChannelInstall | undefined = claudeChannelEnabled
     ? {

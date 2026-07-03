@@ -1,5 +1,7 @@
 import type { CicloMcpAdditionalServerConfig } from "./mcp-install.js";
+import { secretExecArgs, type RuntimeSecretEnvBinding } from "./secret-env-runtime.js";
 import type { SecretProviderResult } from "./secret-provider.js";
+import { secretRefHash } from "./secret-provider.js";
 
 export interface McpSecretPlaceholderRequest {
   readonly providerId: string;
@@ -15,6 +17,7 @@ export interface CicloMcpAdditionalServerSecretEnvInstall {
   readonly providerKind: string;
   readonly secretRefHash: string;
   readonly field?: string;
+  readonly formatApplied?: boolean;
   readonly evidence: readonly string[];
 }
 
@@ -85,36 +88,48 @@ export async function resolveMcpAdditionalServerSecretPlaceholders(input: {
   const secretEnv: CicloMcpAdditionalServerSecretEnvInstall[] = [];
   for (const [serverName, server] of Object.entries(servers)) {
     const env: Record<string, string> = {};
+    const runtimeBindings: RuntimeSecretEnvBinding[] = [];
     for (const [envName, value] of Object.entries(server.env ?? {})) {
-      let resolvedValue = value;
-      for (const uri of placeholderUris(value)) {
+      const uris = placeholderUris(value);
+      if (uris.length > 1) throw new Error(`MCP secret placeholder for ${serverName}.${envName} supports one secret per environment value`);
+      if (uris.length === 0) {
+        env[envName] = value;
+        continue;
+      }
+      for (const uri of uris) {
         const request = parseSecretPlaceholder(uri, serverName, envName);
-        const result = await input.resolveSecret(request);
-        if (!input.dryRun && (!result.resolved || result.value === undefined)) {
-          throw new Error(`MCP additional server secret ${serverName}.${envName} was not resolved: ${result.reason}`);
-        }
-        const replacement = input.dryRun ? "[ciclo secret unresolved]" : result.value ?? "";
-        resolvedValue = resolvedValue.replace(`\${${uri}}`, replacement);
+        const format = value.replace(`\${${uri}}`, "${secret}");
+        runtimeBindings.push({
+          name: envName,
+          providerId: request.providerId,
+          secretRef: request.secretRef,
+          field: request.field,
+          format,
+          reason: request.reason
+        });
         secretEnv.push({
           serverName,
           envName,
-          providerId: result.providerId,
-          providerKind: result.providerKind,
-          secretRefHash: result.secretRefHash,
-          field: result.field,
+          providerId: request.providerId,
+          providerKind: "runtime",
+          secretRefHash: secretRefHash(request.secretRef),
+          field: request.field,
+          formatApplied: format !== "${secret}",
           evidence: [
-            ...result.evidence,
+            `secret.provider:${request.providerId}`,
+            `secret.ref_hash:${secretRefHash(request.secretRef)}`,
             `mcp.additional_server:${serverName}`,
             `mcp.additional_server.env:${envName}`,
-            input.dryRun ? "mcp.additional_server.secret:dry_run" : "mcp.additional_server.secret:resolved"
+            "mcp.additional_server.secret:runtime_exec"
           ]
         });
       }
-      env[envName] = resolvedValue;
     }
+    const command = runtimeBindings.length === 0 ? server.command : "ciclo";
+    const args = runtimeBindings.length === 0 ? [...(server.args ?? [])] : secretExecArgs(runtimeBindings, server.command, server.args ?? []);
     resolvedServers[serverName] = {
-      command: server.command,
-      args: [...(server.args ?? [])],
+      command,
+      args,
       env
     };
   }

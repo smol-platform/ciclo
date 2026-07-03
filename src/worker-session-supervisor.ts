@@ -20,6 +20,7 @@ import {
 } from "./mcp-install.js";
 import type { CicloMcpAdditionalServerSecretEnvInstall } from "./mcp-secret-placeholders.js";
 import { activeHerdrSessionName, repoSessionName } from "./repo-session-name.js";
+import { secretExecArgs, type RuntimeSecretEnvBinding } from "./secret-env-runtime.js";
 
 export type WorkerHarnessId = Extract<HarnessId, "claude-code" | "codex">;
 
@@ -58,6 +59,7 @@ export interface WorkerSessionLaunchRequest {
   readonly mcpAdditionalServers?: Record<string, CicloMcpAdditionalServerConfig>;
   readonly mcpAdditionalServerSecretEnv?: readonly CicloMcpAdditionalServerSecretEnvInstall[];
   readonly mcpSecretEnv?: readonly CicloMcpSecretEnvBinding[];
+  readonly workerSecretEnv?: readonly CicloMcpSecretEnvBinding[];
   readonly mcpClaudeChannel?: boolean;
 }
 
@@ -91,6 +93,7 @@ export interface WorkerLaunchPlan {
   readonly effort?: string;
   readonly worktree?: WorkerWorktreePlan;
   readonly mcpConfig?: WorkerMcpConfigPlan;
+  readonly workerSecretEnv?: WorkerSecretEnvPlan;
   readonly loopId: string;
   readonly beadId?: string;
   readonly sessionName: string;
@@ -116,6 +119,12 @@ export interface WorkerMcpConfigPlan {
   readonly secretEnvBindings: readonly CicloMcpSecretEnvBinding[];
   readonly claudeChannel?: boolean;
   readonly install: CicloMcpInstallResult;
+  readonly evidence: readonly string[];
+}
+
+export interface WorkerSecretEnvPlan {
+  readonly envNames: readonly string[];
+  readonly bindings: readonly CicloMcpSecretEnvInstall[];
   readonly evidence: readonly string[];
 }
 
@@ -167,6 +176,7 @@ export interface WorkerSessionRecord {
   readonly effort?: string;
   readonly worktree?: WorkerWorktreePlan;
   readonly mcpConfig?: WorkerMcpConfigPlan;
+  readonly workerSecretEnv?: WorkerSecretEnvPlan;
   readonly sessionName: string;
   readonly trackingMode: WorkerTrackingMode;
   readonly launchMode: WorkerLaunchMode;
@@ -381,6 +391,44 @@ function paneWorkerArgs(input: WorkerSessionLaunchRequest, cwd: string, name: st
   return input.harnessId === "codex" ? codexArgs(input, cwd, extraArgs) : claudePaneArgs(input, name, extraArgs);
 }
 
+function runtimeSecretBindings(secretEnv: readonly CicloMcpSecretEnvBinding[] | undefined, target: string): readonly RuntimeSecretEnvBinding[] {
+  return (secretEnv ?? []).map((binding) => {
+    if (binding.secretRef === undefined) {
+      throw new Error(`${target} secret env ${binding.name} requires a provider secret reference for runtime-scoped delivery`);
+    }
+    return {
+      name: binding.name,
+      providerId: binding.providerId,
+      secretRef: binding.secretRef,
+      ...(binding.field === undefined ? {} : { field: binding.field }),
+      ...(binding.format === undefined ? {} : { format: binding.format }),
+      reason: `provide ${binding.name} to ${target} process`
+    };
+  });
+}
+
+function workerSecretEnvPlan(input: WorkerSessionLaunchRequest): WorkerSecretEnvPlan | undefined {
+  const bindings = input.workerSecretEnv ?? [];
+  if (bindings.length === 0) return undefined;
+  return {
+    envNames: bindings.map((binding) => binding.name),
+    bindings: bindings.map((binding) => ({
+      name: binding.name,
+      providerId: binding.providerId,
+      providerKind: binding.providerKind,
+      secretRefHash: binding.secretRefHash,
+      field: binding.field,
+      ...(binding.format === undefined ? {} : { formatApplied: true }),
+      evidence: binding.evidence
+    })),
+    evidence: [
+      "worker.secret_env:runtime_exec",
+      `worker.secret_env.count:${bindings.length}`,
+      `worker.secret_env.names:${bindings.map((binding) => binding.name).join(",")}`
+    ]
+  };
+}
+
 function mcpClientsForHarness(input: WorkerSessionLaunchRequest): readonly CicloMcpInstallClient[] {
   if (input.mcpClients !== undefined && input.mcpClients.length > 0) return [...new Set(input.mcpClients)];
   return input.harnessId === "codex" ? ["codex"] : ["claude"];
@@ -526,13 +574,17 @@ export function buildWorkerLaunchPlan(
   const cwd = worktree?.path ?? requestedCwd;
   const extraArgs = cleanArgs(input.extraArgs);
   const mcpConfig = mcpConfigPlan(launchInput, cwd);
+  const secretEnv = workerSecretEnvPlan(launchInput);
   const herdrSession = herdrPaneLaunchEnabled(launchInput);
   const localLaunchMode = launchMode(herdrSession);
   const mode = localLaunchMode === "herdr_pane" ? "herdr_agent" : directTrackingMode(launchInput);
-  const underlyingCommand = workerCommand(launchInput);
-  const underlyingArgs = localLaunchMode === "herdr_pane"
+  const harnessCommand = workerCommand(launchInput);
+  const harnessArgs = localLaunchMode === "herdr_pane"
     ? paneWorkerArgs(launchInput, cwd, name, extraArgs)
     : directWorkerArgs(launchInput, cwd, name, extraArgs);
+  const workerRuntimeSecrets = runtimeSecretBindings(launchInput.workerSecretEnv, "worker");
+  const underlyingCommand = workerRuntimeSecrets.length === 0 ? harnessCommand : "ciclo";
+  const underlyingArgs = workerRuntimeSecrets.length === 0 ? harnessArgs : secretExecArgs(workerRuntimeSecrets, harnessCommand, harnessArgs);
   const command = localLaunchMode === "herdr_pane" ? "herdr" : underlyingCommand;
   const args = localLaunchMode === "herdr_pane"
     ? herdrPaneArgs(herdrSession!, name, cwd, underlyingCommand, underlyingArgs)
@@ -548,6 +600,7 @@ export function buildWorkerLaunchPlan(
     effort: clean(input.effort),
     ...(worktree === undefined ? {} : { worktree }),
     ...(mcpConfig === undefined ? {} : { mcpConfig }),
+    ...(secretEnv === undefined ? {} : { workerSecretEnv: secretEnv }),
     loopId: input.loopId,
     beadId: clean(input.beadId),
     sessionName: name,
@@ -575,6 +628,7 @@ export function buildWorkerLaunchPlan(
             `worker.worktree.force:${worktree.force}`
           ]),
       ...(mcpConfig === undefined ? [] : mcpConfig.evidence),
+      ...(secretEnv === undefined ? [] : secretEnv.evidence),
       input.dryRun === true ? "worker.session.dry_run:true" : "worker.session.dry_run:false"
     ]
   };
@@ -646,16 +700,16 @@ function prepareHerdrWorktree(plan: WorkerLaunchPlan, root: string, runner: Work
   const worktree = plan.worktree;
   if (worktree === undefined) return { evidence: [] };
   const session = plan.agentRef?.herdrSession;
-  const mode = existsSync(worktree.path) ? "open" : "create";
-  if (mode === "create") mkdirSync(dirname(worktree.path), { recursive: true });
+  const mode = "create";
+  mkdirSync(dirname(worktree.path), { recursive: true });
   const args = [
     ...(session === undefined ? [] : ["--session", session]),
     "worktree",
     mode,
     "--cwd",
     root,
-    ...(mode === "create" && worktree.branch !== undefined ? ["--branch", worktree.branch] : []),
-    ...(mode === "create" && worktree.base !== undefined ? ["--base", worktree.base] : []),
+    ...(worktree.branch !== undefined ? ["--branch", worktree.branch] : []),
+    ...(worktree.base !== undefined ? ["--base", worktree.base] : []),
     "--path",
     worktree.path,
     "--label",

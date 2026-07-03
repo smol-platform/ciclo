@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -358,6 +358,43 @@ test("Herdr pane worktree launches use Herdr worktree workspace support", () => 
     assert.ok(!launcher.launches[0]?.args.includes("--cwd"));
     assert.ok(running.evidence.includes("worker.worktree:herdr_create"));
     assert.ok(running.evidence.includes("worker.worktree.herdr_workspace:workspace-123"));
+  });
+});
+
+test("Herdr pane worktree launches always create a fresh workspace", () => {
+  withHerdrSessionEnv("operator-main", () => {
+    const root = mkdtempSync(join(tmpdir(), "ciclo-herdr-fresh-root-"));
+    const worktreePath = join(tmpdir(), `ciclo-herdr-existing-${Date.now()}`);
+    mkdirSync(worktreePath, { recursive: true });
+    const launcher = new FakeLauncher();
+    const commandRunner = new FakeCommandRunner();
+    const supervisor = new WorkerSessionSupervisor(
+      root,
+      launcher,
+      { now: () => "2026-06-30T00:00:00.000Z" },
+      undefined,
+      undefined,
+      commandRunner
+    );
+
+    const running = supervisor.launch({
+      harnessId: "codex",
+      loopId: "review-loop",
+      beadId: "ciclo-9l0",
+      prompt: "Work through Ciclo.",
+      isolation: "worktree",
+      worktree: {
+        path: worktreePath,
+        branch: "ciclo/ciclo-9l0"
+      }
+    });
+
+    assert.equal(running.state, "running");
+    assert.equal(commandRunner.runs[0]?.command, "herdr");
+    assert.equal(commandRunner.runs[0]?.args[2], "worktree");
+    assert.equal(commandRunner.runs[0]?.args[3], "create");
+    assert.ok(!commandRunner.runs[0]?.args.includes("open"));
+    assert.ok(running.evidence.includes("worker.worktree:herdr_create"));
   });
 });
 

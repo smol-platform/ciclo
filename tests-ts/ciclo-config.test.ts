@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   createSecretProviderRegistryFromConfig,
   configMcpSecretEnvBindings,
+  configWorkerSecretEnvBindings,
   loadCicloProjectConfig,
   mergeMcpInstallOptionsWithConfig,
   mergeRemoteRunnerLaunchWithConfig,
@@ -146,6 +147,9 @@ test("config merges into MCP install worker and remote requests", () => {
         { name: "GITHUB_TOKEN", providerId: "onepassword", ref: "op://Engineering/GitHub Token/token" },
         { name: "GITHUB_AUTHORIZATION", providerId: "onepassword", ref: "op://Engineering/GitHub Token/token", format: "Bearer ${secret}" }
       ],
+      workerSecretBindings: [
+        { name: "GRAFANA_URL", providerId: "onepassword", ref: "op://Engineering/Grafana/url" }
+      ],
       additionalServers: {
         filesystem: {
           command: "npx",
@@ -185,6 +189,8 @@ test("config merges into MCP install worker and remote requests", () => {
   assert.equal(worker.mcpEnv?.CICLO_REUSE_HERDR_SESSION, "true");
   assert.equal(worker.mcpAdditionalServers?.filesystem?.["env"].MCP_FS_MODE, "config");
   assert.deepEqual(worker.mcpSecretEnv?.map((binding) => binding.name), ["GITHUB_TOKEN", "GITHUB_AUTHORIZATION"]);
+  assert.deepEqual(worker.workerSecretEnv?.map((binding) => binding.name), ["GRAFANA_URL"]);
+  assert.equal(worker.workerSecretEnv?.[0]?.secretRefHash, secretRefHash("op://Engineering/Grafana/url"));
 
   const remote = mergeRemoteRunnerLaunchWithConfig({
     runnerKind: "",
@@ -245,6 +251,29 @@ test("config MCP secret env bindings resolve through a registry without leaking 
   assert.doesNotMatch(JSON.stringify(resolved), /op:\/\/Engineering\/GitHub Token\/token/u);
 });
 
+test("config worker secret env bindings are runtime references", () => {
+  const config = parseCicloProjectConfigText(JSON.stringify({
+    mcp: {
+      workerSecretBindings: [
+        {
+          name: "GITHUB_TOKEN",
+          providerId: "fixture",
+          ref: "op://Engineering/GitHub Token/token",
+          reason: "worker shell needs gh"
+        }
+      ]
+    }
+  }));
+  const workerSecrets = configWorkerSecretEnvBindings(config);
+  assert.equal(workerSecrets[0]?.name, "GITHUB_TOKEN");
+  assert.equal(workerSecrets[0]?.value, undefined);
+  assert.equal(workerSecrets[0]?.secretRefHash, secretRefHash("op://Engineering/GitHub Token/token"));
+  assert.ok(workerSecrets[0]?.evidence.includes("worker.secret_env:configured"));
+
+  const redacted = JSON.stringify(redactedCicloProjectConfig(config));
+  assert.doesNotMatch(redacted, /op:\/\/Engineering\/GitHub Token\/token/u);
+});
+
 test("loads .ciclo config from a project root", () => {
   const root = mkdtempSync(join(tmpdir(), "ciclo-config-load-"));
   try {
@@ -270,6 +299,7 @@ test("checked-in example config parses and redacts secret references", () => {
   assert.equal(config.mcp?.secretBindings?.[2]?.providerId, "team-keychain");
   assert.equal(config.mcp?.secretBindings?.[2]?.ref, "keychain://ciclo/example-api-token");
   assert.equal(config.mcp?.secretBindings?.[2]?.format, "Bearer ${secret}");
+  assert.equal(config.mcp?.workerSecretBindings?.[0]?.name, "GITHUB_TOKEN");
   assert.equal(config.remote?.runnerKind, "kubernetes");
   assert.equal(config.remote?.wireGuard?.interfaceName, "wg-ciclo");
   assert.equal(config.remote?.awsLambda?.microVmName, "ciclo-project-runner");
@@ -277,6 +307,7 @@ test("checked-in example config parses and redacts secret references", () => {
 
   const redacted = JSON.stringify(redactedCicloProjectConfig(config));
   assert.doesNotMatch(redacted, /op:\/\/Ciclo\/API\/token/);
+  assert.doesNotMatch(redacted, /op:\/\/Ciclo\/GitHub\/token/);
   assert.doesNotMatch(redacted, /secret\/data\/ciclo\/mcp/);
   assert.doesNotMatch(redacted, /keychain:\/\/ciclo\/example-api-token/);
 });

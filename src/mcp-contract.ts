@@ -580,6 +580,11 @@ export const cicloMcpTools: readonly McpToolContract[] = [
         items: { type: "object" },
         description: "Secret-backed MCP server environment bindings. Each item accepts env_name, provider_id, secret_ref, optional field, optional format with exactly one ${secret} placeholder, and optional reason."
       },
+      worker_secret_env: {
+        type: "array",
+        items: { type: "object" },
+        description: "Secret-backed worker process environment bindings for shell tools inside the launched Claude/Codex session. Each item accepts env_name, provider_id, secret_ref, optional field, optional format with exactly one ${secret} placeholder, and optional reason. Values are resolved by a runtime wrapper, not written to generated MCP config."
+      },
       mcp_claude_channel: booleanSchema("Enable Claude channel capability in the generated MCP config.")
     }, ["harness_id", "loop_id", "prompt"]),
     outputSchema: objectSchema("Worker session launch result.", {
@@ -604,6 +609,11 @@ export const cicloMcpTools: readonly McpToolContract[] = [
         serverName: stringSchema("Installed MCP server name."),
         command: stringSchema("Installed Ciclo command."),
         install: { type: "object" }
+      }),
+      worker_secret_env: objectSchema("Redacted worker process secret env plan.", {
+        envNames: arrayOfStrings("Environment variable names that will be set in the worker process."),
+        bindings: { type: "array", items: { type: "object" } },
+        evidence: arrayOfStrings("Redacted runtime secret delivery evidence.")
       }),
       pid: { type: "number", description: "Process id when launched." },
       evidence: arrayOfStrings("Launch evidence.")

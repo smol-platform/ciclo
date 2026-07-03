@@ -198,7 +198,7 @@ test("loads the required worker-session benchmark scenarios", () => {
   const secretEnv = loadBenchmarkScenarioFile(`${fixtureDir}/worker_mcp_secret_env_launch.json`);
   assert.equal(secretEnv.mcpCalls[0]?.tool, "ciclo_launch_worker_session");
   assert.equal(Array.isArray(secretEnv.mcpCalls[0]?.arguments.mcp_secret_env), true);
-  assert.ok(secretEnv.expected.requiredActions.includes("resolve_mcp_secret_env"));
+  assert.ok(secretEnv.expected.requiredActions.includes("configure_runtime_secret_exec"));
   assert.ok(secretEnv.expected.requiredActions.includes("redact_secret_env_outputs"));
 
   const cleanup = loadBenchmarkScenarioFile(`${fixtureDir}/worker_stop_completed_claude_session.json`);

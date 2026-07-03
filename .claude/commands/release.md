@@ -1,0 +1,3 @@
+Use the release skill to cut and publish a GitHub release.
+
+If the user supplied arguments after `/release`, treat them as the requested tag, prerelease/draft flags, or release-note instructions. Follow the release skill exactly: update local state from remote, require a clean worktree, run the release gate, create a new annotated tag, publish the branch and tag to origin, create the GitHub release with `gh release create`, verify it with `gh release view`, and report the release URL.

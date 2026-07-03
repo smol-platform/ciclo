@@ -150,7 +150,7 @@ test("installs Claude MCP config with optional channel mode", () => {
   }
 });
 
-test("installs MCP secret environment values while redacting install results", () => {
+test("installs MCP secret environment through runtime wrapper while redacting install results", () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "ciclo-mcp-secret-env-"));
   try {
     const result = installCicloMcp({
@@ -162,6 +162,7 @@ test("installs MCP secret environment values while redacting install results", (
           value: "fixture-secret",
           providerId: "fixture",
           providerKind: "test",
+          secretRef: "op://Fixture/API/token",
           secretRefHash: "abc123",
           format: "Bearer ${secret}",
           evidence: ["secret.fixture"]
@@ -175,9 +176,12 @@ test("installs MCP secret environment values while redacting install results", (
     assert.doesNotMatch(JSON.stringify(result), /fixture-secret/u);
 
     const config = JSON.parse(readFileSync(join(projectRoot, ".mcp.json"), "utf8")) as {
-      mcpServers?: Record<string, { readonly ["env"]?: Record<string, string> }>;
+      mcpServers?: Record<string, { readonly args?: readonly string[]; readonly ["env"]?: Record<string, string> }>;
     };
-    assert.equal(config.mcpServers?.ciclo?.["env"]?.API_TOKEN, "Bearer fixture-secret");
+    assert.deepEqual(config.mcpServers?.ciclo?.["env"], { CICLO_PROJECT_ROOT: projectRoot });
+    assert.deepEqual(config.mcpServers?.ciclo?.args?.slice(0, 3), ["secret", "exec", "--binding"]);
+    assert.ok(config.mcpServers?.ciclo?.args?.includes("mcp"));
+    assert.doesNotMatch(JSON.stringify(config), /fixture-secret/u);
   } finally {
     rmSync(projectRoot, { recursive: true, force: true });
   }
@@ -196,6 +200,7 @@ test("rejects MCP secret environment formats without exactly one secret placehol
             value: "fixture-secret",
             providerId: "fixture",
             providerKind: "test",
+            secretRef: "op://Fixture/API/token",
             secretRefHash: "abc123",
             format: "Bearer token",
             evidence: ["secret.fixture"]

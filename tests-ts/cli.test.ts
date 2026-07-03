@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -11,11 +11,13 @@ import {
   parseAttachOptions,
   parseBenchmarkOptions,
   parseBenchmarkScenarioDir,
+  parseLaunchOptions,
   parseMcpHttpOptions,
   parseMcpInstallOptions,
   parseSkillInstallOptions,
   type CliIo
 } from "../src/cli.js";
+import { encodeRuntimeSecretEnvBindings } from "../src/secret-env-runtime.js";
 import { CICLO_VERSION } from "../src/version.js";
 
 function captureIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
@@ -36,6 +38,7 @@ test("CLI prints top-level help and version", async () => {
   assert.equal(await main(["node", "ciclo", "--help"], help.io), 0);
   assert.match(help.stdout.join("\n"), /Usage: ciclo <command>/);
   assert.match(help.stdout.join("\n"), /attach/);
+  assert.match(help.stdout.join("\n"), /launch/);
   assert.match(help.stdout.join("\n"), /mcp http/);
   assert.match(help.stdout.join("\n"), /mcp install/);
   assert.match(help.stdout.join("\n"), /skill install/);
@@ -200,6 +203,236 @@ test("CLI config commands initialize and mcp install reads project defaults", as
   }
 });
 
+test("CLI secret exec resolves configured providers only for the child process", async () => {
+  const before = process.cwd();
+  const tempDir = mkdtempSync(join(tmpdir(), "ciclo-secret-exec-cli-"));
+  try {
+    process.chdir(tempDir);
+    mkdirSync(join(tempDir, ".ciclo"), { recursive: true });
+    const opFixture = join(tempDir, "op-fixture.js");
+    writeFileSync(opFixture, [
+      "#!/usr/bin/env node",
+      "if (process.argv[2] !== 'read') process.exit(2);",
+      "process.stdout.write('fixture-runtime-token\\n');"
+    ].join("\n"));
+    chmodSync(opFixture, 0o700);
+    writeFileSync(join(tempDir, ".ciclo", "config.json"), JSON.stringify({
+      secrets: {
+        providers: [{ id: "fixture-op", kind: "onepassword", command: opFixture }]
+      }
+    }));
+    const binding = encodeRuntimeSecretEnvBindings([
+      {
+        name: "API_TOKEN",
+        providerId: "fixture-op",
+        secretRef: opFixture,
+        format: "Bearer ${secret}",
+        reason: "test runtime child injection"
+      }
+    ]);
+    const cliPath = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+    const result = spawnSync(process.execPath, [
+      cliPath,
+      "secret",
+      "exec",
+      "--binding",
+      binding,
+      "--",
+      process.execPath,
+      "-e",
+      "process.stdout.write(process['env'].API_TOKEN || 'missing')"
+    ], {
+      cwd: tempDir,
+      encoding: "utf8"
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "Bearer fixture-runtime-token");
+  } finally {
+    process.chdir(before);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("CLI launch dry-run prepares MCP config and Herdr harness command", async () => {
+  assert.deepEqual(parseLaunchOptions([
+    "claude",
+    "--project",
+    "/tmp/project",
+    "--session",
+    "review-loop",
+    "--pane-name",
+    "repo-reviewer",
+    "--model",
+    "claude-fable-5",
+    "--effort",
+    "high",
+    "--extra-arg",
+    "--verbose",
+    "--dry-run"
+  ]), {
+    projectRoot: "/tmp/project",
+    client: "claude",
+    herdr: true,
+    herdrSession: "review-loop",
+    paneName: "repo-reviewer",
+    attach: true,
+    model: "claude-fable-5",
+    effort: "high",
+    extraArgs: ["--verbose"],
+    dryRun: true
+  });
+  assert.deepEqual(parseLaunchOptions(["--client", "codex", "--", "--full-auto"]), {
+    client: "codex",
+    herdr: true,
+    attach: true,
+    extraArgs: ["--full-auto"],
+    dryRun: false
+  });
+  assert.deepEqual(parseLaunchOptions(["codex", "--terminal"]), {
+    client: "codex",
+    herdr: false,
+    attach: true,
+    extraArgs: [],
+    dryRun: false
+  });
+  assert.throws(() => parseLaunchOptions(["--client", "wat"]), /--client must be/);
+
+  const before = process.cwd();
+  const tempDir = mkdtempSync(join(tmpdir(), "ciclo-launch-cli-"));
+  try {
+    process.chdir(tempDir);
+    mkdirSync(join(tempDir, ".ciclo"), { recursive: true });
+    writeFileSync(join(tempDir, ".ciclo", "config.json"), JSON.stringify({
+      mcp: {
+        clients: ["claude", "codex"],
+        serverName: "ciclo_launch",
+        command: "ciclo-dev",
+        vars: { CICLO_REUSE_HERDR_SESSION: "true" },
+        additionalServers: {
+          filesystem: {
+            command: "npx",
+            args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
+            env: { MCP_FS_MODE: "workspace" }
+          }
+        },
+        claudeChannel: true
+      }
+    }));
+    const projectName = basename(resolve(tempDir)).toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
+
+    const codex = captureIo();
+    assert.equal(await main([
+      "node",
+      "ciclo",
+      "launch",
+      "codex",
+      "--model",
+      "gpt-5.5",
+      "--prompt",
+      "Review the repo",
+      "--dry-run",
+      "--compact"
+    ], codex.io), 0);
+    const codexPlan = JSON.parse(codex.stdout[0] ?? "{}") as {
+      client?: string;
+      launchMode?: string;
+      projectRoot?: string;
+      command?: string;
+      args?: readonly string[];
+      harnessCommand?: string;
+      harnessArgs?: readonly string[];
+      herdr?: { sessionName?: string; paneName?: string; attach?: boolean; attachCommand?: string; attachArgs?: readonly string[] };
+      mcpInstall?: { serverName?: string; targets?: readonly { client?: string }[]; additionalServers?: Record<string, unknown> };
+    };
+    assert.equal(codexPlan.client, "codex");
+    assert.equal(codexPlan.launchMode, "herdr");
+    assert.equal(codexPlan.command, "herdr");
+    assert.equal(codexPlan.harnessCommand, "codex");
+    assert.ok(codexPlan.harnessArgs?.includes("--cd"));
+    assert.ok(codexPlan.projectRoot);
+    assert.ok(codexPlan.harnessArgs?.includes(codexPlan.projectRoot));
+    assert.ok(codexPlan.harnessArgs?.includes("Review the repo"));
+    assert.deepEqual(codexPlan.args?.slice(0, 12), [
+      "--session",
+      projectName,
+      "agent",
+      "start",
+      projectName,
+      "--cwd",
+      codexPlan.projectRoot,
+      "--focus",
+      "--",
+      "codex",
+      "--model",
+      "gpt-5.5"
+    ]);
+    assert.equal(codexPlan.herdr?.sessionName, projectName);
+    assert.equal(codexPlan.herdr?.paneName, projectName);
+    assert.equal(codexPlan.herdr?.attach, true);
+    assert.equal(codexPlan.herdr?.attachCommand, "herdr");
+    assert.deepEqual(codexPlan.herdr?.attachArgs, ["session", "attach", projectName]);
+    assert.equal(codexPlan.mcpInstall?.serverName, "ciclo_launch");
+    assert.deepEqual(codexPlan.mcpInstall?.targets?.map((target) => target.client), ["codex"]);
+    assert.ok(codexPlan.mcpInstall?.additionalServers?.filesystem);
+    assert.equal(existsSync(join(tempDir, ".codex", "config.toml")), false);
+
+    const claude = captureIo();
+    assert.equal(await main([
+      "node",
+      "ciclo",
+      "launch",
+      "claude",
+      "--model",
+      "claude-fable-5",
+      "--dry-run",
+      "--compact"
+    ], claude.io), 0);
+    const claudePlan = JSON.parse(claude.stdout[0] ?? "{}") as {
+      client?: string;
+      launchMode?: string;
+      command?: string;
+      args?: readonly string[];
+      harnessCommand?: string;
+      harnessArgs?: readonly string[];
+      mcpInstall?: { claudeChannel?: { selector?: string }; targets?: readonly { client?: string }[] };
+    };
+    assert.equal(claudePlan.client, "claude");
+    assert.equal(claudePlan.launchMode, "herdr");
+    assert.equal(claudePlan.command, "herdr");
+    assert.equal(claudePlan.harnessCommand, "claude");
+    assert.ok(claudePlan.harnessArgs?.includes("--dangerously-load-development-channels"));
+    assert.ok(claudePlan.harnessArgs?.includes("server:ciclo_launch"));
+    assert.ok(claudePlan.args?.includes("claude"));
+    assert.deepEqual(claudePlan.mcpInstall?.targets?.map((target) => target.client), ["claude"]);
+    assert.equal(claudePlan.mcpInstall?.claudeChannel?.selector, "server:ciclo_launch");
+    assert.equal(existsSync(join(tempDir, ".mcp.json")), false);
+
+    const terminal = captureIo();
+    assert.equal(await main([
+      "node",
+      "ciclo",
+      "launch",
+      "codex",
+      "--terminal",
+      "--dry-run",
+      "--compact"
+    ], terminal.io), 0);
+    const terminalPlan = JSON.parse(terminal.stdout[0] ?? "{}") as {
+      launchMode?: string;
+      command?: string;
+      harnessCommand?: string;
+      herdr?: unknown;
+    };
+    assert.equal(terminalPlan.launchMode, "terminal");
+    assert.equal(terminalPlan.command, "codex");
+    assert.equal(terminalPlan.harnessCommand, "codex");
+    assert.equal(terminalPlan.herdr, undefined);
+  } finally {
+    process.chdir(before);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("CLI installs Ciclo skills for Claude and Codex", async () => {
   assert.deepEqual(parseSkillInstallOptions([
     "--client",
@@ -254,20 +487,37 @@ test("CLI installs Ciclo skills for Claude and Codex", async () => {
     assert.equal(payload.targets?.every((target) => target.changed), true);
 
     const claudeSkill = join(tempDir, ".claude", "skills", "ciclo-mcp.md");
+    const claudeReleaseSkill = join(tempDir, ".claude", "skills", "release.md");
+    const claudeReleaseCommand = join(tempDir, ".claude", "commands", "release.md");
     const codexSkill = join(tempDir, ".agents", "skills", "ciclo-mcp", "SKILL.md");
+    const codexReleaseSkill = join(tempDir, ".agents", "skills", "release", "SKILL.md");
+    const codexReleaseAgent = join(tempDir, ".agents", "skills", "release", "agents", "openai.yaml");
     const codexReference = join(tempDir, ".agents", "skills", "ciclo-mcp", "references", "mcp-workflows.md");
     assert.equal(existsSync(claudeSkill), true);
+    assert.equal(existsSync(claudeReleaseSkill), true);
+    assert.equal(existsSync(claudeReleaseCommand), true);
     assert.equal(existsSync(codexSkill), true);
+    assert.equal(existsSync(codexReleaseSkill), true);
+    assert.equal(existsSync(codexReleaseAgent), true);
     assert.equal(existsSync(codexReference), true);
     const codexSkillText = readFileSync(codexSkill, "utf8");
+    const codexReleaseText = readFileSync(codexReleaseSkill, "utf8");
     const claudeSkillText = readFileSync(claudeSkill, "utf8");
+    const claudeReleaseText = readFileSync(claudeReleaseSkill, "utf8");
+    const releaseCommandText = readFileSync(claudeReleaseCommand, "utf8");
     const referenceText = readFileSync(codexReference, "utf8");
     assert.match(codexSkillText, /ciclo_launch_worker_session/);
     assert.match(codexSkillText, /ciclo skill install --client all/);
     assert.match(codexSkillText, /configure_mcp: true/);
     assert.match(codexSkillText, /ciclo_request_secret/);
     assert.match(codexSkillText, /ciclo_launch_remote_runner/);
+    assert.match(codexReleaseText, /name: release/);
+    assert.match(codexReleaseText, /gh release create/);
+    assert.match(codexReleaseText, /git tag -a/);
     assert.match(claudeSkillText, /ciclo skill install --client all/);
+    assert.match(claudeReleaseText, /name: release/);
+    assert.match(releaseCommandText, /release skill/);
+    assert.match(releaseCommandText, /gh release view/);
     assert.match(referenceText, /ciclo_launch_remote_runner/);
   } finally {
     process.chdir(before);

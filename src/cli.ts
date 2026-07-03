@@ -2,21 +2,22 @@
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildStandaloneStatus } from "./app.js";
 import { runBenchmarkSuite, type BenchmarkRunnerOptions } from "./benchmark-runner.js";
 import {
   cicloConfigPath,
+  configMcpSecretEnvBindings,
   loadCicloProjectConfig,
   mergeMcpInstallOptionsWithConfig,
   redactedCicloProjectConfig,
-  resolveConfigMcpSecretEnvBindings,
   writeSampleCicloConfig
 } from "./ciclo-config.js";
 import { runtimeDecision } from "./ciclo-core.js";
 import { runMcpHttpServer, type McpHttpConfig } from "./mcp-http.js";
-import { installCicloMcp, type CicloMcpInstallClient } from "./mcp-install.js";
+import { installCicloMcp, type CicloMcpInstallClient, type CicloMcpInstallOptions, type CicloMcpInstallResult } from "./mcp-install.js";
 import { resolveMcpAdditionalServerSecretPlaceholders } from "./mcp-secret-placeholders.js";
 import {
   createLocalMcpReadService,
@@ -30,6 +31,11 @@ import {
   setPluginEnabled
 } from "./plugin-manager.js";
 import { buildCicloAttachPlan } from "./remote-runner.js";
+import {
+  decodeRuntimeSecretEnvBindings,
+  resolveRuntimeSecretEnv,
+  type RuntimeSecretEnvBinding
+} from "./secret-env-runtime.js";
 import { installCicloSkills, type CicloSkillInstallClient } from "./skill-install.js";
 import { CICLO_VERSION } from "./version.js";
 
@@ -67,6 +73,47 @@ export interface CliMcpInstallOptions {
   readonly dryRun: boolean;
 }
 
+export interface CliLaunchOptions {
+  readonly projectRoot?: string;
+  readonly client: CicloMcpInstallClient;
+  readonly herdr: boolean;
+  readonly herdrSession?: string;
+  readonly paneName?: string;
+  readonly attach: boolean;
+  readonly harnessCommand?: string;
+  readonly mcpCommand?: string;
+  readonly serverName?: string;
+  readonly claudeChannel?: boolean;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly permissionMode?: string;
+  readonly approvalPolicy?: string;
+  readonly sandbox?: string;
+  readonly prompt?: string;
+  readonly extraArgs: readonly string[];
+  readonly dryRun: boolean;
+}
+
+export interface CicloLaunchPlan {
+  readonly client: CicloMcpInstallClient;
+  readonly launchMode: "herdr" | "terminal";
+  readonly projectRoot: string;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly harnessCommand: string;
+  readonly harnessArgs: readonly string[];
+  readonly herdr?: {
+    readonly sessionName: string;
+    readonly paneName: string;
+    readonly attach: boolean;
+    readonly attachCommand?: string;
+    readonly attachArgs?: readonly string[];
+  };
+  readonly mcpInstall: ReturnType<typeof installCicloMcp>;
+  readonly dryRun: boolean;
+  readonly evidence: readonly string[];
+}
+
 export interface CliSkillInstallOptions {
   readonly projectRoot?: string;
   readonly clients: readonly CicloSkillInstallClient[];
@@ -96,6 +143,8 @@ function usage(): string {
     "  runtime                        Print runtime/product-boundary JSON.",
     "  benchmark [scenario-dir]       Run benchmark scenarios.",
     "  attach [options]               Attach to Ciclo's Herdr session.",
+    "  launch [claude|codex]          Install MCP config and start a Herdr harness session.",
+    "  secret exec [options] -- <cmd> Resolve secret env for one child process.",
     "  config <show|init|path>        Manage .ciclo/config.json defaults.",
     "  plugin <subcommand>            Install, list, enable, or disable plugins.",
     "  skill install [options]        Install Ciclo agent skills into a project.",
@@ -131,6 +180,9 @@ function usage(): string {
     `  ciclo benchmark ${DEFAULT_BENCHMARK_DIR}`,
     "  ciclo attach --session ciclo",
     "  ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo",
+    "  ciclo launch codex",
+    "  ciclo launch claude --model claude-fable-5",
+    "  ciclo secret exec --binding <payload> -- env",
     "  ciclo plugin install @acme/ciclo-runner-fly --trust",
     "  ciclo skill install --client all --project /path/to/repo",
     "  ciclo mcp stdio",
@@ -174,6 +226,55 @@ function commandHelp(command: string): string {
       "  ciclo attach --session ciclo",
       "  ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo",
       "  ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo --target pane-1"
+    ].join("\n");
+  }
+  if (command === "launch") {
+    return [
+      "Usage: ciclo launch [claude|codex] [options] [-- <harness-args>...]",
+      "",
+      "Install Ciclo MCP config plus configured additional MCP servers into the project, then launch Claude Code or Codex in a named Herdr session.",
+      "",
+      "Options:",
+      "  --client <claude|codex>        Harness client to launch. Default: codex.",
+      "  --project <dir>                Target project root. Default: cwd.",
+      "  --session <name>               Herdr session name. Default: project directory name.",
+      "  --pane-name <name>             First Herdr pane/agent name. Default: project directory name.",
+      "  --terminal, --no-herdr         Launch the harness directly in this terminal instead of Herdr.",
+      "  --no-attach                    Start the Herdr pane without attaching to the session.",
+      "  --harness-command <command>    Harness executable override. Default: claude or codex.",
+      "  --server-name <name>           Ciclo MCP server name. Default: config or ciclo.",
+      "  --mcp-command <command>        Ciclo command for clients to run. Default: config or ciclo.",
+      "  --claude-channel               Enable Claude Code channel capability for launched Claude sessions.",
+      "  --model <model>                Pass model to the harness.",
+      "  --effort <effort>              Pass effort to Claude Code.",
+      "  --permission-mode <mode>       Pass permission mode to Claude Code. Default: default.",
+      "  --approval-policy <policy>     Pass approval policy to Codex. Default: on-request.",
+      "  --sandbox <mode>               Pass sandbox mode to Codex. Default: workspace-write.",
+      "  --prompt <text>                Optional initial prompt.",
+      "  --extra-arg <arg>              Extra harness arg; may be repeated.",
+      "  --dry-run                      Print install and launch plan without writing files or starting Herdr/the harness.",
+      "",
+      "Examples:",
+      "  ciclo launch codex",
+      "  ciclo launch codex --session my-project",
+      "  ciclo launch claude --model claude-fable-5",
+      "  ciclo launch --client codex --prompt \"Review the repo\" -- --full-auto",
+      "  ciclo launch codex --terminal"
+    ].join("\n");
+  }
+  if (command === "secret") {
+    return [
+      "Usage: ciclo secret exec [options] -- <command> [args...]",
+      "",
+      "Resolve configured secret references immediately before starting one child process.",
+      "Generated MCP configs and worker launch plans use this wrapper so resolved secret values are not persisted to project config files.",
+      "",
+      "Options:",
+      "  --binding <payload>            Base64url-encoded secret binding payload. May be repeated.",
+      "  --project <dir>                Project root for loading .ciclo/config.json and secret providers. Default: CICLO_PROJECT_ROOT or cwd.",
+      "",
+      "Example:",
+      "  ciclo secret exec --binding <payload> -- mcp-server stdio"
     ].join("\n");
   }
   if (command === "plugin") {
@@ -283,6 +384,14 @@ function printJson(value: unknown, mode: JsonMode, io: CliIo): void {
 function requireValue(args: readonly string[], index: number, flag: string): string {
   const value = args[index + 1];
   if (value === undefined || value.startsWith("-")) {
+    throw new Error(`${flag} requires a value`);
+  }
+  return value;
+}
+
+function requireAnyValue(args: readonly string[], index: number, flag: string): string {
+  const value = args[index + 1];
+  if (value === undefined) {
     throw new Error(`${flag} requires a value`);
   }
   return value;
@@ -431,6 +540,12 @@ function parseMcpInstallClient(value: string): readonly CicloMcpInstallClient[] 
   throw new Error("--client must be claude, codex, or all");
 }
 
+function parseLaunchClient(value: string): CicloMcpInstallClient {
+  if (value === "claude" || value === "claude-code") return "claude";
+  if (value === "codex") return "codex";
+  throw new Error("--client must be claude or codex");
+}
+
 function parseSkillInstallClient(value: string): readonly CicloSkillInstallClient[] {
   if (value === "claude") return ["claude"];
   if (value === "codex") return ["codex"];
@@ -486,6 +601,158 @@ export function parseMcpInstallOptions(args: readonly string[]): CliMcpInstallOp
     ...(serverName === undefined ? {} : { serverName }),
     ...(command === undefined ? {} : { command }),
     ...(claudeChannel ? { claudeChannel } : {}),
+    dryRun
+  };
+}
+
+export function parseLaunchOptions(args: readonly string[]): CliLaunchOptions {
+  let projectRoot: string | undefined;
+  let client: CicloMcpInstallClient = "codex";
+  let herdr = true;
+  let herdrSession: string | undefined;
+  let paneName: string | undefined;
+  let attach = true;
+  let harnessCommand: string | undefined;
+  let mcpCommand: string | undefined;
+  let serverName: string | undefined;
+  let claudeChannel: boolean | undefined;
+  let model: string | undefined;
+  let effort: string | undefined;
+  let permissionMode: string | undefined;
+  let approvalPolicy: string | undefined;
+  let sandbox: string | undefined;
+  let prompt: string | undefined;
+  let dryRun = false;
+  const extraArgs: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") {
+      extraArgs.push(...args.slice(index + 1));
+      break;
+    }
+    if (arg === "claude" || arg === "claude-code" || arg === "codex") {
+      client = parseLaunchClient(arg);
+      continue;
+    }
+    if (arg === "--client" || arg === "--harness") {
+      client = parseLaunchClient(requireValue(args, index, arg));
+      index += 1;
+      continue;
+    }
+    if (arg === "--project") {
+      projectRoot = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--herdr") {
+      herdr = true;
+      continue;
+    }
+    if (arg === "--terminal" || arg === "--no-herdr") {
+      herdr = false;
+      continue;
+    }
+    if (arg === "--session" || arg === "--herdr-session") {
+      herdrSession = requireValue(args, index, arg);
+      herdr = true;
+      index += 1;
+      continue;
+    }
+    if (arg === "--pane-name" || arg === "--agent-name") {
+      paneName = requireValue(args, index, arg);
+      herdr = true;
+      index += 1;
+      continue;
+    }
+    if (arg === "--no-attach") {
+      attach = false;
+      continue;
+    }
+    if (arg === "--attach") {
+      attach = true;
+      continue;
+    }
+    if (arg === "--harness-command") {
+      harnessCommand = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--mcp-command") {
+      mcpCommand = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--server-name") {
+      serverName = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--claude-channel") {
+      claudeChannel = true;
+      continue;
+    }
+    if (arg === "--model") {
+      model = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--effort") {
+      effort = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--permission-mode") {
+      permissionMode = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--approval-policy" || arg === "--ask-for-approval") {
+      approvalPolicy = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--sandbox") {
+      sandbox = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--prompt") {
+      prompt = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--extra-arg") {
+      extraArgs.push(requireAnyValue(args, index, arg));
+      index += 1;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (arg === "--json" || arg === "--compact") continue;
+    throw new Error(`unknown launch option: ${arg}`);
+  }
+
+  return {
+    ...(projectRoot === undefined ? {} : { projectRoot }),
+    client,
+    herdr,
+    ...(herdrSession === undefined ? {} : { herdrSession }),
+    ...(paneName === undefined ? {} : { paneName }),
+    attach,
+    ...(harnessCommand === undefined ? {} : { harnessCommand }),
+    ...(mcpCommand === undefined ? {} : { mcpCommand }),
+    ...(serverName === undefined ? {} : { serverName }),
+    ...(claudeChannel === undefined ? {} : { claudeChannel }),
+    ...(model === undefined ? {} : { model }),
+    ...(effort === undefined ? {} : { effort }),
+    ...(permissionMode === undefined ? {} : { permissionMode }),
+    ...(approvalPolicy === undefined ? {} : { approvalPolicy }),
+    ...(sandbox === undefined ? {} : { sandbox }),
+    ...(prompt === undefined ? {} : { prompt }),
+    extraArgs,
     dryRun
   };
 }
@@ -595,6 +862,227 @@ function projectRootFromEnv(): string {
   return process.env.CICLO_PROJECT_ROOT ?? process.cwd();
 }
 
+async function configuredMcpInstall(options: CicloMcpInstallOptions): Promise<CicloMcpInstallResult> {
+  const root = options.projectRoot ?? process.cwd();
+  const loaded = loadCicloProjectConfig(root);
+  const runtime = await createLocalMcpRuntimeContextWithPlugins(root);
+  if (runtime.secretProviderRegistry === undefined) throw new Error("MCP install secret provider registry is unavailable");
+  const secretProviderRegistry = runtime.secretProviderRegistry;
+  const dryRun = options.dryRun ?? false;
+  const merged = mergeMcpInstallOptionsWithConfig({
+    ...options,
+    projectRoot: root,
+    secretEnv: configMcpSecretEnvBindings(loaded.config)
+  }, loaded.config);
+  const additionalServerSecrets = await resolveMcpAdditionalServerSecretPlaceholders({
+    additionalServers: merged.additionalServers,
+    dryRun,
+    resolveSecret: async (request) => await secretProviderRegistry.resolve({
+      providerId: request.providerId,
+      secretRef: request.secretRef,
+      field: request.field,
+      reason: request.reason,
+      dryRun
+    })
+  });
+  return installCicloMcp({
+    ...merged,
+    additionalServers: additionalServerSecrets.additionalServers,
+    additionalServerSecretEnv: additionalServerSecrets.secretEnv
+  });
+}
+
+function launchCommand(options: CliLaunchOptions): string {
+  return options.harnessCommand ?? (options.client === "claude" ? "claude" : "codex");
+}
+
+function projectLaunchName(root: string): string {
+  const name = basename(resolve(root))
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return name.length === 0 ? "ciclo" : name;
+}
+
+function herdrSessionName(options: CliLaunchOptions, projectRoot: string): string {
+  return options.herdrSession ?? projectLaunchName(projectRoot);
+}
+
+function herdrPaneName(options: CliLaunchOptions, projectRoot: string): string {
+  return options.paneName ?? projectLaunchName(projectRoot);
+}
+
+function herdrStartArgs(
+  sessionName: string,
+  paneName: string,
+  cwd: string,
+  command: string,
+  args: readonly string[]
+): readonly string[] {
+  return ["--session", sessionName, "agent", "start", paneName, "--cwd", cwd, "--focus", "--", command, ...args];
+}
+
+function herdrAttachArgs(sessionName: string): readonly string[] {
+  return ["session", "attach", sessionName];
+}
+
+function launchArgs(options: CliLaunchOptions, projectRoot: string, install: CicloMcpInstallResult): readonly string[] {
+  const args: string[] = [];
+  if (options.client === "claude") {
+    if (install.claudeChannel !== undefined) args.push(...install.claudeChannel.launchArgs);
+    if (options.model !== undefined) args.push("--model", options.model);
+    if (options.effort !== undefined) args.push("--effort", options.effort);
+    args.push("--permission-mode", options.permissionMode ?? "default");
+    args.push(...options.extraArgs);
+    if (options.prompt !== undefined) args.push(options.prompt);
+    return args;
+  }
+  if (options.model !== undefined) args.push("--model", options.model);
+  args.push("--cd", projectRoot);
+  args.push("--ask-for-approval", options.approvalPolicy ?? "on-request");
+  args.push("--sandbox", options.sandbox ?? "workspace-write");
+  args.push(...options.extraArgs);
+  if (options.prompt !== undefined) args.push(options.prompt);
+  return args;
+}
+
+async function buildLaunchPlan(options: CliLaunchOptions): Promise<CicloLaunchPlan> {
+  const projectRoot = resolve(options.projectRoot ?? process.cwd());
+  const install = await configuredMcpInstall({
+    projectRoot,
+    clients: [options.client],
+    ...(options.serverName === undefined ? {} : { serverName: options.serverName }),
+    ...(options.mcpCommand === undefined ? {} : { command: options.mcpCommand }),
+    claudeChannel: options.client === "claude" ? options.claudeChannel : false,
+    dryRun: options.dryRun
+  });
+  const harnessCommand = launchCommand(options);
+  const harnessArgs = launchArgs(options, projectRoot, install);
+  const sessionName = herdrSessionName(options, projectRoot);
+  const paneName = herdrPaneName(options, projectRoot);
+  const attachArgs = herdrAttachArgs(sessionName);
+  const launchMode = options.herdr ? "herdr" : "terminal";
+  const command = options.herdr ? "herdr" : harnessCommand;
+  const args = options.herdr ? herdrStartArgs(sessionName, paneName, projectRoot, harnessCommand, harnessArgs) : harnessArgs;
+  return {
+    client: options.client,
+    launchMode,
+    projectRoot,
+    command,
+    args,
+    harnessCommand,
+    harnessArgs,
+    ...(options.herdr ? {
+      herdr: {
+        sessionName,
+        paneName,
+        attach: options.attach,
+        ...(options.attach ? { attachCommand: "herdr", attachArgs } : {})
+      }
+    } : {}),
+    mcpInstall: install,
+    dryRun: options.dryRun,
+    evidence: [
+      "ciclo.launch:planned",
+      `ciclo.launch.client:${options.client}`,
+      `ciclo.launch.mode:${launchMode}`,
+      `ciclo.launch.project_root:${projectRoot}`,
+      ...(options.herdr ? [
+        `ciclo.launch.herdr_session:${sessionName}`,
+        `ciclo.launch.herdr_pane:${paneName}`
+      ] : []),
+      `ciclo.launch.mcp_targets:${install.targets.map((target) => target.client).join(",")}`,
+      options.dryRun ? "ciclo.launch.dry_run:true" : "ciclo.launch.dry_run:false"
+    ]
+  };
+}
+
+async function runLaunch(args: readonly string[], io: CliIo): Promise<number> {
+  const options = parseLaunchOptions(args);
+  const plan = await buildLaunchPlan(options);
+  if (options.dryRun) {
+    printJson(plan, parseJsonMode(args), io);
+    return 0;
+  }
+  const result = spawnSync(plan.command, [...plan.args], {
+    cwd: plan.projectRoot,
+    stdio: "inherit"
+  });
+  if (result.status !== 0 || plan.launchMode !== "herdr" || plan.herdr?.attachCommand === undefined) return result.status ?? 1;
+  const attach = spawnSync(plan.herdr.attachCommand, [...(plan.herdr.attachArgs ?? [])], {
+    cwd: plan.projectRoot,
+    stdio: "inherit"
+  });
+  return attach.status ?? 1;
+}
+
+function parseSecretExecArgs(args: readonly string[]): {
+  readonly projectRoot?: string;
+  readonly bindings: readonly RuntimeSecretEnvBinding[];
+  readonly command: string;
+  readonly commandArgs: readonly string[];
+} {
+  let projectRoot: string | undefined;
+  const bindings: RuntimeSecretEnvBinding[] = [];
+  let commandStart = -1;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") {
+      commandStart = index + 1;
+      break;
+    }
+    if (arg === "--project") {
+      projectRoot = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--binding") {
+      bindings.push(...decodeRuntimeSecretEnvBindings(requireValue(args, index, arg)));
+      index += 1;
+      continue;
+    }
+    if (arg === "--json" || arg === "--compact") continue;
+    throw new Error(`unknown secret exec option: ${arg}`);
+  }
+
+  if (commandStart < 0) throw new Error("secret exec requires -- before the child command");
+  const command = args[commandStart];
+  if (command === undefined || command.length === 0) throw new Error("secret exec requires a child command");
+  return {
+    ...(projectRoot === undefined ? {} : { projectRoot }),
+    bindings,
+    command,
+    commandArgs: args.slice(commandStart + 1)
+  };
+}
+
+async function runSecret(args: readonly string[], _io: CliIo): Promise<number> {
+  const subcommand = args[0];
+  if (subcommand === undefined || subcommand === "--help" || subcommand === "-h") {
+    _io.stdout(commandHelp("secret"));
+    return 0;
+  }
+  if (subcommand !== "exec") throw new Error(`unknown secret subcommand: ${subcommand}`);
+
+  const options = parseSecretExecArgs(args.slice(1));
+  const projectRoot = resolve(options.projectRoot ?? process.env.CICLO_PROJECT_ROOT ?? process.cwd());
+  const runtime = await createLocalMcpRuntimeContextWithPlugins(projectRoot);
+  if (runtime.secretProviderRegistry === undefined) {
+    throw new Error("secret provider registry is unavailable");
+  }
+  const secretEnv = await resolveRuntimeSecretEnv({
+    bindings: options.bindings,
+    registry: runtime.secretProviderRegistry
+  });
+  const result = spawnSync(options.command, [...options.commandArgs], {
+    cwd: process.cwd(),
+    env: { ...process.env, ...secretEnv },
+    stdio: "inherit"
+  });
+  return result.status ?? 1;
+}
+
 async function runMcp(args: readonly string[], io: CliIo): Promise<number> {
   const transport = args[0];
   if (transport === undefined || transport === "--help" || transport === "-h") {
@@ -616,35 +1104,7 @@ async function runMcp(args: readonly string[], io: CliIo): Promise<number> {
   }
   if (transport === "install") {
     const options = parseMcpInstallOptions(args.slice(1));
-    const root = options.projectRoot ?? process.cwd();
-    const loaded = loadCicloProjectConfig(root);
-    const runtime = await createLocalMcpRuntimeContextWithPlugins(root);
-    if (runtime.secretProviderRegistry === undefined) throw new Error("MCP install secret provider registry is unavailable");
-    const secretProviderRegistry = runtime.secretProviderRegistry;
-    const merged = mergeMcpInstallOptionsWithConfig({
-      ...options,
-      secretEnv: await resolveConfigMcpSecretEnvBindings({
-        config: loaded.config,
-        registry: secretProviderRegistry,
-        dryRun: options.dryRun
-      })
-    }, loaded.config);
-    const additionalServerSecrets = await resolveMcpAdditionalServerSecretPlaceholders({
-      additionalServers: merged.additionalServers,
-      dryRun: options.dryRun,
-      resolveSecret: async (request) => await secretProviderRegistry.resolve({
-        providerId: request.providerId,
-        secretRef: request.secretRef,
-        field: request.field,
-        reason: request.reason,
-        dryRun: options.dryRun
-      })
-    });
-    printJson(installCicloMcp({
-      ...merged,
-      additionalServers: additionalServerSecrets.additionalServers,
-      additionalServerSecretEnv: additionalServerSecrets.secretEnv
-    }), parseJsonMode(args), io);
+    printJson(await configuredMcpInstall(options), parseJsonMode(args), io);
     return 0;
   }
   throw new Error(`unknown MCP transport: ${transport}`);
@@ -808,6 +1268,10 @@ export async function main(argv: readonly string[] = process.argv, io: CliIo = d
       return 0;
     }
 
+    if (command === "secret") {
+      return await runSecret(args, io);
+    }
+
     if (args.includes("--help") || args.includes("-h")) {
       io.stdout(commandHelp(command));
       return 0;
@@ -835,6 +1299,9 @@ export async function main(argv: readonly string[] = process.argv, io: CliIo = d
       return runAttach(args, io);
     }
 
+    if (command === "launch") {
+      return await runLaunch(args, io);
+    }
     if (command === "plugin") {
       return runPlugin(args, io);
     }
