@@ -187,6 +187,7 @@ The config supports:
 - `remote`: default runner kind, image resolver or static image, repository URL/path, repo bootstrap/devenv behavior, SSH user, WireGuard settings, provider-specific Kubernetes/AWS Lambda MicroVM/Cloudflare settings, and non-secret `vars`.
 - `prompts.systemInjections`: non-secret project goals or helper guidance that Ciclo appends to matching prompt surfaces after its built-in ground rules.
 - `heartbeat.preemptiveWork.harnesses`: the worker pool Ciclo uses when it starts ready Beads work on its own. The default pool includes Codex and Claude Code with `claude-fable-5`; set `harnessId` only when a project should force every preemptive worker through one harness.
+- `heartbeat.preemptiveWork.issueTypes` and `fallbackIssueTypes`: the primary and fallback Beads issue types Ciclo scans on each heartbeat. The default primary scan is planning work (`epic`, `feature`), then Ciclo falls back to concrete work (`task`, `bug`, `decision`) so automation keeps moving when child work is ready.
 
 Precedence is simple: inline CLI flags and MCP tool payload fields win for the current operation; `.ciclo/config.json` fills any omitted values; Ciclo's built-in defaults apply last. That means the shared config can define the normal Claude/Codex MCP setup, secret provider aliases, prompt guidance, and remote runner defaults while a single launch can still override the model, worktree, remote runner kind, or provider-specific field.
 

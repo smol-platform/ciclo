@@ -91,11 +91,13 @@ test("loads project config for secrets MCP and remote defaults", () => {
         }
       ]
     },
-    heartbeat: {
-      preemptive_work: {
-        harnesses: [
-          "codex",
-          { harness_id: "claude-code", model: "claude-fable-5", effort: "high" }
+      heartbeat: {
+        preemptive_work: {
+          issue_types: ["epic", "feature"],
+          fallback_issue_types: ["task", "bug", "decision"],
+          harnesses: [
+            "codex",
+            { harness_id: "claude-code", model: "claude-fable-5", effort: "high" }
         ]
       }
     }
@@ -120,10 +122,12 @@ test("loads project config for secrets MCP and remote defaults", () => {
   assert.equal(config.remote?.kubernetes?.storageSize, "20Gi");
   assert.equal(config.prompts?.systemInjections?.[0]?.id, "project-goals");
   assert.equal(config.prompts?.systemInjections?.[1]?.scope, "brain");
-  assert.deepEqual(config.heartbeat?.preemptiveWork?.harnesses, [
-    { harnessId: "codex" },
-    { harnessId: "claude-code", model: "claude-fable-5", effort: "high" }
-  ]);
+    assert.deepEqual(config.heartbeat?.preemptiveWork?.harnesses, [
+      { harnessId: "codex" },
+      { harnessId: "claude-code", model: "claude-fable-5", effort: "high" }
+    ]);
+    assert.deepEqual(config.heartbeat?.preemptiveWork?.issueTypes, ["epic", "feature"]);
+    assert.deepEqual(config.heartbeat?.preemptiveWork?.fallbackIssueTypes, ["task", "bug", "decision"]);
 
   const redacted = redactedCicloProjectConfig(config);
   assert.equal(redacted.mcp?.secretBindings?.[0]?.ref, "[redacted secret ref]");
@@ -440,8 +444,9 @@ test("checked-in example config parses and redacts secret references", () => {
   assert.equal(config.remote?.awsLambda?.microVmName, "ciclo-project-runner");
   assert.equal(config.remote?.cloudflare?.workerName, "ciclo-project-runner");
   assert.equal(config.prompts?.systemInjections?.[0]?.id, "project-goals");
-  assert.equal(config.heartbeat?.preemptiveWork?.harnesses?.[1]?.harnessId, "claude-code");
-  assert.equal(config.heartbeat?.preemptiveWork?.harnesses?.[1]?.model, "claude-fable-5");
+    assert.equal(config.heartbeat?.preemptiveWork?.harnesses?.[1]?.harnessId, "claude-code");
+    assert.equal(config.heartbeat?.preemptiveWork?.harnesses?.[1]?.model, "claude-fable-5");
+    assert.deepEqual(config.heartbeat?.preemptiveWork?.fallbackIssueTypes, ["task", "bug", "decision"]);
 
   const redacted = JSON.stringify(redactedCicloProjectConfig(config));
   assert.doesNotMatch(redacted, /op:\/\/Ciclo\/API\/token/);

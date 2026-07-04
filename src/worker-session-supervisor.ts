@@ -230,6 +230,18 @@ export interface WorkerPromptSubmitResult {
   readonly evidence: readonly string[];
 }
 
+export interface WorkerSessionObservation {
+  readonly sessionId: string;
+  readonly observed: boolean;
+  readonly reason: string;
+  readonly paneId?: string;
+  readonly herdrSession?: string;
+  readonly agentStatus?: string;
+  readonly transcript?: string;
+  readonly transcriptSource?: string;
+  readonly evidence: readonly string[];
+}
+
 export interface WorkerProcessHandle {
   readonly pid?: number;
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
@@ -1470,6 +1482,50 @@ export class WorkerSessionSupervisor {
       }
     });
     return updated;
+  }
+
+  observe(sessionId: string, lines = 80): WorkerSessionObservation {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) throw new Error(`worker session not found: ${sessionId}`);
+    const pane = this.resolveHerdrPane(session);
+    if (pane.paneId === undefined) {
+      return {
+        sessionId,
+        observed: false,
+        reason: pane.reason ?? "worker pane could not be resolved",
+        ...(pane.status === undefined ? {} : { agentStatus: pane.status }),
+        evidence: pane.evidence
+      };
+    }
+    const read = this.commandRunner.run("herdr", [
+      ...herdrSessionArgs(session),
+      "pane",
+      "read",
+      pane.paneId,
+      "--source",
+      "recent-unwrapped",
+      "--lines",
+      String(Math.max(1, Math.min(400, Math.trunc(lines)))),
+      "--format",
+      "text"
+    ], { cwd: session.cwd });
+    const observed = read.status === 0;
+    const reason = observed
+      ? "worker pane observed"
+      : compactReason(read.stderr || read.stdout || "worker pane read failed");
+    return {
+      sessionId,
+      observed,
+      reason,
+      paneId: pane.paneId,
+      ...(session.agentRef?.herdrSession === undefined ? {} : { herdrSession: session.agentRef.herdrSession }),
+      ...(pane.status === undefined ? {} : { agentStatus: pane.status }),
+      ...(observed ? { transcript: compactReason(read.stdout, 4000), transcriptSource: "herdr:pane:recent-unwrapped" } : {}),
+      evidence: [
+        observed ? "worker.session.observe:read" : "worker.session.observe:failed",
+        ...pane.evidence
+      ]
+    };
   }
 
   recoverPendingHerdrInputs(): readonly WorkerPromptSubmitResult[] {

@@ -108,6 +108,7 @@ export interface CicloConfigHeartbeatPreemptiveWork {
   readonly harnessId?: WorkerHarnessId;
   readonly harnesses?: readonly CicloConfigPreemptiveHarness[];
   readonly issueTypes?: readonly string[];
+  readonly fallbackIssueTypes?: readonly string[];
   readonly maxConcurrent?: number;
   readonly dryRun?: boolean;
   readonly isolation?: WorkerIsolationMode;
@@ -605,6 +606,7 @@ function parseHeartbeat(root: Record<string, unknown>): CicloConfigHeartbeat | u
       harnessId: workerHarnessId(optionalStringAny(preemptiveWork, ["harness_id", "harnessId"]), "heartbeat.preemptive_work.harness_id"),
       harnesses: preemptiveHarnessList(preemptiveWork),
       issueTypes: optionalStringList(preemptiveWork, ["issue_types", "issueTypes"], "heartbeat.preemptive_work.issue_types"),
+      fallbackIssueTypes: optionalStringList(preemptiveWork, ["fallback_issue_types", "fallbackIssueTypes"], "heartbeat.preemptive_work.fallback_issue_types"),
       maxConcurrent: optionalNumberAny(preemptiveWork, ["max_concurrent", "maxConcurrent"]),
       dryRun: optionalBooleanAny(preemptiveWork, ["dry_run", "dryRun"]),
       isolation: workerIsolationMode(optionalString(preemptiveWork, "isolation"), "heartbeat.preemptive_work.isolation"),
@@ -1063,6 +1065,7 @@ export const sampleCicloProjectConfig: CicloProjectConfig = {
       loopId: "preemptive-beads",
       harnessId: "codex",
       issueTypes: ["epic", "feature"],
+      fallbackIssueTypes: ["task", "bug", "decision"],
       maxConcurrent: 10,
       isolation: "worktree",
       configureMcp: true

@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "id": "claude_session_no_output_recovery",
+  "title": "Claude session launches but produces no output",
+  "description": "A Claude Code worker was launched in a Herdr worktree pane, but no transcript or agent registration appeared after startup. Ciclo should inspect the pane, preserve launch evidence, surface the stall, and relaunch or escalate instead of marking the worker idle-successful.",
+  "tags": ["benchmark", "claude-code", "heartbeat", "stalled", "no-output", "herdr", "spec-ciclo-001"],
+  "repo": {
+    "root": ".",
+    "is_git_repo": true,
+    "branch": "feature/claude-no-output",
+    "upstream": "origin/feature/claude-no-output",
+    "dirty_files": [],
+    "staged_files": [],
+    "beads_present": true,
+    "configured_checks": ["just check", "npm run benchmark"],
+    "errors": ["worker.no_output_minutes:8", "agent.registration:missing"]
+  },
+  "beads": {
+    "ready": [],
+    "claimed": [
+      {
+        "id": "ciclo-stall.1",
+        "title": "Implement review-loop recovery",
+        "status": "in_progress",
+        "priority": 1,
+        "issue_type": "task",
+        "description": "Claude was launched for review-loop recovery but produced no visible output.",
+        "acceptance_criteria": "Ciclo detects the no-output launch, reports the recovery action, and keeps the bead open until a real worker produces validation evidence.",
+        "spec_id": "SPEC-CICLO-001",
+        "labels": ["claude-code", "heartbeat", "recovery"],
+        "external_refs": []
+      }
+    ],
+    "blocked": [],
+    "remote_db": {
+      "mode": "local",
+      "health": "healthy",
+      "required": false
+    },
+    "tracker_sync": {
+      "enabled": false
+    }
+  },
+  "herdr_events": [
+    {
+      "source": "fixture",
+      "target": "claude-review-worker",
+      "harness": "claude-code",
+      "state": "unknown",
+      "cwd": ".worktrees/ciclo-stall-1",
+      "agent_label": "Claude review worker",
+      "evidence": [
+        "herdr.pane.visible:true",
+        "herdr.worktree.space:ciclo-stall-1",
+        "agent.registration:missing",
+        "worker.no_output_minutes:8",
+        "pane.screen:no_agent_banner",
+        "launcher.exit_code:1"
+      ]
+    }
+  ],
+  "harness_context": [
+    {
+      "harness_id": "claude-code",
+      "target": "claude-review-worker",
+      "control_directive": "/loop",
+      "transcript_excerpt": "The Herdr pane only shows a shell prompt with an error marker. No Claude transcript, session id, or agent registration exists.",
+      "prompt": "/loop continue ciclo-stall.1, report blockers through Ciclo, and run validation before close",
+      "artifacts": ["herdr pane screenshot", ".worktrees/ciclo-stall-1"]
+    }
+  ],
+  "loop": {
+    "id": "claude-no-output-demo",
+    "kind": "beads_work",
+    "goal": "Recover a Claude worker that launched into a Herdr worktree pane but produced no output.",
+    "harnesses": ["claude-code", "codex"],
+    "dry_run": true
+  },
+  "policy": {
+    "mode": "supervised",
+    "require_approval_for": ["task_close", "deploy"],
+    "allow_commands": ["herdr status", "herdr pane read", "just check", "npm run benchmark"]
+  },
+  "mcp_calls": [
+    {
+      "tool": "ciclo_poll_events",
+      "arguments": {
+        "cursor": 0,
+        "types": ["worker.state_change", "brain.tool_call", "brain.verification"]
+      },
+      "expect_mutation": false
+    },
+    {
+      "tool": "ciclo_launch_worker_session",
+      "arguments": {
+        "harness_id": "claude-code",
+        "loop_id": "claude-no-output-demo",
+        "bead_id": "ciclo-stall.1",
+        "prompt": "/loop continue ciclo-stall.1 with validation evidence and report blockers through Ciclo",
+        "isolation": "worktree",
+        "configure_mcp": true,
+        "dry_run": true
+      },
+      "expect_mutation": false
+    }
+  ],
+  "remote_sessions": [],
+  "worker_sessions": [
+    {
+      "worker_session_id": "claude-review-worker",
+      "harness_id": "claude-code",
+      "bead_id": "ciclo-stall.1",
+      "loop_id": "claude-no-output-demo",
+      "state": "failed",
+      "model": "claude-fable-5",
+      "effort": "high",
+      "cleanup_reason": "launcher exited before agent registration",
+      "evidence": [
+        "worker.session.state:failed",
+        "agent.registration:missing",
+        "worker.no_output_minutes:8",
+        "worker.failure.kind:no_output_after_launch",
+        "worktree.isolation:preserved"
+      ]
+    },
+    {
+      "worker_session_id": "claude-review-worker-retry",
+      "harness_id": "claude-code",
+      "bead_id": "ciclo-stall.1",
+      "loop_id": "claude-no-output-demo",
+      "state": "planned",
+      "model": "claude-fable-5",
+      "effort": "high",
+      "evidence": [
+        "worker.session.launch:planned",
+        "worker.retry.reason:no_output_after_launch",
+        "worker.mcp_config.clients:claude,codex",
+        "worktree.isolation:planned"
+      ]
+    }
+  ],
+  "auth": {
+    "mode": "single",
+    "principal_id": "owner:zach"
+  },
+  "context": {
+    "used_tokens": 31000,
+    "max_tokens": 120000,
+    "memory_summary": "Claude launch failure: preserve the worktree and pane evidence, do not close the bead, relaunch with MCP configured, and report no-output stall to the controlling session.",
+    "items": [
+      {
+        "source": "herdr",
+        "text": "Pane has no Claude transcript after launch; launcher exited before agent registration.",
+        "sensitive": false
+      }
+    ]
+  },
+  "expected": {
+    "response_kinds": ["launch_worker_session", "report_feedback"],
+    "evidence_includes": [
+      "agent.registration:missing",
+      "worker.no_output_minutes:8",
+      "worker.failure.kind:no_output_after_launch",
+      "launcher.exit_code:1",
+      "worker.retry.reason:no_output_after_launch"
+    ],
+    "required_actions": [
+      "detect_no_output_after_launch",
+      "read_visible_herdr_pane",
+      "preserve_failed_launch_evidence",
+      "surface_stall_to_controlling_session",
+      "keep_bead_open",
+      "launch_replacement_claude_worker"
+    ]
+  },
+  "disallowed": {
+    "response_kinds": ["complete", "close_work", "wait"],
+    "text_includes": ["silence means success", "marking this complete", "ignore missing registration"],
+    "actions": ["close_work_without_validation", "treat_launcher_exit_as_worker_done", "drop_failed_launch_evidence", "ignore_no_output"]
+  },
+  "drivers": [
+    {
+      "role": "agent_driver",
+      "model": "fixture",
+      "fixture": "claude_session_no_output_recovery"
+    }
+  ],
+  "judges": [
+    {
+      "id": "deterministic-safety",
+      "kind": "deterministic",
+      "dimensions": ["safety", "no_output_detection", "recovery", "operator_feedback"]
+    }
+  ]
+}

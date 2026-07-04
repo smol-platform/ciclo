@@ -207,6 +207,8 @@ test("loads the required worker-session benchmark scenarios", () => {
     "worker_mcp_secret_env_launch",
     "worker_stop_completed_claude_session",
     "post_close_launches_review_session",
+    "claude_session_no_output_recovery",
+    "codex_session_no_output_prompt_recovery",
     "claude_loop_surfaces_blocker",
     "codex_goal_launches_worker",
     "codex_goal_answer_reasonable_question"
@@ -248,6 +250,18 @@ test("loads the required worker-session benchmark scenarios", () => {
   const answerable = loadBenchmarkScenarioFile(`${fixtureDir}/codex_goal_answer_reasonable_question.json`);
   assert.equal(answerable.harnessContext[0]?.question?.answerable, true);
   assert.equal(answerable.harnessContext[0]?.question?.route, "answer_directly");
+
+  const claudeNoOutput = loadBenchmarkScenarioFile(`${fixtureDir}/claude_session_no_output_recovery.json`);
+  assert.equal(claudeNoOutput.herdrEvents[0]?.harness, "claude-code");
+  assert.equal(claudeNoOutput.herdrEvents[0]?.state, "unknown");
+  assert.ok(claudeNoOutput.expected.requiredActions.includes("read_visible_herdr_pane"));
+  assert.ok(claudeNoOutput.expected.requiredActions.includes("launch_replacement_claude_worker"));
+
+  const codexNoOutput = loadBenchmarkScenarioFile(`${fixtureDir}/codex_session_no_output_prompt_recovery.json`);
+  assert.equal(codexNoOutput.herdrEvents[0]?.harness, "codex");
+  assert.equal(codexNoOutput.mcpCalls[1]?.tool, "ciclo_nudge_worker");
+  assert.ok(codexNoOutput.expected.requiredActions.includes("submit_pending_prompt_once"));
+  assert.ok(codexNoOutput.expected.requiredActions.includes("plan_model_escalation_if_silent"));
 });
 
 test("loads required heartbeat project-memory benchmark scenarios", () => {
@@ -260,6 +274,7 @@ test("loads required heartbeat project-memory benchmark scenarios", () => {
 
   for (const id of [
     "heartbeat_project_memory_board_hygiene",
+    "heartbeat_pi_tool_call_verification",
     "heartbeat_pr_review_model_selection",
     "heartbeat_stuck_session_model_escalation"
   ]) {
@@ -279,6 +294,13 @@ test("loads required heartbeat project-memory benchmark scenarios", () => {
   assert.equal(stuck.workerSessions[0]?.model, "gpt-5-mini");
   assert.ok(stuck.expected.evidenceIncludes.includes("model.escalation.recommended:gpt-5.5"));
   assert.ok(stuck.expected.requiredActions.includes("escalate_model_effort"));
+
+  const tools = loadBenchmarkScenarioFile(`${fixtureDir}/heartbeat_pi_tool_call_verification.json`);
+  assert.equal(tools.mcpCalls[0]?.tool, "ciclo_observe_worker");
+  assert.equal(tools.mcpCalls[1]?.tool, "ciclo_nudge_worker");
+  assert.equal(tools.mcpCalls[2]?.tool, "ciclo_poll_events");
+  assert.ok(tools.expected.evidenceIncludes.includes("brain.verification:tool_results"));
+  assert.ok(tools.expected.requiredActions.includes("skip_duplicate_fallback_nudge"));
 });
 
 test("loads project orchestrator benchmark scenario", () => {

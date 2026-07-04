@@ -4,7 +4,15 @@ import { selectAndClaimBeadsWork, type BeadsWorkClaimClient } from "./beads-work
 import { CicloCronScheduler, type CicloCronDueJob, type CicloCronRunRecord } from "./ciclo-cron.js";
 import { CicloMemoryStore, type CicloMemoryCompactResult } from "./ciclo-memory.js";
 import { mergeWorkerLaunchWithConfig, type CicloProjectConfig } from "./ciclo-config.js";
-import type { OpenAiBrain } from "./openai-brain.js";
+import type {
+  OpenAiBrain,
+  OpenAiBrainDecision,
+  OpenAiBrainToolExecutor,
+  OpenAiBrainToolName,
+  OpenAiBrainToolRequest,
+  OpenAiBrainToolResult,
+  OpenAiControlAction
+} from "./openai-brain.js";
 import type {
   RemoteHeartbeatClient,
   RemoteSessionRecord,
@@ -107,6 +115,7 @@ interface PreemptiveWorkPolicy {
   readonly loopId: string;
   readonly harnesses: readonly PreemptiveHarnessProfile[];
   readonly issueTypes: readonly string[];
+  readonly fallbackIssueTypes: readonly string[];
   readonly maxConcurrent: number;
   readonly dryRun: boolean;
   readonly isolation: WorkerIsolationMode;
@@ -129,6 +138,7 @@ const defaultPreemptiveWork: PreemptiveWorkPolicy = {
     { harnessId: "claude-code", model: "claude-fable-5" }
   ],
   issueTypes: ["epic", "feature"],
+  fallbackIssueTypes: ["task", "bug", "decision"],
   maxConcurrent: 10,
   dryRun: false,
   isolation: "worktree",
@@ -154,6 +164,30 @@ function elapsedMs(fromIso: string | undefined, toIso: string): number | undefin
 function compactText(value: string, maxLength: number): string {
   const normalized = value.replace(/\s+/gu, " ").trim();
   return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 1)}...`;
+}
+
+function paramString(params: Record<string, unknown>, key: string): string | undefined {
+  const value = params[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function paramNumber(params: Record<string, unknown>, key: string, fallback: number): number {
+  const value = params[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function paramBoolean(params: Record<string, unknown>, key: string, fallback: boolean): boolean {
+  const value = params[key];
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function toolResultData(result: OpenAiBrainToolResult): Record<string, unknown> {
+  return {
+    name: result.name,
+    ok: result.ok,
+    summary: result.summary,
+    evidence: result.evidence
+  };
 }
 
 function stableHash(value: string): number {
@@ -416,6 +450,7 @@ export class CicloInternalHeartbeat {
       loopId: config?.loopId ?? defaultPreemptiveWork.loopId,
       harnesses: configuredHarnesses.length === 0 ? defaultPreemptiveWork.harnesses : configuredHarnesses,
       issueTypes: [...(config?.issueTypes ?? defaultPreemptiveWork.issueTypes)],
+      fallbackIssueTypes: [...(config?.fallbackIssueTypes ?? defaultPreemptiveWork.fallbackIssueTypes)],
       maxConcurrent: config?.maxConcurrent ?? defaultPreemptiveWork.maxConcurrent,
       dryRun: config?.dryRun ?? defaultPreemptiveWork.dryRun,
       isolation: config?.isolation ?? defaultPreemptiveWork.isolation,
@@ -423,6 +458,20 @@ export class CicloInternalHeartbeat {
       ...(config?.model === undefined ? {} : { model: config.model }),
       ...(config?.effort === undefined ? {} : { effort: config.effort })
     };
+  }
+
+  private preemptiveSelectionStages(policy: PreemptiveWorkPolicy): readonly {
+    readonly stage: "primary" | "fallback";
+    readonly issueTypes: readonly string[];
+  }[] {
+    const sameTypes = policy.issueTypes.length === policy.fallbackIssueTypes.length &&
+      policy.issueTypes.every((item, index) => item === policy.fallbackIssueTypes[index]);
+    return [
+      { stage: "primary", issueTypes: policy.issueTypes },
+      ...(policy.fallbackIssueTypes.length === 0 || sameTypes
+        ? []
+        : [{ stage: "fallback" as const, issueTypes: policy.fallbackIssueTypes }])
+    ];
   }
 
   private selectPreemptiveHarness(
@@ -469,92 +518,113 @@ export class CicloInternalHeartbeat {
     const loop = {
       id: policy.loopId,
       kind: "beads_work" as const,
-      goal: "Discover ready Beads epic/feature work and start an appropriate Ciclo-managed worker.",
+      goal: "Discover ready Beads work and start an appropriate Ciclo-managed worker.",
       harnesses: policy.harnesses.map((profile) => profile.harnessId),
       dryRun: policy.dryRun
     };
-    const result = await selectAndClaimBeadsWork(beadsClient, {
-      selector: {
-        loop,
-        issueTypes: policy.issueTypes,
-        capacity: {
-          activeCount,
-          maxConcurrent: policy.maxConcurrent
-        }
-      },
-      limit: 20,
-      harnessForTask: (task) => this.selectPreemptiveHarness(policy, workers, task.id).harnessId,
-      principalId: this.runtime.auth?.session.ownerPrincipalId,
-      sessionId: this.runtime.auth?.session.id
-    }).catch((error: unknown) => {
-      const reason = error instanceof Error ? error.message : "unknown Beads error";
+    let readyWorkChecked = 0;
+    let claimedResult: Awaited<ReturnType<typeof selectAndClaimBeadsWork>> | undefined;
+    let claimedStage: "primary" | "fallback" = "primary";
+    for (const stage of this.preemptiveSelectionStages(policy)) {
+      const result = await selectAndClaimBeadsWork(beadsClient, {
+        selector: {
+          loop,
+          issueTypes: stage.issueTypes,
+          capacity: {
+            activeCount,
+            maxConcurrent: policy.maxConcurrent
+          }
+        },
+        limit: 20,
+        harnessForTask: (task) => this.selectPreemptiveHarness(policy, workers, task.id).harnessId,
+        principalId: this.runtime.auth?.session.ownerPrincipalId,
+        sessionId: this.runtime.auth?.session.id
+      }).catch((error: unknown) => {
+        const reason = error instanceof Error ? error.message : "unknown Beads error";
+        this.runtime.eventStore?.append({
+          type: "work.ready_listed",
+          at: checkedAt,
+          loopId: policy.loopId,
+          evidence: ["beads.ready:unavailable", "heartbeat.preemptive_work:skipped"],
+          data: {
+            checked: 0,
+            selected: null,
+            skipped: [],
+            reason,
+            selection_stage: stage.stage,
+            issue_types: stage.issueTypes
+          }
+        });
+        return undefined;
+      });
+
+      if (result === undefined) {
+        return { readyWorkChecked, launched: [], brainDecisions: [] };
+      }
+
+      const checked = result.selection.skipped.length + (result.selection.selected === undefined ? 0 : 1);
+      readyWorkChecked += checked;
       this.runtime.eventStore?.append({
         type: "work.ready_listed",
         at: checkedAt,
         loopId: policy.loopId,
-        evidence: ["beads.ready:unavailable", "heartbeat.preemptive_work:skipped"],
+        beadId: result.selection.selected?.id,
+        evidence: result.evidence,
         data: {
-          checked: 0,
-          selected: null,
-          skipped: [],
-          reason
+          checked,
+          total_checked: readyWorkChecked,
+          selected: result.selection.selected?.id ?? null,
+          skipped: result.selection.skipped,
+          reason: result.reason,
+          selection_stage: stage.stage,
+          issue_types: stage.issueTypes,
+          fallback_issue_types: policy.fallbackIssueTypes,
+          active_workers: activeCount,
+          max_concurrent: policy.maxConcurrent,
+          harness_pool: policy.harnesses.map((profile) => profile.harnessId)
         }
       });
-      return undefined;
-    });
 
-    if (result === undefined) {
-      return { readyWorkChecked: 0, launched: [], brainDecisions: [] };
-    }
-
-    const readyWorkChecked = result.selection.skipped.length + (result.selection.selected === undefined ? 0 : 1);
-    this.runtime.eventStore?.append({
-      type: "work.ready_listed",
-      at: checkedAt,
-      loopId: policy.loopId,
-      beadId: result.selection.selected?.id,
-      evidence: result.evidence,
-      data: {
-        checked: readyWorkChecked,
-        selected: result.selection.selected?.id ?? null,
-        skipped: result.selection.skipped,
-        reason: result.reason,
-        issue_types: policy.issueTypes,
-        active_workers: activeCount,
-        max_concurrent: policy.maxConcurrent,
-        harness_pool: policy.harnesses.map((profile) => profile.harnessId)
+      if (result.claimed && result.after !== undefined) {
+        claimedResult = result;
+        claimedStage = stage.stage;
+        break;
       }
-    });
-
-    if (!result.claimed || result.after === undefined) {
-      return { readyWorkChecked, launched: [], brainDecisions: [] };
+      if (result.evidence.includes("beads.select:none:capacity_full")) break;
     }
 
-    this.runtime.eventStore?.append({
+      if (claimedResult === undefined || claimedResult.after === undefined) {
+        return { readyWorkChecked, launched: [], brainDecisions: [] };
+      }
+      const result = claimedResult;
+      const claimedTask = claimedResult.after;
+
+      this.runtime.eventStore?.append({
       type: "bead.claimed",
       at: checkedAt,
       loopId: policy.loopId,
-      beadId: result.after.id,
-      evidence: result.evidence,
-      data: {
-        title: result.after.title,
-        issue_type: result.after.issueType,
-        harness_id: result.selectedHarness,
-        harness_pool: policy.harnesses.map((profile) => profile.harnessId),
-        preemptive: true
-      }
-    });
+        beadId: claimedTask.id,
+        evidence: result.evidence,
+        data: {
+          title: claimedTask.title,
+          issue_type: claimedTask.issueType,
+          harness_id: result.selectedHarness,
+          harness_pool: policy.harnesses.map((profile) => profile.harnessId),
+          selection_stage: claimedStage,
+          preemptive: true
+        }
+      });
 
-    const selectedHarness = this.selectPreemptiveHarness(policy, workers, result.after.id);
-    const selectedModel = selectedHarness.model ?? policy.model;
-    const selectedEffort = selectedHarness.effort ?? policy.effort;
-    const brainDecision = await this.decideReadyWorkLaunch(result.after, policy, selectedHarness);
-    const prompt = this.readyWorkPrompt(result.after, brainDecision);
+      const selectedHarness = this.selectPreemptiveHarness(policy, workers, claimedTask.id);
+      const selectedModel = selectedHarness.model ?? policy.model;
+      const selectedEffort = selectedHarness.effort ?? policy.effort;
+    const brainDecision = await this.decideReadyWorkLaunch(claimedTask, policy, selectedHarness, claimedStage, checkedAt);
+      const prompt = this.readyWorkPrompt(claimedTask, brainDecision, claimedStage);
     const launchRequest = mergeWorkerLaunchWithConfig(
       {
         harnessId: selectedHarness.harnessId,
         loopId: policy.loopId,
-        beadId: result.after.id,
+          beadId: claimedTask.id,
         prompt,
         cwd: this.runtime.auth?.session.projectRoot,
         dryRun: policy.dryRun,
@@ -574,7 +644,7 @@ export class CicloInternalHeartbeat {
           type: "blocker.raised",
           at: checkedAt,
           loopId: policy.loopId,
-          beadId: result.after.id,
+            beadId: claimedTask.id,
           evidence: ["heartbeat.preemptive_work:launch_failed", ...result.evidence],
           data: {
             reason,
@@ -596,17 +666,18 @@ export class CicloInternalHeartbeat {
       type: "work.started",
       at: checkedAt,
       loopId: policy.loopId,
-      beadId: result.after.id,
+      beadId: claimedTask.id,
       workerSessionId: launched.sessionId,
       state: launched.state,
       evidence: [...result.evidence, ...launched.evidence],
       data: {
-        title: result.after.title,
-        issue_type: result.after.issueType,
+        title: claimedTask.title,
+        issue_type: claimedTask.issueType,
         harness_id: launched.harnessId,
         model: launched.model,
         effort: launched.effort,
         harness_pool: policy.harnesses.map((profile) => profile.harnessId),
+        selection_stage: claimedStage,
         launch_mode: launched.launchMode,
         tracking_mode: launched.trackingMode,
         preemptive: true,
@@ -624,7 +695,9 @@ export class CicloInternalHeartbeat {
   private async decideReadyWorkLaunch(
     task: BeadsTaskSnapshot,
     policy: PreemptiveWorkPolicy,
-    selectedHarness: PreemptiveHarnessProfile
+    selectedHarness: PreemptiveHarnessProfile,
+    selectionStage: "primary" | "fallback",
+    checkedAt: string
   ): Promise<string | undefined> {
     const brain = this.runtime.openAiBrain;
     if (brain === undefined) return undefined;
@@ -633,7 +706,9 @@ export class CicloInternalHeartbeat {
       loopId: policy.loopId,
       beadId: task.id,
       harnessId: selectedHarness.harnessId,
-      prompt: "Ciclo discovered ready Beads epic or feature work while idle. Decide whether launching a worker is appropriate, what context that worker needs first, what model/effort is suitable, what should be kept in Beads memory, and what operator feedback should be surfaced before risky actions.",
+      prompt: selectionStage === "primary"
+        ? "Ciclo discovered ready Beads planning work while idle. Decide whether launching a worker is appropriate, what context that worker needs first, what model/effort is suitable, what should be kept in Beads memory, and what operator feedback should be surfaced before risky actions."
+        : "Ciclo found no primary planning work and discovered concrete ready Beads task, bug, or decision work while idle. Decide whether launching a worker is appropriate, what context that worker needs first, what model/effort is suitable, what should be kept in Beads memory, and what operator feedback should be surfaced before risky actions.",
       context: [
         `id=${task.id}`,
         `title=${task.title}`,
@@ -644,10 +719,12 @@ export class CicloInternalHeartbeat {
         `acceptance=${compactText(task.acceptanceCriteria, 600) || "none"}`,
         `harness_pool=${policy.harnesses.map((profile) => profile.harnessId).join(",")}`,
         `selected_harness=${selectedHarness.harnessId}`,
+        `selection_stage=${selectionStage}`,
         `configured_model=${selectedHarness.model ?? policy.model ?? "unspecified"}`,
         `configured_effort=${selectedHarness.effort ?? policy.effort ?? "unspecified"}`
       ],
-      evidence: [`beads.ready.selected:${task.id}`, "heartbeat.preemptive_work:brain_decision"]
+      evidence: [`beads.ready.selected:${task.id}`, "heartbeat.preemptive_work:brain_decision"],
+      toolExecutor: this.brainToolExecutor(checkedAt)
     });
     this.runtime.eventStore?.append({
       type: "brain.decision",
@@ -662,6 +739,10 @@ export class CicloInternalHeartbeat {
         decision: decision.text
       }
     });
+    this.recordBrainVerification(decision, checkedAt, {
+      loopId: policy.loopId,
+      beadId: task.id
+    });
     this.remember({
       kind: "decision",
       content: `Ready work ${task.id} selected for ${selectedHarness.harnessId}. Brain guidance: ${compactText(decision.text, 1000)}`,
@@ -675,12 +756,14 @@ export class CicloInternalHeartbeat {
     return decision.text;
   }
 
-  private readyWorkPrompt(task: BeadsTaskSnapshot, brainDecision: string | undefined): string {
+  private readyWorkPrompt(task: BeadsTaskSnapshot, brainDecision: string | undefined, selectionStage: "primary" | "fallback"): string {
     return [
       `Work Beads ${task.id}: ${task.title}`,
       "",
-      "You are a Ciclo-managed worker launched by the internal heartbeat because the project had ready epic/feature work and idle capacity.",
-      "Use the Ciclo MCP and Beads as the shared control plane. Inspect the Bead before editing, keep Beads notes current, create or claim child tasks when the epic/feature needs decomposition, and surface blockers or risky changes back to the controller instead of guessing.",
+      selectionStage === "primary"
+        ? "You are a Ciclo-managed worker launched by the internal heartbeat because the project had ready planning work and idle capacity."
+        : "You are a Ciclo-managed worker launched by the internal heartbeat because primary planning work was exhausted and the project had concrete ready task, bug, or decision work.",
+      "Use the Ciclo MCP and Beads as the shared control plane. Inspect the Bead before editing, keep Beads notes current, create or claim child tasks when decomposition is needed, and surface blockers or risky changes back to the controller instead of guessing.",
       "Prefer a small demoable slice with validation. Launch or request review work when code is ready, and do not close the Bead until acceptance criteria are met.",
       "",
       `Issue type: ${task.issueType}`,
@@ -824,7 +907,8 @@ export class CicloInternalHeartbeat {
         prompt: typeof params.prompt === "string" ? params.prompt : `Scheduled Ciclo brain decision for ${dueJob.job.id}.`,
         context: Array.isArray(params.context) ? params.context.filter((item): item is string => typeof item === "string") : [],
         evidence: ["cron.task.brain_decision"],
-        loopId: typeof params.loop_id === "string" ? params.loop_id : undefined
+        loopId: typeof params.loop_id === "string" ? params.loop_id : undefined,
+        toolExecutor: this.brainToolExecutor(now)
       });
       this.runtime.eventStore?.append({
         type: "brain.decision",
@@ -836,8 +920,12 @@ export class CicloInternalHeartbeat {
           intelligence: decision.intelligence,
           model_family: decision.modelFamily,
           model: decision.model,
-          decision: decision.text
+          decision: decision.text,
+          tool_results: decision.toolResults?.map(toolResultData) ?? []
         }
+      });
+      this.recordBrainVerification(decision, now, {
+        loopId: typeof params.loop_id === "string" ? params.loop_id : undefined
       });
       return {
         status: "ran",
@@ -909,6 +997,332 @@ export class CicloInternalHeartbeat {
     }
   }
 
+  private brainToolExecutor(now: string): OpenAiBrainToolExecutor | undefined {
+    if (
+      this.runtime.workerSupervisor === undefined &&
+      this.runtime.eventStore === undefined &&
+      this.runtime.cronScheduler === undefined &&
+      this.runtime.memoryStore === undefined
+    ) {
+      return undefined;
+    }
+    return {
+      availableTools: () => [
+        {
+          name: "ciclo_observe_worker",
+          description: "Read normalized state, Herdr pane id, agent status, and recent transcript for a Ciclo worker session.",
+          mutates: false
+        },
+        {
+          name: "ciclo_nudge_worker",
+          description: "Send a bounded prompt/context nudge into a Ciclo worker session through its managed Herdr pane.",
+          mutates: true
+        },
+        {
+          name: "ciclo_ask_operator",
+          description: "Mark a worker waiting on operator input and raise a Ciclo question event.",
+          mutates: true
+        },
+        {
+          name: "ciclo_stop_worker",
+          description: "Stop a Ciclo worker session to free capacity when it is hung, unsafe, or superseded.",
+          mutates: true
+        },
+        {
+          name: "ciclo_launch_worker",
+          description: "Launch a Ciclo-managed Claude Code or Codex worker using project defaults and worktree isolation.",
+          mutates: true
+        },
+        {
+          name: "ciclo_poll_events",
+          description: "Poll recent Ciclo events for verification after a control-plane action.",
+          mutates: false
+        },
+        {
+          name: "ciclo_heartbeat_status",
+          description: "Read the current Ciclo heartbeat status, monologue, cron, memory, and Claude-channel summary.",
+          mutates: false
+        }
+      ],
+      execute: async (request) => this.executeBrainTool(request, now)
+    };
+  }
+
+  private async executeBrainTool(request: OpenAiBrainToolRequest, now: string): Promise<OpenAiBrainToolResult> {
+    const finish = (result: OpenAiBrainToolResult): OpenAiBrainToolResult => {
+      this.runtime.eventStore?.append({
+        type: "brain.tool_call",
+        at: now,
+        evidence: result.evidence,
+        data: {
+          tool: request.name,
+          ok: result.ok,
+          summary: result.summary
+        }
+      });
+      return result;
+    };
+
+    const supervisor = this.runtime.workerSupervisor;
+    const params = request.params;
+    const workerSessionId = paramString(params, "worker_session_id");
+    try {
+      if (request.name === "ciclo_observe_worker") {
+        if (supervisor === undefined || workerSessionId === undefined) {
+          return finish({
+            name: request.name,
+            ok: false,
+            summary: "worker supervisor or worker_session_id unavailable",
+            evidence: ["brain.tool.observe_worker:unavailable"]
+          });
+        }
+        const observation = supervisor.observe(workerSessionId, paramNumber(params, "lines", 80));
+        return finish({
+          name: request.name,
+          ok: observation.observed,
+          summary: observation.reason,
+          data: {
+            worker_session_id: observation.sessionId,
+            pane_id: observation.paneId,
+            herdr_session: observation.herdrSession,
+            agent_status: observation.agentStatus,
+            transcript_source: observation.transcriptSource,
+            transcript: observation.transcript
+          },
+          evidence: ["brain.tool.observe_worker", ...observation.evidence]
+        });
+      }
+
+      if (request.name === "ciclo_nudge_worker") {
+        if (supervisor === undefined || workerSessionId === undefined) {
+          return finish({
+            name: request.name,
+            ok: false,
+            summary: "worker supervisor or worker_session_id unavailable",
+            evidence: ["brain.tool.nudge_worker:unavailable"]
+          });
+        }
+        const worker = supervisor.nudge(workerSessionId, paramString(params, "message") ?? "Ciclo brain requested a status update.", [
+          "brain.tool:nudge_worker"
+        ]);
+        const delivered = worker.evidence.includes("worker.session.nudge:delivered");
+        return finish({
+          name: request.name,
+          ok: delivered,
+          summary: delivered ? "worker nudge delivered" : "worker nudge was recorded but delivery was not confirmed",
+          data: {
+            worker_session_id: worker.sessionId,
+            state: worker.state,
+            recovery_attempts: worker.recoveryAttempts ?? 0
+          },
+          evidence: ["brain.tool.nudge_worker", ...worker.evidence.slice(-8)]
+        });
+      }
+
+      if (request.name === "ciclo_ask_operator") {
+        if (workerSessionId !== undefined) {
+          supervisor?.markWaitingOnOperator({ sessionId: workerSessionId }, ["brain.tool:ask_operator"]);
+        }
+        const questionId = `brain-tool-${workerSessionId ?? "session"}-${Date.parse(now) || now}`;
+        this.runtime.eventStore?.append({
+          type: "question.asked",
+          at: now,
+          workerSessionId,
+          loopId: paramString(params, "loop_id"),
+          beadId: paramString(params, "bead_id"),
+          state: workerSessionId === undefined ? undefined : "waiting_on_operator",
+          evidence: ["brain.tool:ask_operator"],
+          data: {
+            question_id: questionId,
+            question: paramString(params, "message") ?? "Ciclo brain needs operator input before continuing.",
+            reason: paramString(params, "reason")
+          }
+        });
+        return finish({
+          name: request.name,
+          ok: true,
+          summary: "operator question raised",
+          data: { question_id: questionId, worker_session_id: workerSessionId },
+          evidence: ["brain.tool.ask_operator", "question.asked"]
+        });
+      }
+
+      if (request.name === "ciclo_stop_worker") {
+        if (supervisor === undefined || workerSessionId === undefined) {
+          return finish({
+            name: request.name,
+            ok: false,
+            summary: "worker supervisor or worker_session_id unavailable",
+            evidence: ["brain.tool.stop_worker:unavailable"]
+          });
+        }
+        const stopped = supervisor.stop(workerSessionId, paramString(params, "reason") ?? "Ciclo brain tool requested stop.");
+        return finish({
+          name: request.name,
+          ok: stopped.state === "stopped",
+          summary: `worker state is ${stopped.state}`,
+          data: { worker_session_id: stopped.sessionId, state: stopped.state },
+          evidence: ["brain.tool.stop_worker", ...stopped.evidence.slice(-8)]
+        });
+      }
+
+      if (request.name === "ciclo_launch_worker") {
+        if (supervisor === undefined) {
+          return finish({
+            name: request.name,
+            ok: false,
+            summary: "worker supervisor unavailable",
+            evidence: ["brain.tool.launch_worker:unavailable"]
+          });
+        }
+        const rawHarness = paramString(params, "harness_id");
+        const harnessId: WorkerHarnessId = rawHarness === "claude-code" ? "claude-code" : "codex";
+        const loopId = paramString(params, "loop_id") ?? "brain-tool";
+        const prompt = paramString(params, "prompt") ?? paramString(params, "message") ?? "Continue this Ciclo-managed work and report status through Ciclo MCP.";
+        const launched = supervisor.launch(mergeWorkerLaunchWithConfig({
+          harnessId,
+          loopId,
+          beadId: paramString(params, "bead_id"),
+          prompt,
+          cwd: this.runtime.auth?.session.projectRoot,
+          dryRun: paramBoolean(params, "dry_run", false),
+          isolation: "worktree",
+          configureMcp: true,
+          ...(paramString(params, "model") === undefined ? {} : { model: paramString(params, "model") }),
+          ...(paramString(params, "effort") === undefined ? {} : { effort: paramString(params, "effort") })
+        }, this.runtime.projectConfig ?? {}));
+        this.runtime.eventStore?.append({
+          type: "work.started",
+          at: now,
+          loopId: launched.loopId,
+          beadId: launched.beadId,
+          workerSessionId: launched.sessionId,
+          state: launched.state,
+          evidence: ["brain.tool.launch_worker", ...launched.evidence],
+          data: {
+            harness_id: launched.harnessId,
+            model: launched.model,
+            effort: launched.effort,
+            launch_mode: launched.launchMode,
+            tracking_mode: launched.trackingMode,
+            preemptive: false
+          }
+        });
+        return finish({
+          name: request.name,
+          ok: true,
+          summary: `worker launched:${launched.sessionId}`,
+          data: {
+            worker_session_id: launched.sessionId,
+            state: launched.state,
+            harness_id: launched.harnessId
+          },
+          evidence: ["brain.tool.launch_worker", ...launched.evidence.slice(-8)]
+        });
+      }
+
+      if (request.name === "ciclo_poll_events") {
+        const cursor = paramNumber(params, "cursor", 0);
+        const limit = Math.max(1, Math.min(100, paramNumber(params, "limit", 25)));
+        const pollableEventStore = this.runtime.eventStore as {
+          poll?: (cursor: number, limit?: number) => {
+            readonly cursor: number;
+            readonly nextCursor: number;
+            readonly events: readonly {
+              readonly type: string;
+              readonly cursor: number;
+              readonly evidence: readonly string[];
+            }[];
+          };
+        } | undefined;
+        const poll = pollableEventStore?.poll?.(cursor, limit) ?? supervisor?.pollEvents(cursor, limit) ?? {
+          cursor,
+          nextCursor: cursor,
+          events: []
+        };
+        return finish({
+          name: request.name,
+          ok: true,
+          summary: `polled ${poll.events.length} Ciclo event(s)`,
+          data: {
+            cursor: poll.cursor,
+            next_cursor: poll.nextCursor,
+            events: poll.events.map((event) => ({
+              type: event.type,
+              cursor: event.cursor,
+              evidence: event.evidence
+            }))
+          },
+          evidence: ["brain.tool.poll_events"]
+        });
+      }
+
+      if (request.name === "ciclo_heartbeat_status") {
+        const status = this.status();
+        return finish({
+          name: request.name,
+          ok: true,
+          summary: status.running ? "heartbeat is running" : "heartbeat is stopped",
+          data: {
+            running: status.running,
+            last_tick_at: status.lastTickAt,
+            claude_channel: status.claudeChannel,
+            monologue_count: status.monologue.length
+          },
+          evidence: ["brain.tool.heartbeat_status", ...status.evidence]
+        });
+      }
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : "unknown brain tool failure";
+      return finish({
+        name: request.name,
+        ok: false,
+        summary: compactText(reason, 500),
+        evidence: [`brain.tool.${request.name}:failed`]
+      });
+    }
+
+    return finish({
+      name: request.name,
+      ok: false,
+      summary: "unknown brain tool",
+      evidence: [`brain.tool.${request.name}:unknown`]
+    });
+  }
+
+  private recordBrainVerification(
+    decision: Pick<OpenAiBrainDecision, "toolResults" | "evidence" | "purpose">,
+    now: string,
+    route: {
+      readonly loopId?: string;
+      readonly beadId?: string;
+      readonly workerSessionId?: string;
+      readonly remoteSessionId?: string;
+    }
+  ): void {
+    const results = decision.toolResults ?? [];
+    if (results.length === 0) return;
+    this.runtime.eventStore?.append({
+      type: "brain.verification",
+      at: now,
+      loopId: route.loopId,
+      beadId: route.beadId,
+      workerSessionId: route.workerSessionId,
+      evidence: [
+        "brain.verification:tool_results",
+        `brain.tools.used:${results.length}`,
+        `brain.tools.ok:${results.filter((result) => result.ok).length}`,
+        `brain.tools.failed:${results.filter((result) => !result.ok).length}`,
+        ...decision.evidence
+      ],
+      data: {
+        purpose: decision.purpose,
+        remote_session_id: route.remoteSessionId,
+        results: results.map(toolResultData)
+      }
+    });
+  }
+
   private stalledWorkerNudge(worker: WorkerSessionRecord, decision: string): string {
     return [
       "Ciclo heartbeat detected this worker has stalled.",
@@ -928,6 +1342,192 @@ export class CicloInternalHeartbeat {
     ]
       .filter((line): line is string => line !== undefined)
       .join("\n");
+  }
+
+  private workerObservationContext(worker: WorkerSessionRecord): {
+    readonly context: readonly string[];
+    readonly evidence: readonly string[];
+  } {
+    const supervisor = this.runtime.workerSupervisor;
+    if (supervisor === undefined) return { context: ["observation=unavailable"], evidence: [] };
+    try {
+      const observation = supervisor.observe(worker.sessionId, 80);
+      return {
+        context: [
+          `observation.available=${observation.observed}`,
+          `observation.reason=${observation.reason}`,
+          observation.paneId === undefined ? "pane_id=unavailable" : `pane_id=${observation.paneId}`,
+          observation.herdrSession === undefined ? "herdr_session=unavailable" : `herdr_session=${observation.herdrSession}`,
+          observation.agentStatus === undefined ? "agent_status=unknown" : `agent_status=${observation.agentStatus}`,
+          observation.transcript === undefined ? "transcript_recent=unavailable" : `transcript_recent=${observation.transcript}`
+        ],
+        evidence: observation.evidence
+      };
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : "unknown observation failure";
+      return {
+        context: [`observation.available=false`, `observation.reason=${compactText(reason, 400)}`],
+        evidence: ["worker.session.observe:failed"]
+      };
+    }
+  }
+
+  private defaultWorkerAction(worker: WorkerSessionRecord, decision: string): OpenAiControlAction {
+    return {
+      kind: "nudge",
+      reason: "OpenAI brain returned prose without a structured action; Ciclo used the safe stalled-worker nudge fallback.",
+      message: this.stalledWorkerNudge(worker, decision)
+    };
+  }
+
+  private workerActionPrompt(worker: WorkerSessionRecord, action: OpenAiControlAction): string {
+    return [
+      `Ciclo brain action: ${action.kind}`,
+      action.reason === undefined ? undefined : `Reason: ${action.reason}`,
+      action.message === undefined ? undefined : action.message,
+      "",
+      `Original worker session: ${worker.sessionId}`,
+      worker.beadId === undefined ? undefined : `Beads task: ${worker.beadId}`,
+      "Use Ciclo MCP and Beads to continue the work, report blockers, and request review before risky changes."
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join("\n");
+  }
+
+  private escalationModel(harnessId: WorkerHarnessId, current: string | undefined): string | undefined {
+    if (harnessId === "claude-code") return current ?? "claude-fable-5";
+    return current;
+  }
+
+  private executeWorkerBrainAction(
+    worker: WorkerSessionRecord,
+    decision: {
+      readonly text: string;
+      readonly action?: OpenAiControlAction;
+      readonly toolResults?: readonly OpenAiBrainToolResult[];
+      readonly evidence: readonly string[];
+    },
+    now: string
+  ): string | undefined {
+    const supervisor = this.runtime.workerSupervisor;
+    if (supervisor === undefined) return undefined;
+    if (decision.action === undefined && (decision.toolResults?.length ?? 0) > 0) {
+      return `verified_tools:${worker.sessionId}`;
+    }
+    const action = decision.action ?? this.defaultWorkerAction(worker, decision.text);
+    this.runtime.eventStore?.append({
+      type: "brain.action",
+      at: now,
+      loopId: worker.loopId,
+      beadId: worker.beadId,
+      workerSessionId: worker.sessionId,
+      state: worker.state,
+      evidence: ["brain.action:selected", ...decision.evidence],
+      data: {
+        kind: action.kind,
+        reason: action.reason,
+        harness_id: action.harnessId ?? worker.harnessId,
+        model: action.model,
+        effort: action.effort,
+        message: action.message
+      }
+    });
+
+    if (action.kind === "wait") return `waited:${worker.sessionId}`;
+
+    if (action.kind === "ask_operator") {
+      supervisor.markWaitingOnOperator({ sessionId: worker.sessionId }, [
+        "brain.action:ask_operator",
+        ...decision.evidence
+      ]);
+      const questionId = `heartbeat-${worker.sessionId}-${Date.parse(now) || now}`;
+      this.runtime.eventStore?.append({
+        type: "question.asked",
+        at: now,
+        loopId: worker.loopId,
+        beadId: worker.beadId,
+        workerSessionId: worker.sessionId,
+        state: "waiting_on_operator",
+        evidence: ["brain.action:ask_operator", ...decision.evidence],
+        data: {
+          question_id: questionId,
+          question: action.message ?? "Ciclo brain needs operator input before continuing this stalled worker.",
+          reason: action.reason,
+          harness_id: worker.harnessId,
+          session_name: worker.sessionName
+        }
+      });
+      return `asked_operator:${worker.sessionId}`;
+    }
+
+    if (action.kind === "nudge" || action.kind === "inject_context") {
+      const nudged = supervisor.nudge(worker.sessionId, action.message ?? this.stalledWorkerNudge(worker, decision.text), [
+        action.kind === "inject_context" ? "brain.action:inject_context" : "brain.action:nudge",
+        ...decision.evidence
+      ]);
+      this.remember({
+        kind: "observation",
+        content: `Ciclo ${action.kind === "inject_context" ? "injected context into" : "nudged"} stalled worker ${worker.sessionName}; delivered=${nudged.evidence.includes("worker.session.nudge:delivered")}.`,
+        tags: ["worker-stall", action.kind, worker.harnessId],
+        importance: nudged.evidence.includes("worker.session.nudge:delivered") ? "normal" : "high",
+        confidence: 0.8,
+        loopId: worker.loopId,
+        beadId: worker.beadId,
+        workerSessionId: worker.sessionId,
+        evidence: [`brain.action:${action.kind}`]
+      });
+      return action.kind === "inject_context" ? `context_injected:${worker.sessionId}` : `nudged:${worker.sessionId}`;
+    }
+
+    if (action.kind === "stop") {
+      supervisor.stop(worker.sessionId, action.reason ?? "Ciclo brain requested worker stop.");
+      return `stopped:${worker.sessionId}`;
+    }
+
+    const launchKinds = new Set<OpenAiControlAction["kind"]>([
+      "relaunch_stronger_model",
+      "launch_review_worker",
+      "launch_debug_worker",
+      "launch_test_worker"
+    ]);
+    if (!launchKinds.has(action.kind)) return undefined;
+
+    if (action.kind === "relaunch_stronger_model") {
+      supervisor.stop(worker.sessionId, action.reason ?? "Ciclo brain requested relaunch with stronger model.");
+    }
+    const harnessId = action.harnessId ?? worker.harnessId;
+    const model = action.model ?? (action.kind === "relaunch_stronger_model" ? this.escalationModel(harnessId, worker.model) : worker.model);
+    const launched = supervisor.launch(mergeWorkerLaunchWithConfig({
+      harnessId,
+      loopId: worker.loopId,
+      beadId: worker.beadId,
+      prompt: this.workerActionPrompt(worker, action),
+      cwd: this.runtime.auth?.session.projectRoot ?? worker.cwd,
+      isolation: "worktree",
+      configureMcp: true,
+      ...(model === undefined ? {} : { model }),
+      effort: action.effort ?? "high"
+    }, this.runtime.projectConfig ?? {}));
+    this.runtime.eventStore?.append({
+      type: "work.started",
+      at: now,
+      loopId: launched.loopId,
+      beadId: launched.beadId,
+      workerSessionId: launched.sessionId,
+      state: launched.state,
+      evidence: ["brain.action:worker_launch", ...launched.evidence],
+      data: {
+        brain_action: action.kind,
+        source_worker_session_id: worker.sessionId,
+        harness_id: launched.harnessId,
+        model: launched.model,
+        effort: launched.effort,
+        launch_mode: launched.launchMode,
+        tracking_mode: launched.trackingMode,
+        preemptive: false
+      }
+    });
+    return `${action.kind}:${launched.sessionId}`;
   }
 
   private async decideFollowUps(
@@ -985,6 +1585,7 @@ export class CicloInternalHeartbeat {
       }
       if ((worker.recoveryAttempts ?? 0) > 0) continue;
       if (brain === undefined) continue;
+      const observation = this.workerObservationContext(worker);
       const decision = await brain.decide({
         purpose: "remote_session_monitoring",
         loopId: worker.loopId,
@@ -998,9 +1599,11 @@ export class CicloInternalHeartbeat {
           `tracking_mode=${worker.trackingMode}`,
           `cwd=${worker.cwd}`,
           `model=${worker.model ?? "unspecified"}`,
-          `effort=${worker.effort ?? "unspecified"}`
+          `effort=${worker.effort ?? "unspecified"}`,
+          ...observation.context
         ],
-        evidence: worker.evidence
+        evidence: [...worker.evidence, ...observation.evidence],
+        toolExecutor: this.brainToolExecutor(now)
       });
       decisions.push(decision.text);
       this.remember({
@@ -1025,27 +1628,18 @@ export class CicloInternalHeartbeat {
           intelligence: decision.intelligence,
           model_family: decision.modelFamily,
           model: decision.model,
-          decision: decision.text
+          decision: decision.text,
+          action: decision.action,
+          tool_results: decision.toolResults?.map(toolResultData) ?? []
         }
       });
-      if (supervisor !== undefined) {
-        const nudged = supervisor.nudge(worker.sessionId, this.stalledWorkerNudge(worker, decision.text), [
-          "heartbeat.worker_stall:nudge",
-          ...decision.evidence
-        ]);
-        recoveryActions.push(`nudged:${worker.sessionId}`);
-        this.remember({
-          kind: "observation",
-          content: `Ciclo nudged stalled worker ${worker.sessionName}; delivered=${nudged.evidence.includes("worker.session.nudge:delivered")}.`,
-          tags: ["worker-stall", "nudge", worker.harnessId],
-          importance: nudged.evidence.includes("worker.session.nudge:delivered") ? "normal" : "high",
-          confidence: 0.8,
-          loopId: worker.loopId,
-          beadId: worker.beadId,
-          workerSessionId: worker.sessionId,
-          evidence: ["heartbeat.worker_stall:nudge"]
-        });
-      }
+      this.recordBrainVerification(decision, now, {
+        loopId: worker.loopId,
+        beadId: worker.beadId,
+        workerSessionId: worker.sessionId
+      });
+      const actionResult = this.executeWorkerBrainAction(worker, decision, now);
+      if (actionResult !== undefined) recoveryActions.push(actionResult);
     }
     for (const remote of remotes) {
       if (remote.state !== "stale" && remote.state !== "lost" && remote.state !== "blocked") continue;
@@ -1062,7 +1656,8 @@ export class CicloInternalHeartbeat {
           `transport=${remote.transport}`,
           `project_path=${remote.projectPath}`
         ],
-        evidence: remote.evidence
+        evidence: remote.evidence,
+        toolExecutor: this.brainToolExecutor(now)
       });
       decisions.push(decision.text);
       this.remember({
@@ -1087,8 +1682,14 @@ export class CicloInternalHeartbeat {
           intelligence: decision.intelligence,
           model_family: decision.modelFamily,
           model: decision.model,
-          decision: decision.text
+          decision: decision.text,
+          tool_results: decision.toolResults?.map(toolResultData) ?? []
         }
+      });
+      this.recordBrainVerification(decision, now, {
+        loopId: remote.activeLoopId,
+        beadId: remote.activeBeadId,
+        remoteSessionId: remote.id
       });
     }
     return { brainDecisions: decisions, recoveryActions };

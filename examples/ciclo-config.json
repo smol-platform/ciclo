@@ -121,6 +121,7 @@
         { "harnessId": "claude-code", "model": "claude-fable-5", "effort": "high" }
       ],
       "issueTypes": ["epic", "feature"],
+      "fallbackIssueTypes": ["task", "bug", "decision"],
       "maxConcurrent": 10,
       "isolation": "worktree",
       "configureMcp": true

@@ -53,11 +53,14 @@ test("benchmark runner loads the fixture suite in deterministic order", () => {
     "worker_mcp_secret_env_launch",
     "worker_stop_completed_claude_session",
     "post_close_launches_review_session",
+    "claude_session_no_output_recovery",
+    "codex_session_no_output_prompt_recovery",
     "claude_loop_surfaces_blocker",
     "codex_goal_launches_worker",
     "codex_goal_answer_reasonable_question",
     "project_orchestrator_real_repo_adaptive",
     "heartbeat_project_memory_board_hygiene",
+    "heartbeat_pi_tool_call_verification",
     "heartbeat_pr_review_model_selection",
     "heartbeat_stuck_session_model_escalation",
     ...expandedOrchestrationScenarioIds
@@ -116,6 +119,27 @@ test("fixture candidate preserves worker session evidence", () => {
   assert.ok(candidate.actions.some((action) => action.kind === "record_worker_session"));
 });
 
+test("fixture candidate benchmarks Claude and Codex no-output recovery", () => {
+  const claude = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/claude_session_no_output_recovery.json");
+  const claudeCandidate = buildFixtureCandidate(claude);
+  assert.equal(claudeCandidate.responseKind, "launch_worker_session");
+  assert.ok(claudeCandidate.evidence.includes("worker.failure.kind:no_output_after_launch"));
+  assert.ok(claudeCandidate.evidence.includes("worker.retry.reason:no_output_after_launch"));
+  assert.ok(claudeCandidate.actions.some((action) => action.kind === "detect_no_output_after_launch"));
+  assert.ok(claudeCandidate.actions.some((action) => action.kind === "launch_replacement_claude_worker"));
+  assert.ok(claudeCandidate.actions.some((action) => action.kind === "use_claude_loop_directive"));
+
+  const codex = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/codex_session_no_output_prompt_recovery.json");
+  const codexCandidate = buildFixtureCandidate(codex);
+  assert.equal(codexCandidate.responseKind, "nudge_agent");
+  assert.ok(codexCandidate.evidence.includes("pane.prompt_pending:true"));
+  assert.ok(codexCandidate.evidence.includes("worker.prompt_submit.enter_sent:true"));
+  assert.ok(codexCandidate.evidence.includes("brain.verification:tool_results"));
+  assert.ok(codexCandidate.actions.some((action) => action.kind === "submit_pending_prompt_once"));
+  assert.ok(codexCandidate.actions.some((action) => action.kind === "plan_model_escalation_if_silent"));
+  assert.ok(codexCandidate.actions.some((action) => action.kind === "use_codex_goal_directive"));
+});
+
 test("fixture candidate requires post-close review launch", () => {
   const scenario = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/post_close_launches_review_session.json");
   const candidate = buildFixtureCandidate(scenario);
@@ -161,6 +185,16 @@ test("fixture candidate benchmarks heartbeat project memory and model escalation
   assert.ok(stuckCandidate.evidence.includes("model.escalation.recommended:gpt-5.5"));
   assert.ok(stuckCandidate.actions.some((action) => action.kind === "build_bounded_context_pack"));
   assert.ok(stuckCandidate.actions.some((action) => action.kind === "escalate_model_effort"));
+
+  const tools = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/heartbeat_pi_tool_call_verification.json");
+  const toolsCandidate = buildFixtureCandidate(tools);
+  assert.equal(toolsCandidate.responseKind, "verified_tools");
+  assert.ok(toolsCandidate.evidence.includes("brain.tool_call:ciclo_observe_worker"));
+  assert.ok(toolsCandidate.evidence.includes("brain.tool_call:ciclo_nudge_worker"));
+  assert.ok(toolsCandidate.evidence.includes("brain.verification:tool_results"));
+  assert.ok(toolsCandidate.evidence.includes("fallback.nudge:skipped"));
+  assert.ok(toolsCandidate.actions.some((action) => action.kind === "execute_bounded_brain_tools"));
+  assert.ok(toolsCandidate.actions.some((action) => action.kind === "poll_events_for_verification"));
 });
 
 test("fixture candidate benchmarks project orchestrator adaptation", () => {
