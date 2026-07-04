@@ -64,11 +64,9 @@ RUN if [ "$RUNNER_VARIANT" != "base" ]; then \
   fi
 
 RUN curl -fsSL https://herdr.dev/install.sh | sh \
-  && if ! command -v herdr >/dev/null 2>&1; then \
-    herdr_path="$(find /root -type f -name herdr -perm /111 -print -quit)" \
-    && test -n "$herdr_path" \
-    && ln -sf "$herdr_path" /usr/local/bin/herdr; \
-  fi \
+  && herdr_path="$(find /root -type f -name herdr -perm /111 -print -quit)" \
+  && test -n "$herdr_path" \
+  && ln -sf "$herdr_path" /usr/local/bin/herdr \
   && herdr --version
 
 RUN case "$RUNNER_VARIANT" in \
