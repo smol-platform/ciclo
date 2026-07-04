@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "id": "remote_runner_kubernetes_wireguard_attach",
-  "title": "Ciclo plans a Kubernetes remote runner with WireGuard Herdr attach",
-  "description": "An operator asks Ciclo to start remote work in a Kubernetes runner. Ciclo should produce a provider launch plan, WireGuard tunnel config, Herdr remote target, and an attach plan for monitoring the overall Ciclo Herdr session.",
-  "tags": ["benchmark", "remote-runner", "wireguard", "herdr", "kubernetes", "mcp", "spec-ciclo-001"],
+  "title": "Ciclo plans a Kubernetes StatefulSet runner with WireGuard Herdr attach",
+  "description": "An operator asks Ciclo to start remote work in a durable Kubernetes runner. Ciclo should produce a StatefulSet launch plan, project egress policy, runner and host WireGuard tunnel config, Herdr remote target, host-routed service CIDRs, and an attach plan for monitoring the overall Ciclo Herdr session.",
+  "tags": ["benchmark", "remote-runner", "wireguard", "herdr", "kubernetes", "statefulset", "egress", "mcp", "spec-ciclo-001"],
   "repo": {
     "root": ".",
     "is_git_repo": true,
@@ -23,8 +23,8 @@
         "status": "open",
         "priority": 1,
         "issue_type": "task",
-        "description": "Ciclo should plan a Kubernetes remote runner with a WireGuard tunnel and Herdr attach.",
-        "acceptance_criteria": "Plan includes provider artifact, WireGuard config, Herdr remote target, and attach command.",
+        "description": "Ciclo should plan a Kubernetes StatefulSet remote runner with a WireGuard tunnel, host-routed service access, project egress policy, and Herdr attach.",
+        "acceptance_criteria": "Plan includes StatefulSet artifact, NetworkPolicy artifact, runner and host WireGuard config, service CIDR routing through the host, Herdr remote target, and attach command.",
         "spec_id": "SPEC-CICLO-001",
         "labels": ["remote-runner", "wireguard"],
         "external_refs": []
@@ -71,7 +71,7 @@
   "policy": {
     "mode": "supervised",
     "require_approval_for": ["remote_runner_launch", "task_close"],
-    "allow_commands": ["kubectl -n ciclo-runners apply -f runner-k8s-1.job.yaml", "npm run check"]
+    "allow_commands": ["kubectl -n ciclo-runners apply -f runner-k8s-1.statefulset.yaml", "kubectl -n ciclo-runners apply -f runner-k8s-1-egress.networkpolicy.yaml", "npm run check"]
   },
   "mcp_calls": [
     {
@@ -88,7 +88,24 @@
         "herdr_session": "ciclo",
         "wireguard": {
           "runner_address": "10.44.0.2/24",
-          "ciclo_endpoint": "198.51.100.10:51820"
+          "ciclo_endpoint": "198.51.100.10:51820",
+          "host_routing": {
+            "enabled": true,
+            "service_cidrs": ["192.168.0.0/16"],
+            "egress_interface": "auto"
+          }
+        },
+        "egress": {
+          "enabled": true,
+          "name": "runner-k8s-1-egress",
+          "cidrs": ["140.82.112.0/20"],
+          "domains": ["github.com", "api.github.com", "registry.npmjs.org"]
+        },
+        "kubernetes": {
+          "mode": "statefulset",
+          "statefulset_name": "runner-k8s-1",
+          "service_name": "runner-k8s-1-headless",
+          "storage_size": "20Gi"
         },
         "dry_run": true
       },
@@ -109,7 +126,7 @@
       "harness_id": "codex",
       "bead_id": "ciclo-remote.1",
       "state": "registered",
-      "evidence": ["remote.runner.kind:kubernetes", "remote.runner.wireguard:planned", "ciclo.attach:planned"]
+      "evidence": ["remote.runner.kind:kubernetes", "remote.runner.execution_model:kubernetes_statefulset", "remote.runner.egress:planned", "remote.runner.wireguard:planned", "remote.runner.wireguard.host_routing:enabled", "ciclo.attach:planned"]
     }
   ],
   "worker_sessions": [],
@@ -124,15 +141,15 @@
     "items": [
       {
         "source": "remote",
-        "text": "Kubernetes runner request needs WireGuard tunnel and Herdr attach plan.",
+        "text": "Kubernetes runner request needs a StatefulSet, project egress policy, WireGuard host-routed service access, and Herdr attach plan.",
         "sensitive": false
       }
     ]
   },
   "expected": {
     "response_kinds": ["launch_remote_runner", "report_status"],
-    "evidence_includes": ["remote.runner.wireguard:planned", "ciclo.attach:planned"],
-    "required_actions": ["build_remote_runner_plan", "record_remote_runner", "provide_ciclo_attach_plan"]
+    "evidence_includes": ["remote.runner.execution_model:kubernetes_statefulset", "remote.runner.egress:planned", "remote.runner.wireguard:planned", "remote.runner.wireguard.host_routing:enabled", "ciclo.attach:planned"],
+    "required_actions": ["build_remote_runner_plan", "record_remote_runner", "provide_ciclo_attach_plan", "include_project_egress_policy", "include_wireguard_host_routing"]
   },
   "disallowed": {
     "response_kinds": ["send_prompt", "deploy"],

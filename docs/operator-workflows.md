@@ -178,7 +178,7 @@ Use remote runners when Ciclo needs to create a runnable environment instead of 
 
 Supported runner kinds:
 
-- `kubernetes`: produces a Job manifest and `kubectl` apply commands. This is the preferred durable interactive runner because it can keep a Herdr session alive.
+- `kubernetes`: produces a StatefulSet plus headless Service by default, with `kubectl` apply commands. This is the preferred durable interactive runner because the pod identity is stable enough for Herdr attach, restart recovery, and session monitoring. Use `preflight_only: true` or `kubernetes.mode: "job"` for short validation runs.
 - `aws-lambda`: targets AWS Lambda MicroVMs. The plugin emits `aws lambda-microvms` image creation and lifecycle commands such as `run-microvm`, `suspend-microvm`, `resume-microvm`, and `terminate-microvm`, plus bootstrap notes for Herdr and userspace WireGuard.
 - `cloudflare`: produces Wrangler configuration and connector notes. Use a Cloudflare container or userspace connector for Herdr plus WireGuard, not a plain Worker alone.
 
@@ -186,11 +186,14 @@ WireGuard runner setup:
 
 1. Ciclo owns the hub-side endpoint and public key.
 2. The runner uses either an existing Kubernetes Secret containing `runner.conf` or launch-time resolved key material. Do not run live Kubernetes workers with unresolved `${secret:...}` placeholders.
-3. The runner clones or refreshes `repo_url` into `repo_path`.
-4. The runner runs `devenv shell -- true` when the project has `devenv.nix`; this loads project dependencies as the last-mile remote environment check.
-5. The runner executes the Ciclo preflight script and reports whether Claude Code access and Ciclo-like build tools are usable in that environment. Use `preflight_only: true` when validating an image or cluster without starting WireGuard or Herdr.
-6. The runner brings up `wg-ciclo`, then Herdr starts a named session derived from the repository name, for example `ciclo` in this repo.
-7. Ciclo attaches through the tunnel using a Herdr remote target such as `ciclo@10.44.0.2:/workspace/ciclo`.
+3. The Ciclo host uses the generated `<interface>.host.conf` and `<interface>.host-setup.sh` artifacts. The setup script installs the host config, enables IPv4 forwarding, adds forwarding/NAT rules, and starts `wg-quick`. When no key material or existing runner Secret is configured, Kubernetes plans include `<runner>.wireguard-bootstrap.sh` to generate a local hub/runner keypair, install the host interface, and create the Kubernetes `runner.conf` Secret in one step.
+4. The runner `AllowedIPs` include the WireGuard network and any `remote.wireGuard.hostRouting.serviceCidrs`. Those service CIDRs route from the remote worker through the Ciclo host so agents can reach host-side or private-network services.
+5. The runner clones or refreshes `repo_url` into `repo_path`.
+6. The runner runs `devenv shell -- true` when the project has `devenv.nix`; this loads project dependencies as the last-mile remote environment check.
+7. Project egress policy comes from `remote.egress`. CIDR allowlists become Kubernetes NetworkPolicy `ipBlock` rules. Domain allowlists are preserved as Ciclo annotations and must be enforced by a CNI egress gateway, DNS proxy, or provider policy that understands domains.
+8. The runner executes the Ciclo preflight script and reports whether Claude Code access and Ciclo-like build tools are usable in that environment. Use `preflight_only: true` when validating an image or cluster without starting WireGuard or Herdr.
+9. The runner brings up `wg-ciclo`, then Herdr starts a named session derived from the repository name, for example `ciclo` in this repo.
+10. Ciclo attaches through the tunnel using a Herdr remote target such as `ciclo@10.44.0.2:/workspace/ciclo`.
 
 Operator attach commands:
 

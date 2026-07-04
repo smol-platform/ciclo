@@ -445,7 +445,8 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       prompt: stringSchema("Bounded worker prompt."),
       herdr_session: stringSchema("Herdr session name, defaults to the repository session name."),
       ssh_user: stringSchema("SSH user exposed over the WireGuard tunnel."),
-      wireguard: { type: "object" },
+      wireguard: { type: "object", description: "WireGuard tunnel request. Accepts interface/network/runner/ciclo addresses, key refs or key material, existing_config_secret_name, and host_routing. host_routing can enable host-routed service access with service_cidrs, route_all_traffic, egress_interface, and masquerade." },
+      egress: { type: "object", description: "Project egress allowlist for the remote runner. Accepts enabled, name, cidrs, and domains. Kubernetes emits NetworkPolicy for CIDRs and annotates domains for CNI/proxy enforcement." },
       preflight: { type: "object", description: "Runtime preflight options. Defaults to enabled with Claude Code access and Ciclo-like build usability checks; accepts enabled, claude, build, and report_path." },
       environment: { type: "object" },
       configure_mcp: booleanSchema("Generate Ciclo MCP client config artifacts for the remote repository path. Defaults to true when project MCP config exists, otherwise true for remote launches."),
@@ -454,10 +455,20 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       mcp_command: stringSchema("Ciclo command for remote MCP clients to run. Default: ciclo or project config."),
       mcp_env: { type: "object", description: "Additional non-secret variables to write into the remote Ciclo MCP server config." },
       mcp_additional_servers: { type: "object", description: "Additional third-party MCP servers to include in generated remote Claude/Codex config. Object keys are server names; values accept command, args, and env. Raw env values must be non-secret; values may include ${secret://provider-id/ref} placeholders resolved at session MCP config install time." },
+      mcp_secret_env: {
+        type: "array",
+        items: { type: "object" },
+        description: "Secret-backed environment bindings for the generated Ciclo MCP server in the remote session. Values are represented as runtime wrappers, not plaintext config."
+      },
+      worker_secret_env: {
+        type: "array",
+        items: { type: "object" },
+        description: "Secret-backed environment bindings for the remote worker process tree. Ciclo wraps remote Herdr session startup with ciclo secret exec so panes inherit the values at process runtime."
+      },
       mcp_claude_channel: booleanSchema("Enable Claude channel capability in the generated remote MCP config."),
       preflight_only: booleanSchema("Run preflight and repo bootstrap, then exit before WireGuard and Herdr startup."),
       repo_bootstrap: { type: "object", description: "Repository bootstrap options. Defaults to clone/fetch repo_url into repo_path and run devenv shell -- true when devenv.nix exists." },
-      kubernetes: { type: "object" },
+      kubernetes: { type: "object", description: "Kubernetes options. Defaults to mode=statefulset for durable Herdr sessions. Accepts namespace, service_account, mode, job_name, statefulset_name, service_name, replicas, storage_size, and storage_class_name." },
       aws_lambda: { type: "object", description: "AWS Lambda MicroVM options such as microvm_image_name, microvm_image_identifier, microvm_name, source_s3_uri, base_image_arn, build_role_arn, execution_role_arn, memory_mb, and vcpu_count." },
       cloudflare: { type: "object" },
       dry_run: booleanSchema("Plan without invoking a provider executor.")
@@ -471,8 +482,10 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       herdr_remote_target: stringSchema("Herdr remote target reachable over WireGuard."),
       image_resolution: { type: "object" },
       repo_bootstrap: { type: "object" },
+      egress: { type: "object" },
       attach: { type: "object" },
       mcp_config: { type: "object" },
+      worker_secret_env: { type: "object" },
       wireguard: { type: "object" },
       preflight: { type: "object" },
       commands: arrayOfStrings("Provider commands to apply the plan."),

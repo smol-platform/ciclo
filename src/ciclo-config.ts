@@ -5,6 +5,7 @@ import type { CicloMcpAdditionalServerConfig, CicloMcpInstallClient, CicloMcpIns
 import type {
   RemoteRunnerImageResolverRequest,
   RemoteRunnerLaunchRequest,
+  RemoteRunnerEgressPolicyRequest,
   RemoteRunnerRepoBootstrapRequest,
   WireGuardTunnelRequest
 } from "./remote-runner.js";
@@ -59,11 +60,18 @@ export interface CicloConfigRemote {
   readonly wireGuard?: WireGuardTunnelRequest;
   readonly preflightOnly?: boolean;
   readonly repoBootstrap?: RemoteRunnerRepoBootstrapRequest;
+  readonly egress?: RemoteRunnerEgressPolicyRequest;
   readonly vars?: Record<string, string>;
   readonly kubernetes?: {
     readonly namespace?: string;
     readonly serviceAccount?: string;
     readonly jobName?: string;
+    readonly mode?: "statefulset" | "job";
+    readonly statefulSetName?: string;
+    readonly serviceName?: string;
+    readonly replicas?: number;
+    readonly storageSize?: string;
+    readonly storageClassName?: string;
   };
   readonly awsLambda?: {
     readonly microVmImageName?: string;
@@ -269,16 +277,22 @@ function parseWireGuard(record: Record<string, unknown>): WireGuardTunnelRequest
   const value = record.wireguard ?? record.wireGuard;
   if (value === undefined) return undefined;
   const wireguard = objectValue(value, "remote.wireguard");
+  const hostRoutingValue = wireguard.host_routing ?? wireguard.hostRouting;
+  const hostRouting = hostRoutingValue === undefined ? undefined : objectValue(hostRoutingValue, "remote.wireguard.hostRouting");
   const interfaceName = optionalStringAny(wireguard, ["interface_name", "interfaceName"]);
   const networkCidr = optionalStringAny(wireguard, ["network_cidr", "networkCidr"]);
   const cicloAddress = optionalStringAny(wireguard, ["ciclo_address", "cicloAddress"]);
   const runnerAddress = optionalStringAny(wireguard, ["runner_address", "runnerAddress"]);
   const cicloEndpoint = optionalStringAny(wireguard, ["ciclo_endpoint", "cicloEndpoint"]);
   const cicloPublicKeySecretRef = optionalStringAny(wireguard, ["ciclo_public_key_ref", "cicloPublicKeySecretRef"]);
+  const cicloPrivateKeySecretRef = optionalStringAny(wireguard, ["ciclo_private_key_ref", "cicloPrivateKeySecretRef"]);
   const runnerPrivateKeySecretRef = optionalStringAny(wireguard, ["runner_private_key_ref", "runnerPrivateKeySecretRef"]);
+  const runnerPublicKeySecretRef = optionalStringAny(wireguard, ["runner_public_key_ref", "runnerPublicKeySecretRef"]);
   const existingConfigSecretName = optionalStringAny(wireguard, ["existing_config_secret_name", "existingConfigSecretName"]);
   const runnerPrivateKeyValue = optionalStringAny(wireguard, ["runner_private_key_value", "runnerPrivateKeyValue"]);
   const cicloPublicKeyValue = optionalStringAny(wireguard, ["ciclo_public_key_value", "cicloPublicKeyValue"]);
+  const cicloPrivateKeyValue = optionalStringAny(wireguard, ["ciclo_private_key_value", "cicloPrivateKeyValue"]);
+  const runnerPublicKeyValue = optionalStringAny(wireguard, ["runner_public_key_value", "runnerPublicKeyValue"]);
   const persistentKeepaliveSeconds = optionalNumberAny(wireguard, ["persistent_keepalive_seconds", "persistentKeepaliveSeconds"]);
   return {
     ...(interfaceName === undefined ? {} : { interfaceName }),
@@ -287,11 +301,24 @@ function parseWireGuard(record: Record<string, unknown>): WireGuardTunnelRequest
     ...(runnerAddress === undefined ? {} : { runnerAddress }),
     ...(cicloEndpoint === undefined ? {} : { cicloEndpoint }),
     ...(cicloPublicKeySecretRef === undefined ? {} : { cicloPublicKeySecretRef }),
+    ...(cicloPrivateKeySecretRef === undefined ? {} : { cicloPrivateKeySecretRef }),
     ...(runnerPrivateKeySecretRef === undefined ? {} : { runnerPrivateKeySecretRef }),
+    ...(runnerPublicKeySecretRef === undefined ? {} : { runnerPublicKeySecretRef }),
     ...(existingConfigSecretName === undefined ? {} : { existingConfigSecretName }),
     ...(runnerPrivateKeyValue === undefined ? {} : { runnerPrivateKeyValue }),
     ...(cicloPublicKeyValue === undefined ? {} : { cicloPublicKeyValue }),
-    ...(persistentKeepaliveSeconds === undefined ? {} : { persistentKeepaliveSeconds })
+    ...(cicloPrivateKeyValue === undefined ? {} : { cicloPrivateKeyValue }),
+    ...(runnerPublicKeyValue === undefined ? {} : { runnerPublicKeyValue }),
+    ...(persistentKeepaliveSeconds === undefined ? {} : { persistentKeepaliveSeconds }),
+    ...(hostRouting === undefined ? {} : {
+      hostRouting: {
+        ...(optionalBoolean(hostRouting, "enabled") === undefined ? {} : { enabled: optionalBoolean(hostRouting, "enabled") }),
+        ...(stringList(hostRouting.service_cidrs ?? hostRouting.serviceCidrs, "remote.wireguard.hostRouting.serviceCidrs").length === 0 ? {} : { serviceCidrs: stringList(hostRouting.service_cidrs ?? hostRouting.serviceCidrs, "remote.wireguard.hostRouting.serviceCidrs") }),
+        ...(optionalBooleanAny(hostRouting, ["route_all_traffic", "routeAllTraffic"]) === undefined ? {} : { routeAllTraffic: optionalBooleanAny(hostRouting, ["route_all_traffic", "routeAllTraffic"]) }),
+        ...(optionalStringAny(hostRouting, ["egress_interface", "egressInterface"]) === undefined ? {} : { egressInterface: optionalStringAny(hostRouting, ["egress_interface", "egressInterface"]) }),
+        ...(optionalBoolean(hostRouting, "masquerade") === undefined ? {} : { masquerade: optionalBoolean(hostRouting, "masquerade") })
+      }
+    })
   };
 }
 
@@ -336,6 +363,22 @@ function parseRepoBootstrap(record: Record<string, unknown>): RemoteRunnerRepoBo
   };
 }
 
+function parseRemoteEgress(record: Record<string, unknown>): RemoteRunnerEgressPolicyRequest | undefined {
+  const value = record.egress ?? record.egress_policy ?? record.egressPolicy;
+  if (value === undefined) return undefined;
+  const egress = objectValue(value, "remote.egress");
+  const enabled = optionalBoolean(egress, "enabled");
+  const name = optionalString(egress, "name");
+  const cidrs = stringList(egress.cidrs, "remote.egress.cidrs");
+  const domains = stringList(egress.domains, "remote.egress.domains");
+  return {
+    ...(enabled === undefined ? {} : { enabled }),
+    ...(name === undefined ? {} : { name }),
+    ...(cidrs.length === 0 ? {} : { cidrs }),
+    ...(domains.length === 0 ? {} : { domains })
+  };
+}
+
 function parseRemote(root: Record<string, unknown>): CicloConfigRemote | undefined {
   if (root.remote === undefined) return undefined;
   const record = objectValue(root.remote, "remote");
@@ -352,7 +395,12 @@ function parseRemote(root: Record<string, unknown>): CicloConfigRemote | undefin
   const wireGuard = parseWireGuard(record);
   const preflightOnly = optionalBooleanAny(record, ["preflight_only", "preflightOnly"]);
   const repoBootstrap = parseRepoBootstrap(record);
+  const egress = parseRemoteEgress(record);
   const vars = stringRecord(record, "vars");
+  const kubernetesMode = optionalString(kubernetes, "mode");
+  if (kubernetesMode !== undefined && kubernetesMode !== "statefulset" && kubernetesMode !== "job") {
+    throw new Error("remote.kubernetes.mode must be statefulset or job");
+  }
   return {
     ...(runnerKind === undefined ? {} : { runnerKind }),
     ...(image === undefined ? {} : { image }),
@@ -364,11 +412,18 @@ function parseRemote(root: Record<string, unknown>): CicloConfigRemote | undefin
     ...(wireGuard === undefined ? {} : { wireGuard }),
     ...(preflightOnly === undefined ? {} : { preflightOnly }),
     ...(repoBootstrap === undefined ? {} : { repoBootstrap }),
+    ...(egress === undefined ? {} : { egress }),
     ...(vars === undefined ? {} : { vars }),
     kubernetes: {
       ...(optionalString(kubernetes, "namespace") === undefined ? {} : { namespace: optionalString(kubernetes, "namespace") }),
       ...(optionalStringAny(kubernetes, ["service_account", "serviceAccount"]) === undefined ? {} : { serviceAccount: optionalStringAny(kubernetes, ["service_account", "serviceAccount"]) }),
-      ...(optionalStringAny(kubernetes, ["job_name", "jobName"]) === undefined ? {} : { jobName: optionalStringAny(kubernetes, ["job_name", "jobName"]) })
+      ...(optionalStringAny(kubernetes, ["job_name", "jobName"]) === undefined ? {} : { jobName: optionalStringAny(kubernetes, ["job_name", "jobName"]) }),
+      ...(kubernetesMode === undefined ? {} : { mode: kubernetesMode }),
+      ...(optionalStringAny(kubernetes, ["statefulset_name", "statefulSetName"]) === undefined ? {} : { statefulSetName: optionalStringAny(kubernetes, ["statefulset_name", "statefulSetName"]) }),
+      ...(optionalStringAny(kubernetes, ["service_name", "serviceName"]) === undefined ? {} : { serviceName: optionalStringAny(kubernetes, ["service_name", "serviceName"]) }),
+      ...(optionalNumber(kubernetes, "replicas") === undefined ? {} : { replicas: optionalNumber(kubernetes, "replicas") }),
+      ...(optionalStringAny(kubernetes, ["storage_size", "storageSize"]) === undefined ? {} : { storageSize: optionalStringAny(kubernetes, ["storage_size", "storageSize"]) }),
+      ...(optionalStringAny(kubernetes, ["storage_class_name", "storageClassName"]) === undefined ? {} : { storageClassName: optionalStringAny(kubernetes, ["storage_class_name", "storageClassName"]) })
     },
     awsLambda: {
       ...(optionalStringAny(awsLambda, ["microvm_image_name", "microVmImageName"]) === undefined ? {} : { microVmImageName: optionalStringAny(awsLambda, ["microvm_image_name", "microVmImageName"]) }),
@@ -685,9 +740,12 @@ export function mergeRemoteRunnerLaunchWithConfig(input: RemoteRunnerLaunchReque
     mcpCommand: input.mcpCommand ?? mcp?.command,
     mcpVars: mergeVars(mcp?.vars, input.mcpVars),
     mcpAdditionalServers: mergeAdditionalServers(mcp?.additionalServers, input.mcpAdditionalServers),
+    mcpSecretEnv: input.mcpSecretEnv ?? configMcpSecretEnvBindings(config),
+    workerSecretEnv: input.workerSecretEnv ?? configWorkerSecretEnvBindings(config),
     mcpClaudeChannel: input.mcpClaudeChannel ?? mcp?.claudeChannel,
     preflightOnly: input.preflightOnly ?? remote?.preflightOnly,
     repoBootstrap: { ...(remote?.repoBootstrap ?? {}), ...(input.repoBootstrap ?? {}) },
+    egress: { ...(remote?.egress ?? {}), ...(input.egress ?? {}) },
     kubernetes: { ...(remote?.kubernetes ?? {}), ...(input.kubernetes ?? {}) },
     awsLambda: { ...(remote?.awsLambda ?? {}), ...(input.awsLambda ?? {}) },
     cloudflare: { ...(remote?.cloudflare ?? {}), ...(input.cloudflare ?? {}) }
@@ -726,9 +784,22 @@ export const sampleCicloProjectConfig: CicloProjectConfig = {
       networkCidr: "10.44.0.0/24",
       cicloEndpoint: "ciclo-wireguard.example.invalid:51820",
       runnerPrivateKeySecretRef: "ciclo/wireguard/runner_private_key",
-      cicloPublicKeySecretRef: "ciclo/wireguard/ciclo_public_key"
+      cicloPublicKeySecretRef: "ciclo/wireguard/ciclo_public_key",
+      cicloPrivateKeySecretRef: "ciclo/wireguard/ciclo_private_key",
+      runnerPublicKeySecretRef: "ciclo/wireguard/runner_public_key",
+      hostRouting: {
+        enabled: true,
+        serviceCidrs: ["192.168.0.0/16"],
+        egressInterface: "auto",
+        masquerade: true
+      }
     },
-    kubernetes: { namespace: "ciclo", serviceAccount: "ciclo-runner" }
+    egress: {
+      enabled: true,
+      cidrs: ["140.82.112.0/20"],
+      domains: ["github.com", "api.github.com", "registry.npmjs.org"]
+    },
+    kubernetes: { namespace: "ciclo", serviceAccount: "ciclo-runner", mode: "statefulset" }
   }
 };
 

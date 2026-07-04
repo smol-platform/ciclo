@@ -129,7 +129,7 @@ Blocked-state handling has one explicit exception: when a scenario marks a harne
 | `remote_duplicate_claim_prevented` | Duplicate remote claims are denied while an active remote owner exists. |
 | `remote_attach_herdr_unavailable` | Missing remote Herdr becomes a setup blocker with redacted evidence. |
 | `remote_attach_scope_violation` | Remote registration is denied when the requesting principal lacks scope. |
-| `remote_runner_kubernetes_wireguard_attach` | Ciclo plans a Kubernetes remote runner with WireGuard and Herdr attach commands. |
+| `remote_runner_kubernetes_wireguard_attach` | Ciclo plans a Kubernetes StatefulSet remote runner with project egress policy, host-routed WireGuard service access, and Herdr attach commands. |
 
 ### Multiuser Auth
 

@@ -41,13 +41,31 @@ test("loads project config for secrets MCP and remote defaults", () => {
       image: "ghcr.io/acme/ciclo-runner:latest",
       repo_path: "/workspace/acme",
       ssh_user: "runner",
+      egress: {
+        enabled: true,
+        cidrs: ["140.82.112.0/20"],
+        domains: ["github.com", "api.github.com"]
+      },
       wireguard: {
         network_cidr: "10.70.0.0/24",
-        runner_address: "10.70.0.9/24"
+        runner_address: "10.70.0.9/24",
+        ciclo_private_key_ref: "team/wg/ciclo_private",
+        runner_public_key_ref: "team/wg/runner_public",
+        host_routing: {
+          enabled: true,
+          service_cidrs: ["192.168.0.0/16"],
+          egress_interface: "en0",
+          masquerade: true
+        }
       },
       kubernetes: {
         namespace: "ciclo-team",
-        service_account: "ciclo-runner"
+        service_account: "ciclo-runner",
+        mode: "statefulset",
+        statefulset_name: "ciclo-acme",
+        service_name: "ciclo-acme-headless",
+        replicas: 1,
+        storage_size: "20Gi"
       }
     }
   }));
@@ -57,7 +75,15 @@ test("loads project config for secrets MCP and remote defaults", () => {
   assert.equal(config.mcp?.secretBindings?.[0]?.ref, "secret/data/ciclo/api");
   assert.equal(config.mcp?.secretBindings?.[0]?.format, "Bearer ${secret}");
   assert.equal(config.remote?.runnerKind, "kubernetes");
+  assert.deepEqual(config.remote?.egress?.domains, ["github.com", "api.github.com"]);
   assert.equal(config.remote?.wireGuard?.runnerAddress, "10.70.0.9/24");
+  assert.equal(config.remote?.wireGuard?.cicloPrivateKeySecretRef, "team/wg/ciclo_private");
+  assert.equal(config.remote?.wireGuard?.runnerPublicKeySecretRef, "team/wg/runner_public");
+  assert.deepEqual(config.remote?.wireGuard?.hostRouting?.serviceCidrs, ["192.168.0.0/16"]);
+  assert.equal(config.remote?.wireGuard?.hostRouting?.egressInterface, "en0");
+  assert.equal(config.remote?.kubernetes?.mode, "statefulset");
+  assert.equal(config.remote?.kubernetes?.statefulSetName, "ciclo-acme");
+  assert.equal(config.remote?.kubernetes?.storageSize, "20Gi");
 
   const redacted = redactedCicloProjectConfig(config);
   assert.equal(redacted.mcp?.secretBindings?.[0]?.ref, "[redacted secret ref]");
@@ -171,6 +197,7 @@ test("config merges into MCP install worker and remote requests", () => {
       sshUser: "ciclo",
       preflightOnly: true,
       repoBootstrap: { useDevenv: true },
+      egress: { enabled: true, cidrs: ["203.0.113.0/24"], domains: ["github.com"] },
       vars: { CICLO_REMOTE_MODE: "config" },
       cloudflare: { accountId: "acct-1", workerName: "ciclo-worker" }
     }
@@ -212,6 +239,8 @@ test("config merges into MCP install worker and remote requests", () => {
   assert.equal(remote.imageResolver?.strategy, "variant");
   assert.equal(remote.preflightOnly, true);
   assert.equal(remote.repoBootstrap?.useDevenv, true);
+  assert.deepEqual(remote.egress?.cidrs, ["203.0.113.0/24"]);
+  assert.deepEqual(remote.egress?.domains, ["github.com"]);
   assert.equal(remote.repoPath, "/workspace/repo");
   assert.equal(remote.environment?.CICLO_REMOTE_MODE, "config");
   assert.equal(remote.mcpAdditionalServers?.filesystem?.command, "npx");

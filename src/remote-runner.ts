@@ -5,9 +5,12 @@ import {
   renderFreshCicloMcpInstallArtifacts,
   type CicloMcpAdditionalServerConfig,
   type CicloMcpInstallClient,
-  type CicloMcpInstallResult
+  type CicloMcpInstallResult,
+  type CicloMcpSecretEnvBinding,
+  type CicloMcpSecretEnvInstall
 } from "./mcp-install.js";
 import type { CicloMcpAdditionalServerSecretEnvInstall } from "./mcp-secret-placeholders.js";
+import { encodeRuntimeSecretEnvBindings, type RuntimeSecretEnvBinding } from "./secret-env-runtime.js";
 import { repoSessionName } from "./repo-session-name.js";
 
 export type BuiltinRemoteRunnerKind = "kubernetes" | "aws-lambda" | "cloudflare";
@@ -24,11 +27,24 @@ export interface WireGuardTunnelRequest {
   readonly runnerAddress?: string;
   readonly cicloEndpoint?: string;
   readonly cicloPublicKeySecretRef?: string;
+  readonly cicloPrivateKeySecretRef?: string;
   readonly runnerPrivateKeySecretRef?: string;
+  readonly runnerPublicKeySecretRef?: string;
   readonly existingConfigSecretName?: string;
   readonly runnerPrivateKeyValue?: string;
   readonly cicloPublicKeyValue?: string;
+  readonly cicloPrivateKeyValue?: string;
+  readonly runnerPublicKeyValue?: string;
   readonly persistentKeepaliveSeconds?: number;
+  readonly hostRouting?: WireGuardHostRoutingRequest;
+}
+
+export interface WireGuardHostRoutingRequest {
+  readonly enabled?: boolean;
+  readonly serviceCidrs?: readonly string[];
+  readonly routeAllTraffic?: boolean;
+  readonly egressInterface?: string;
+  readonly masquerade?: boolean;
 }
 
 export type RemoteRunnerPreflightProbeKind = "command" | "version" | "claude_access" | "repo_build";
@@ -71,6 +87,24 @@ export interface RemoteRunnerRepoBootstrapPlan {
 export interface RemoteRunnerRepoBootstrapRequest {
   readonly enabled?: boolean;
   readonly useDevenv?: boolean;
+}
+
+export interface RemoteRunnerEgressPolicyRequest {
+  readonly enabled?: boolean;
+  readonly name?: string;
+  readonly cidrs?: readonly string[];
+  readonly domains?: readonly string[];
+}
+
+export interface RemoteRunnerEgressPolicyPlan {
+  readonly enabled: boolean;
+  readonly name?: string;
+  readonly cidrs: readonly string[];
+  readonly domains: readonly string[];
+  readonly commands: readonly string[];
+  readonly artifacts: readonly RemoteRunnerArtifact[];
+  readonly warnings: readonly string[];
+  readonly evidence: readonly string[];
 }
 
 export interface RemoteRunnerImageResolverRequest {
@@ -116,13 +150,22 @@ export interface RemoteRunnerLaunchRequest {
   readonly mcpVars?: Record<string, string>;
   readonly mcpAdditionalServers?: Record<string, CicloMcpAdditionalServerConfig>;
   readonly mcpAdditionalServerSecretEnv?: readonly CicloMcpAdditionalServerSecretEnvInstall[];
+  readonly mcpSecretEnv?: readonly CicloMcpSecretEnvBinding[];
+  readonly workerSecretEnv?: readonly CicloMcpSecretEnvBinding[];
   readonly mcpClaudeChannel?: boolean;
   readonly preflightOnly?: boolean;
   readonly repoBootstrap?: RemoteRunnerRepoBootstrapRequest;
+  readonly egress?: RemoteRunnerEgressPolicyRequest;
   readonly kubernetes?: {
     readonly namespace?: string;
     readonly serviceAccount?: string;
     readonly jobName?: string;
+    readonly mode?: "statefulset" | "job";
+    readonly statefulSetName?: string;
+    readonly serviceName?: string;
+    readonly replicas?: number;
+    readonly storageSize?: string;
+    readonly storageClassName?: string;
   };
   readonly preflight?: RemoteRunnerPreflightRequest;
   readonly awsLambda?: {
@@ -152,9 +195,23 @@ export interface WireGuardTunnelPlan {
   readonly runnerAddress: string;
   readonly cicloEndpoint: string;
   readonly requiredSecrets: readonly string[];
+  readonly requiredHostSecrets: readonly string[];
   readonly existingConfigSecretName?: string;
   readonly secretMaterialProvided: boolean;
+  readonly hostMaterialProvided: boolean;
+  readonly runnerAllowedIps: readonly string[];
+  readonly hostRouting: {
+    readonly enabled: boolean;
+    readonly serviceCidrs: readonly string[];
+    readonly routeAllTraffic: boolean;
+    readonly egressInterface: string;
+    readonly masquerade: boolean;
+  };
   readonly runnerConfig: string;
+  readonly hostConfig: string;
+  readonly hostSetupScript: string;
+  readonly artifacts: readonly RemoteRunnerArtifact[];
+  readonly commands: readonly string[];
   readonly evidence: readonly string[];
 }
 
@@ -175,11 +232,27 @@ export interface RemoteRunnerMcpConfigPlan {
   readonly additionalServers: Record<string, CicloMcpAdditionalServerConfig>;
   readonly additionalServerNames: readonly string[];
   readonly additionalServerSecretEnv: readonly CicloMcpAdditionalServerSecretEnvInstall[];
+  readonly secretEnv: readonly CicloMcpSecretEnvInstall[];
+  readonly secretEnvBindings: readonly CicloMcpSecretEnvBinding[];
   readonly claudeChannel?: boolean;
   readonly install: CicloMcpInstallResult;
   readonly commands: readonly string[];
   readonly artifacts: readonly RemoteRunnerArtifact[];
   readonly warnings: readonly string[];
+  readonly evidence: readonly string[];
+}
+
+export interface RemoteRunnerWorkerSecretEnvPlan {
+  readonly envNames: readonly string[];
+  readonly bindings: readonly {
+    readonly name: string;
+    readonly providerId: string;
+    readonly providerKind: string;
+    readonly secretRefHash: string;
+    readonly field?: string;
+    readonly formatApplied?: boolean;
+    readonly evidence: readonly string[];
+  }[];
   readonly evidence: readonly string[];
 }
 
@@ -210,10 +283,12 @@ export interface RemoteRunnerLaunchPlan {
   readonly herdrRemoteTarget: string;
   readonly imageResolution: RemoteRunnerImageResolution;
   readonly repoBootstrap: RemoteRunnerRepoBootstrapPlan;
+  readonly egress?: RemoteRunnerEgressPolicyPlan;
   readonly wireGuard: WireGuardTunnelPlan;
   readonly preflight?: RemoteRunnerPreflightPlan;
   readonly attach: CicloAttachPlan;
   readonly mcpConfig?: RemoteRunnerMcpConfigPlan;
+  readonly workerSecretEnv?: RemoteRunnerWorkerSecretEnvPlan;
   readonly commands: readonly string[];
   readonly artifacts: readonly RemoteRunnerArtifact[];
   readonly warnings: readonly string[];
@@ -245,6 +320,7 @@ export interface RemoteRunnerProviderPlugin {
     wireGuard: WireGuardTunnelPlan,
     preflight?: RemoteRunnerPreflightPlan,
     repoBootstrap?: RemoteRunnerRepoBootstrapPlan,
+    egress?: RemoteRunnerEgressPolicyPlan,
   ): RemoteRunnerProviderPlan;
 }
 
@@ -462,6 +538,26 @@ function indentBlock(value: string, spaces: number): string {
   return value.split("\n").map((line) => `${prefix}${line}`).join("\n");
 }
 
+function endpointPort(endpoint: string): string {
+  const bracketMatch = endpoint.match(/\]:(\d+)$/u);
+  if (bracketMatch?.[1] !== undefined) return bracketMatch[1];
+  const last = endpoint.split(":").pop();
+  return last !== undefined && /^\d+$/u.test(last) ? last : "51820";
+}
+
+function addressHost(address: string): string {
+  return address.split("/")[0] ?? address;
+}
+
+function addressAsSingleHostCidr(address: string): string {
+  return `${addressHost(address)}/32`;
+}
+
+function serviceRouteCidrs(request: WireGuardHostRoutingRequest | undefined): readonly string[] {
+  if (request?.routeAllTraffic === true) return ["0.0.0.0/0"];
+  return uniqueValues(request?.serviceCidrs ?? []);
+}
+
 function wireGuardPlan(input: RemoteRunnerLaunchRequest): WireGuardTunnelPlan {
   const request = input.wireGuard ?? {};
   const interfaceName = clean(request.interfaceName) ?? "wg-ciclo";
@@ -470,11 +566,21 @@ function wireGuardPlan(input: RemoteRunnerLaunchRequest): WireGuardTunnelPlan {
   const runnerAddress = clean(request.runnerAddress) ?? "10.44.0.2/24";
   const cicloEndpoint = clean(request.cicloEndpoint) ?? "ciclo-wireguard.example.invalid:51820";
   const cicloPublicKeySecretRef = clean(request.cicloPublicKeySecretRef) ?? "ciclo/wireguard/ciclo_public_key";
+  const cicloPrivateKeySecretRef = clean(request.cicloPrivateKeySecretRef) ?? "ciclo/wireguard/ciclo_private_key";
   const runnerPrivateKeySecretRef = clean(request.runnerPrivateKeySecretRef) ?? "ciclo/wireguard/runner_private_key";
+  const runnerPublicKeySecretRef = clean(request.runnerPublicKeySecretRef) ?? "ciclo/wireguard/runner_public_key";
   const existingConfigSecretName = clean(request.existingConfigSecretName);
   const runnerPrivateKey = clean(request.runnerPrivateKeyValue);
   const cicloPublicKey = clean(request.cicloPublicKeyValue);
+  const cicloPrivateKey = clean(request.cicloPrivateKeyValue);
+  const runnerPublicKey = clean(request.runnerPublicKeyValue);
   const keepalive = request.persistentKeepaliveSeconds ?? 25;
+  const hostRoutingEnabled = request.hostRouting?.enabled ?? true;
+  const routeAllTraffic = request.hostRouting?.routeAllTraffic ?? false;
+  const serviceCidrs = hostRoutingEnabled ? serviceRouteCidrs(request.hostRouting) : [];
+  const runnerAllowedIps = uniqueValues([networkCidr, ...serviceCidrs]);
+  const egressInterface = clean(request.hostRouting?.egressInterface) ?? "${CICLO_WG_EGRESS_INTERFACE:-auto}";
+  const masquerade = request.hostRouting?.masquerade ?? true;
   const runnerConfig = [
     "[Interface]",
     `Address = ${runnerAddress}`,
@@ -482,10 +588,41 @@ function wireGuardPlan(input: RemoteRunnerLaunchRequest): WireGuardTunnelPlan {
     "",
     "[Peer]",
     `PublicKey = ${cicloPublicKey ?? `\${secret:${cicloPublicKeySecretRef}}`}`,
-    `AllowedIPs = ${networkCidr}`,
+    `AllowedIPs = ${runnerAllowedIps.join(", ")}`,
     `Endpoint = ${cicloEndpoint}`,
     `PersistentKeepalive = ${keepalive}`
   ].join("\n");
+  const hostConfig = [
+    "[Interface]",
+    `Address = ${cicloAddress}`,
+    `ListenPort = ${endpointPort(cicloEndpoint)}`,
+    `PrivateKey = ${cicloPrivateKey ?? `\${secret:${cicloPrivateKeySecretRef}}`}`,
+    "",
+    "[Peer]",
+    `PublicKey = ${runnerPublicKey ?? `\${secret:${runnerPublicKeySecretRef}}`}`,
+    `AllowedIPs = ${addressAsSingleHostCidr(runnerAddress)}`
+  ].join("\n");
+  const hostSetupScript = [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    `WG_IF=${shellQuote(interfaceName)}`,
+    `NETWORK_CIDR=${shellQuote(networkCidr)}`,
+    `HOST_CONFIG=${shellQuote(`${interfaceName}.host.conf`)}`,
+    `EGRESS_IF=${shellQuote(egressInterface)}`,
+    "if [ \"$EGRESS_IF\" = \"${CICLO_WG_EGRESS_INTERFACE:-auto}\" ] || [ \"$EGRESS_IF\" = \"auto\" ]; then",
+    "  EGRESS_IF=\"$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == \"dev\") {print $(i+1); exit}}')\"",
+    "fi",
+    "test -n \"$EGRESS_IF\"",
+    "install -m 0600 \"$HOST_CONFIG\" \"/etc/wireguard/$WG_IF.conf\"",
+    "sysctl -w net.ipv4.ip_forward=1",
+    ...(masquerade ? [
+      "iptables -C FORWARD -i \"$WG_IF\" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i \"$WG_IF\" -j ACCEPT",
+      "iptables -C FORWARD -o \"$WG_IF\" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -o \"$WG_IF\" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+      "iptables -t nat -C POSTROUTING -s \"$NETWORK_CIDR\" -o \"$EGRESS_IF\" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s \"$NETWORK_CIDR\" -o \"$EGRESS_IF\" -j MASQUERADE"
+    ] : []),
+    "wg-quick up \"$WG_IF\""
+  ].join("\n");
+  const hostMaterialProvided = cicloPrivateKey !== undefined && runnerPublicKey !== undefined;
 
   return {
     interfaceName,
@@ -494,15 +631,38 @@ function wireGuardPlan(input: RemoteRunnerLaunchRequest): WireGuardTunnelPlan {
     runnerAddress,
     cicloEndpoint,
     requiredSecrets: [runnerPrivateKeySecretRef, cicloPublicKeySecretRef],
+    requiredHostSecrets: [cicloPrivateKeySecretRef, runnerPublicKeySecretRef],
     ...(existingConfigSecretName === undefined ? {} : { existingConfigSecretName }),
     secretMaterialProvided: runnerPrivateKey !== undefined && cicloPublicKey !== undefined,
+    hostMaterialProvided,
+    runnerAllowedIps,
+    hostRouting: {
+      enabled: hostRoutingEnabled,
+      serviceCidrs,
+      routeAllTraffic,
+      egressInterface,
+      masquerade
+    },
     runnerConfig,
+    hostConfig,
+    hostSetupScript,
+    artifacts: [
+      { name: `${interfaceName}.host.conf`, format: "shell", content: hostConfig },
+      { name: `${interfaceName}.host-setup.sh`, format: "shell", content: hostSetupScript }
+    ],
+    commands: [`sudo bash ${interfaceName}.host-setup.sh`],
     evidence: [
       "remote.runner.wireguard:planned",
       `remote.runner.wireguard.interface:${interfaceName}`,
       `remote.runner.wireguard.network:${networkCidr}`,
+      `remote.runner.wireguard.runner_allowed_ips:${runnerAllowedIps.join(",")}`,
+      hostRoutingEnabled ? "remote.runner.wireguard.host_routing:enabled" : "remote.runner.wireguard.host_routing:disabled",
+      ...(serviceCidrs.length === 0 ? ["remote.runner.wireguard.host_routing.service_cidrs:host_only"] : [`remote.runner.wireguard.host_routing.service_cidrs:${serviceCidrs.join(",")}`]),
+      ...(routeAllTraffic ? ["remote.runner.wireguard.host_routing.route_all:true"] : []),
+      ...(masquerade ? ["remote.runner.wireguard.host_routing.masquerade:true"] : []),
       ...(existingConfigSecretName === undefined ? [] : [`remote.runner.wireguard.existing_secret:${existingConfigSecretName}`]),
-      ...(runnerPrivateKey !== undefined && cicloPublicKey !== undefined ? ["remote.runner.wireguard.material:provided"] : [])
+      ...(runnerPrivateKey !== undefined && cicloPublicKey !== undefined ? ["remote.runner.wireguard.material:provided"] : []),
+      ...(hostMaterialProvided ? ["remote.runner.wireguard.host_material:provided"] : ["remote.runner.wireguard.host_material:required"])
     ]
   };
 }
@@ -560,6 +720,52 @@ function remoteMcpArtifactName(path: string, projectRoot: string): string {
   return path.startsWith(prefix) ? path.slice(prefix.length) : path;
 }
 
+function runtimeSecretBindings(secretEnv: readonly CicloMcpSecretEnvBinding[] | undefined, target: string): readonly RuntimeSecretEnvBinding[] {
+  return (secretEnv ?? []).map((binding) => {
+    if (binding.secretRef === undefined) {
+      throw new Error(`${target} secret env ${binding.name} requires a provider secret reference for runtime-scoped delivery`);
+    }
+    return {
+      name: binding.name,
+      providerId: binding.providerId,
+      secretRef: binding.secretRef,
+      ...(binding.field === undefined ? {} : { field: binding.field }),
+      ...(binding.format === undefined ? {} : { format: binding.format }),
+      reason: `provide ${binding.name} to ${target} process`
+    };
+  });
+}
+
+function remoteWorkerSecretEnvPlan(input: RemoteRunnerLaunchRequest): RemoteRunnerWorkerSecretEnvPlan | undefined {
+  const bindings = input.workerSecretEnv ?? [];
+  if (bindings.length === 0) return undefined;
+  return {
+    envNames: bindings.map((binding) => binding.name),
+    bindings: bindings.map((binding) => ({
+      name: binding.name,
+      providerId: binding.providerId,
+      providerKind: binding.providerKind,
+      secretRefHash: binding.secretRefHash,
+      field: binding.field,
+      ...(binding.format === undefined ? {} : { formatApplied: true }),
+      evidence: binding.evidence
+    })),
+    evidence: [
+      "remote.runner.worker_secret_env:runtime_exec",
+      `remote.runner.worker_secret_env.count:${bindings.length}`,
+      `remote.runner.worker_secret_env.names:${bindings.map((binding) => binding.name).join(",")}`
+    ]
+  };
+}
+
+function herdrSessionStartCommand(input: RemoteRunnerLaunchRequest): string {
+  const workerSecrets = runtimeSecretBindings(input.workerSecretEnv, "remote worker");
+  const prefix = workerSecrets.length === 0
+    ? ""
+    : `ciclo secret exec --binding ${shellQuote(encodeRuntimeSecretEnvBindings(workerSecrets))} -- `;
+  return `${prefix}herdr session start "$CICLO_HERDR_SESSION" --cwd "$CICLO_REPO_PATH"`;
+}
+
 function remoteMcpConfigPlan(input: RemoteRunnerLaunchRequest, repoPath: string): RemoteRunnerMcpConfigPlan | undefined {
   if (input.configureMcp === false) return undefined;
   const requestedClients = mcpClientsForRemote(input);
@@ -575,6 +781,7 @@ function remoteMcpConfigPlan(input: RemoteRunnerLaunchRequest, repoPath: string)
     serverName,
     command,
     env: input.mcpVars,
+    secretEnv: input.mcpSecretEnv,
     additionalServers: input.mcpAdditionalServers,
     additionalServerSecretEnv: input.mcpAdditionalServerSecretEnv,
     ...(claudeChannel ? { claudeChannel } : {}),
@@ -600,6 +807,8 @@ function remoteMcpConfigPlan(input: RemoteRunnerLaunchRequest, repoPath: string)
     additionalServers: input.mcpAdditionalServers ?? {},
     additionalServerNames: Object.keys(input.mcpAdditionalServers ?? {}),
     additionalServerSecretEnv: input.mcpAdditionalServerSecretEnv ?? [],
+    secretEnv: rendered.install.secretEnv,
+    secretEnvBindings: input.mcpSecretEnv ?? [],
     ...(claudeChannel ? { claudeChannel } : {}),
     install: rendered.install,
     commands: [installCommand],
@@ -618,6 +827,7 @@ function remoteMcpConfigPlan(input: RemoteRunnerLaunchRequest, repoPath: string)
       `remote.runner.mcp_config.project_root:${repoPath}`,
       `remote.runner.mcp_config.var_keys:${Object.keys(input.mcpVars ?? {}).length}`,
       `remote.runner.mcp_config.additional_servers:${Object.keys(input.mcpAdditionalServers ?? {}).length}`,
+      `remote.runner.mcp_config.secret_env:${rendered.install.secretEnv.length}`,
       `remote.runner.mcp_config.targets:${rendered.install.targets.length}`
     ]
   };
@@ -645,6 +855,36 @@ function repoBootstrapPlan(input: RemoteRunnerLaunchRequest, repoPath: string): 
       enabled ? "remote.runner.repo_bootstrap:planned" : "remote.runner.repo_bootstrap:disabled",
       `remote.runner.repo_bootstrap.devenv:${useDevenv ? "enabled" : "disabled"}`,
       ...(repoUrl === undefined ? ["remote.runner.repo_bootstrap.repo_url:absent"] : ["remote.runner.repo_bootstrap.repo_url:present"])
+    ]
+  };
+}
+
+function egressPolicyPlan(input: RemoteRunnerLaunchRequest, planId: string): RemoteRunnerEgressPolicyPlan | undefined {
+  const request = input.egress;
+  if (request === undefined || request.enabled === false) return undefined;
+  const cidrs = uniqueValues(request.cidrs ?? []);
+  const domains = uniqueValues(request.domains ?? []);
+  const name = clean(request.name) ?? `${planId}-egress`;
+  return {
+    enabled: true,
+    name,
+    cidrs,
+    domains,
+    commands: [],
+    artifacts: [],
+    warnings: [
+      ...(domains.length > 0
+        ? ["Kubernetes NetworkPolicy cannot enforce DNS domain allowlists by itself; pair this plan with a CNI egress gateway, DNS proxy, or provider policy that understands domains."]
+        : []),
+      ...(cidrs.length === 0 && domains.length === 0
+        ? ["Egress policy is enabled but no cidrs or domains were configured; the Kubernetes artifact denies pod egress except cluster DNS when a CNI enforces NetworkPolicy."]
+        : [])
+    ],
+    evidence: [
+      "remote.runner.egress:planned",
+      `remote.runner.egress.name:${name}`,
+      `remote.runner.egress.cidrs:${cidrs.length}`,
+      `remote.runner.egress.domains:${domains.length}`
     ]
   };
 }
@@ -846,13 +1086,30 @@ function kubernetesArtifacts(
   input: RemoteRunnerLaunchRequest,
   wireGuard: WireGuardTunnelPlan,
   preflight?: RemoteRunnerPreflightPlan,
-  repoBootstrap?: RemoteRunnerRepoBootstrapPlan
+  repoBootstrap?: RemoteRunnerRepoBootstrapPlan,
+  egress?: RemoteRunnerEgressPolicyPlan
 ): RemoteRunnerProviderPlan {
   const namespace = clean(input.kubernetes?.namespace) ?? "ciclo";
-  const jobName = clean(input.kubernetes?.jobName) ?? input.runnerId ?? "ciclo-runner";
+  const requestedMode = input.kubernetes?.mode ?? "statefulset";
+  const mode = input.preflightOnly === true ? "job" : requestedMode;
+  const workloadName = mode === "job"
+    ? clean(input.kubernetes?.jobName) ?? input.runnerId ?? "ciclo-runner"
+    : clean(input.kubernetes?.statefulSetName) ?? clean(input.kubernetes?.jobName) ?? input.runnerId ?? "ciclo-runner";
+  const serviceName = clean(input.kubernetes?.serviceName) ?? `${workloadName}-headless`;
   const serviceAccount = clean(input.kubernetes?.serviceAccount) ?? "ciclo-runner";
-  const wireGuardSecretName = wireGuard.existingConfigSecretName ?? `${jobName}-wireguard`;
-  const preflightConfigMapName = `${jobName}-preflight`;
+  const replicas = input.kubernetes?.replicas ?? 1;
+  const storageSize = clean(input.kubernetes?.storageSize);
+  const storageClassName = clean(input.kubernetes?.storageClassName);
+  const wireGuardSecretName = wireGuard.existingConfigSecretName ?? `${workloadName}-wireguard`;
+  const shouldGenerateWireGuardSecret = wireGuard.existingConfigSecretName === undefined && wireGuard.secretMaterialProvided;
+  const shouldBootstrapWireGuard = wireGuard.existingConfigSecretName === undefined && !wireGuard.secretMaterialProvided;
+  const preflightConfigMapName = `${workloadName}-preflight`;
+  const labels = {
+    "app.kubernetes.io/name": "ciclo-runner",
+    "app.kubernetes.io/instance": workloadName
+  };
+  const labelLines = Object.entries(labels).map(([key, value]) => `    ${key}: ${value}`);
+  const selectorLabelLines = Object.entries(labels).map(([key, value]) => `        ${key}: ${value}`);
   const extraEnv = envLines(input.environment);
   const herdrSession = clean(input.herdrSession) ?? repoSessionName();
   const preflightConfigMap = preflight === undefined ? undefined : [
@@ -861,21 +1118,58 @@ function kubernetesArtifacts(
     "metadata:",
     `  name: ${preflightConfigMapName}`,
     `  namespace: ${namespace}`,
+    "  labels:",
+    ...labelLines,
     "data:",
     "  ciclo-remote-preflight.sh: |",
     indentBlock(preflight.artifacts[0]?.content ?? "", 4)
   ].join("\n");
-  const wireGuardSecret = wireGuard.existingConfigSecretName !== undefined ? undefined : [
+  const wireGuardSecret = shouldGenerateWireGuardSecret ? [
     "apiVersion: v1",
     "kind: Secret",
     "metadata:",
     `  name: ${wireGuardSecretName}`,
     `  namespace: ${namespace}`,
+    "  labels:",
+    ...labelLines,
     "type: Opaque",
     "stringData:",
     "  runner.conf: |",
     indentBlock(wireGuard.runnerConfig, 4)
-  ].join("\n");
+  ].join("\n") : undefined;
+  const wireGuardBootstrap = shouldBootstrapWireGuard ? [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    `NAMESPACE=${shellQuote(namespace)}`,
+    `SECRET_NAME=${shellQuote(wireGuardSecretName)}`,
+    `WG_IF=${shellQuote(wireGuard.interfaceName)}`,
+    `NETWORK_CIDR=${shellQuote(wireGuard.networkCidr)}`,
+    `CICLO_ADDRESS=${shellQuote(wireGuard.cicloAddress)}`,
+    `RUNNER_ADDRESS=${shellQuote(wireGuard.runnerAddress)}`,
+    `CICLO_ENDPOINT=${shellQuote(wireGuard.cicloEndpoint)}`,
+    `RUNNER_ALLOWED_IPS=${shellQuote(wireGuard.runnerAllowedIps.join(", "))}`,
+    `LISTEN_PORT=${shellQuote(endpointPort(wireGuard.cicloEndpoint))}`,
+    `PERSISTENT_KEEPALIVE=${input.wireGuard?.persistentKeepaliveSeconds ?? 25}`,
+    "EGRESS_IF=${CICLO_WG_EGRESS_INTERFACE:-auto}",
+    "if [ \"$EGRESS_IF\" = \"auto\" ]; then",
+    "  EGRESS_IF=\"$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == \"dev\") {print $(i+1); exit}}')\"",
+    "fi",
+    "test -n \"$EGRESS_IF\"",
+    "CICLO_PRIVATE_KEY=\"$(wg genkey)\"",
+    "CICLO_PUBLIC_KEY=\"$(printf '%s' \"$CICLO_PRIVATE_KEY\" | wg pubkey)\"",
+    "RUNNER_PRIVATE_KEY=\"$(wg genkey)\"",
+    "RUNNER_PUBLIC_KEY=\"$(printf '%s' \"$RUNNER_PRIVATE_KEY\" | wg pubkey)\"",
+    "HOST_CONFIG=\"$(printf '%s\\n' '[Interface]' \"Address = $CICLO_ADDRESS\" \"ListenPort = $LISTEN_PORT\" \"PrivateKey = $CICLO_PRIVATE_KEY\" '' '[Peer]' \"PublicKey = $RUNNER_PUBLIC_KEY\" \"AllowedIPs = ${RUNNER_ADDRESS%%/*}/32\")\"",
+    "RUNNER_CONFIG=\"$(printf '%s\\n' '[Interface]' \"Address = $RUNNER_ADDRESS\" \"PrivateKey = $RUNNER_PRIVATE_KEY\" '' '[Peer]' \"PublicKey = $CICLO_PUBLIC_KEY\" \"AllowedIPs = $RUNNER_ALLOWED_IPS\" \"Endpoint = $CICLO_ENDPOINT\" \"PersistentKeepalive = $PERSISTENT_KEEPALIVE\")\"",
+    "printf '%s\\n' \"$HOST_CONFIG\" | sudo install -m 0600 /dev/stdin \"/etc/wireguard/$WG_IF.conf\"",
+    "sudo sysctl -w net.ipv4.ip_forward=1",
+    "sudo iptables -C FORWARD -i \"$WG_IF\" -j ACCEPT 2>/dev/null || sudo iptables -A FORWARD -i \"$WG_IF\" -j ACCEPT",
+    "sudo iptables -C FORWARD -o \"$WG_IF\" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || sudo iptables -A FORWARD -o \"$WG_IF\" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+    "sudo iptables -t nat -C POSTROUTING -s \"$NETWORK_CIDR\" -o \"$EGRESS_IF\" -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -s \"$NETWORK_CIDR\" -o \"$EGRESS_IF\" -j MASQUERADE",
+    "sudo wg-quick up \"$WG_IF\"",
+    "kubectl create namespace \"$NAMESPACE\" --dry-run=client -o yaml | kubectl apply -f -",
+    "kubectl -n \"$NAMESPACE\" create secret generic \"$SECRET_NAME\" --from-literal=runner.conf=\"$RUNNER_CONFIG\" --dry-run=client -o yaml | kubectl apply -f -"
+  ].join("\n") : undefined;
   const repoBootstrapLines = repoBootstrap?.enabled === false ? [] : [
     "              if [ -n \"${CICLO_REPO_URL:-}\" ] && [ ! -d \"$CICLO_REPO_PATH/.git\" ]; then",
     "                mkdir -p \"$(dirname \"$CICLO_REPO_PATH\")\"",
@@ -887,25 +1181,17 @@ function kubernetesArtifacts(
     "                (cd \"$CICLO_REPO_PATH\" && devenv shell -- true)",
     "              fi"
   ];
-  const manifest = [
-    "apiVersion: batch/v1",
-    "kind: Job",
-    "metadata:",
-    `  name: ${jobName}`,
-    `  namespace: ${namespace}`,
-    "spec:",
-    "  template:",
-    "    spec:",
-    `      serviceAccountName: ${serviceAccount}`,
-    "      restartPolicy: Never",
+  const containerSpec = [
     "      containers:",
     "        - name: runner",
     `          image: ${input.image}`,
     "          securityContext:",
+    "            allowPrivilegeEscalation: false",
     "            capabilities:",
     "              add: [\"NET_ADMIN\"]",
+    "              drop: [\"ALL\"]",
     "          env:",
-    `            - name: CICLO_REMOTE_SESSION_ID\n              value: ${JSON.stringify(input.runnerId ?? jobName)}`,
+    `            - name: CICLO_REMOTE_SESSION_ID\n              value: ${JSON.stringify(input.runnerId ?? workloadName)}`,
     `            - name: CICLO_HERDR_SESSION\n              value: ${JSON.stringify(herdrSession)}`,
     `            - name: CICLO_REPO_PATH\n              value: ${JSON.stringify(input.repoPath)}`,
     ...(input.repoUrl === undefined ? [] : [`            - name: CICLO_REPO_URL\n              value: ${JSON.stringify(input.repoUrl)}`]),
@@ -916,6 +1202,10 @@ function kubernetesArtifacts(
     ...(extraEnv.length === 0 ? [] : [extraEnv]),
     "          command: [\"/bin/bash\", \"-lc\"]",
     "          volumeMounts:",
+    ...(storageSize === undefined ? [] : [
+      "            - name: workspace",
+      "              mountPath: /workspace"
+    ]),
     ...(preflight === undefined ? [] : [
       "            - name: preflight-script",
       "              mountPath: /ciclo/preflight",
@@ -932,7 +1222,7 @@ function kubernetesArtifacts(
     ...(input.preflightOnly === true ? ["              if [ \"${CICLO_PREFLIGHT_ONLY:-false}\" = \"true\" ]; then exit 0; fi"] : []),
     "              install -m 0600 /ciclo/wg/runner.conf /etc/wireguard/wg-ciclo.conf",
     "              wg-quick up wg-ciclo",
-    "              herdr session start \"$CICLO_HERDR_SESSION\" --cwd \"$CICLO_REPO_PATH\"",
+    `              ${herdrSessionStartCommand(input)}`,
     "              tail -f /dev/null",
     "      volumes:",
     ...(preflight === undefined ? [] : [
@@ -945,31 +1235,143 @@ function kubernetesArtifacts(
     "          secret:",
     `            secretName: ${wireGuardSecretName}`,
     "            defaultMode: 384"
+  ];
+  const jobManifest = [
+    "apiVersion: batch/v1",
+    "kind: Job",
+    "metadata:",
+    `  name: ${workloadName}`,
+    `  namespace: ${namespace}`,
+    "  labels:",
+    ...labelLines,
+    "spec:",
+    "  template:",
+    "    metadata:",
+    "      labels:",
+    ...selectorLabelLines,
+    "    spec:",
+    `      serviceAccountName: ${serviceAccount}`,
+    "      restartPolicy: Never",
+    ...containerSpec
   ].join("\n");
+  const serviceManifest = [
+    "apiVersion: v1",
+    "kind: Service",
+    "metadata:",
+    `  name: ${serviceName}`,
+    `  namespace: ${namespace}`,
+    "  labels:",
+    ...labelLines,
+    "spec:",
+    "  clusterIP: None",
+    "  selector:",
+    ...labelLines,
+    "  ports:",
+    "    - name: ssh",
+    "      port: 22",
+    "      targetPort: 22"
+  ].join("\n");
+  const statefulSetManifest = [
+    "apiVersion: apps/v1",
+    "kind: StatefulSet",
+    "metadata:",
+    `  name: ${workloadName}`,
+    `  namespace: ${namespace}`,
+    "  labels:",
+    ...labelLines,
+    "spec:",
+    `  serviceName: ${serviceName}`,
+    `  replicas: ${replicas}`,
+    "  selector:",
+    "    matchLabels:",
+    ...selectorLabelLines,
+    "  template:",
+    "    metadata:",
+    "      labels:",
+    ...selectorLabelLines,
+    "    spec:",
+    `      serviceAccountName: ${serviceAccount}`,
+    "      restartPolicy: Always",
+    ...containerSpec,
+    ...(storageSize === undefined ? [] : [
+      "  volumeClaimTemplates:",
+      "    - metadata:",
+      "        name: workspace",
+      "      spec:",
+      "        accessModes: [\"ReadWriteOnce\"]",
+      ...(storageClassName === undefined ? [] : [`        storageClassName: ${storageClassName}`]),
+      "        resources:",
+      "          requests:",
+      `            storage: ${storageSize}`
+    ])
+  ].join("\n");
+  const networkPolicy = egress === undefined ? undefined : [
+    "apiVersion: networking.k8s.io/v1",
+    "kind: NetworkPolicy",
+    "metadata:",
+    `  name: ${egress.name}`,
+    `  namespace: ${namespace}`,
+    "  labels:",
+    ...labelLines,
+    ...(egress.domains.length === 0 ? [] : [
+      "  annotations:",
+      `    ciclo.smol.dev/egress-domains: ${JSON.stringify(egress.domains.join(","))}`
+    ]),
+    "spec:",
+    "  podSelector:",
+    "    matchLabels:",
+    ...selectorLabelLines,
+    "  policyTypes:",
+    "    - Egress",
+    "  egress:",
+    ...(egress.cidrs.length === 0 ? [] : egress.cidrs.flatMap((cidr) => [
+      "    - to:",
+      "        - ipBlock:",
+      `            cidr: ${cidr}`
+    ]))
+  ].join("\n");
+  const workloadArtifact = mode === "job"
+    ? { name: `${workloadName}.job.yaml`, format: "yaml" as const, content: jobManifest }
+    : { name: `${workloadName}.statefulset.yaml`, format: "yaml" as const, content: statefulSetManifest };
   return {
-    providerName: "kubernetes-job",
-    executionModel: "kubernetes_job",
+    providerName: mode === "job" ? "kubernetes-job" : "kubernetes-statefulset",
+    executionModel: mode === "job" ? "kubernetes_job" : "kubernetes_statefulset",
     artifacts: [
-      ...(preflightConfigMap === undefined ? [] : [{ name: `${jobName}.preflight-configmap.yaml`, format: "yaml" as const, content: preflightConfigMap }]),
-      ...(wireGuardSecret === undefined ? [] : [{ name: `${jobName}.wireguard-secret.yaml`, format: "yaml" as const, content: wireGuardSecret }]),
-      { name: `${jobName}.job.yaml`, format: "yaml", content: manifest }
+      ...(preflightConfigMap === undefined ? [] : [{ name: `${workloadName}.preflight-configmap.yaml`, format: "yaml" as const, content: preflightConfigMap }]),
+      ...(wireGuardSecret === undefined ? [] : [{ name: `${workloadName}.wireguard-secret.yaml`, format: "yaml" as const, content: wireGuardSecret }]),
+      ...(wireGuardBootstrap === undefined ? [] : [{ name: `${workloadName}.wireguard-bootstrap.sh`, format: "shell" as const, content: wireGuardBootstrap }]),
+      ...(networkPolicy === undefined ? [] : [{ name: `${egress?.name}.networkpolicy.yaml`, format: "yaml" as const, content: networkPolicy }]),
+      ...(mode === "job" ? [] : [{ name: `${serviceName}.service.yaml`, format: "yaml" as const, content: serviceManifest }]),
+      workloadArtifact
     ],
     commands: [
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
-      ...(preflight === undefined ? [] : [`kubectl -n ${namespace} apply -f ${jobName}.preflight-configmap.yaml`]),
-      ...(wireGuardSecret === undefined ? [] : [`kubectl -n ${namespace} apply -f ${jobName}.wireguard-secret.yaml`]),
-      `kubectl -n ${namespace} apply -f ${jobName}.job.yaml`
+      ...(preflight === undefined ? [] : [`kubectl -n ${namespace} apply -f ${workloadName}.preflight-configmap.yaml`]),
+      ...(wireGuardSecret === undefined ? [] : [`kubectl -n ${namespace} apply -f ${workloadName}.wireguard-secret.yaml`]),
+      ...(wireGuardBootstrap === undefined ? [] : [`bash ${workloadName}.wireguard-bootstrap.sh`]),
+      ...(networkPolicy === undefined ? [] : [`kubectl -n ${namespace} apply -f ${egress?.name}.networkpolicy.yaml`]),
+      ...(mode === "job" ? [] : [`kubectl -n ${namespace} apply -f ${serviceName}.service.yaml`]),
+      `kubectl -n ${namespace} apply -f ${workloadArtifact.name}`
     ],
     warnings: [
       ...(!wireGuard.secretMaterialProvided && wireGuard.existingConfigSecretName === undefined
-        ? ["WireGuard runner config still contains secret references; provide wireguard.existing_config_secret_name or resolved key material before a live launch."]
-        : [])
+        ? ["WireGuard key material is not provided; run the generated bootstrap script to create local WireGuard keys, install the host interface, and create the Kubernetes runner.conf Secret before applying the workload."]
+        : []),
+      ...(mode === "statefulset" ? ["Kubernetes StatefulSet runners keep stable identity for Herdr attach; use explicit kubernetes.mode=job only for short validation runs."] : []),
+      ...(egress?.warnings ?? [])
     ],
     evidence: [
-      "remote.runner.plugin:kubernetes-job",
-      "remote.runner.execution_model:kubernetes_job",
+      mode === "job" ? "remote.runner.plugin:kubernetes-job" : "remote.runner.plugin:kubernetes-statefulset",
+      mode === "job" ? "remote.runner.execution_model:kubernetes_job" : "remote.runner.execution_model:kubernetes_statefulset",
+      `remote.runner.kubernetes.mode:${mode}`,
+      ...(mode === "statefulset" ? [`remote.runner.kubernetes.service:${serviceName}`, `remote.runner.kubernetes.replicas:${replicas}`] : []),
+      ...(storageSize === undefined ? [] : [`remote.runner.kubernetes.storage:${storageSize}`]),
       ...(input.preflightOnly === true ? ["remote.runner.preflight_only:planned"] : []),
-      ...(wireGuardSecret === undefined ? ["remote.runner.wireguard.secret:existing"] : ["remote.runner.wireguard.secret:generated"])
+      ...(wireGuardSecret === undefined
+        ? [wireGuard.existingConfigSecretName === undefined ? "remote.runner.wireguard.secret:bootstrap" : "remote.runner.wireguard.secret:existing"]
+        : ["remote.runner.wireguard.secret:generated"]),
+      ...(wireGuardBootstrap === undefined ? [] : ["remote.runner.wireguard.bootstrap:planned"]),
+      ...(egress?.evidence ?? [])
     ]
   };
 }
@@ -1022,7 +1424,7 @@ function lambdaArtifacts(input: RemoteRunnerLaunchRequest, wireGuard: WireGuardT
           "# Include userspace WireGuard such as boringtun or wireguard-go in the image.",
           `export WG_CONFIG=${shellQuote(wireGuard.runnerConfig)}`,
           "ciclo-wg-up \"$WG_CONFIG\"",
-          "herdr session start \"$CICLO_HERDR_SESSION\" --cwd \"$CICLO_REPO_PATH\""
+          herdrSessionStartCommand(input)
         ].join("\n")
       }
     ],
@@ -1152,13 +1554,16 @@ export function buildRemoteRunnerLaunchPlan(
     session: herdrSession
   });
   const mcpConfig = remoteMcpConfigPlan(resolvedInput, repoPath);
+  const workerSecretEnv = remoteWorkerSecretEnvPlan(resolvedInput);
   const repoBootstrap = repoBootstrapPlan(resolvedInput, repoPath);
+  const egress = egressPolicyPlan(resolvedInput, planId);
   const preflight = remotePreflightPlan(resolvedInput, planId);
   const runnerArtifacts = pluginRegistry.require(input.runnerKind).plan(
     resolvedInput,
     wireGuard,
     preflight,
-    repoBootstrap
+    repoBootstrap,
+    egress
   );
   const evidence = [
     `remote.runner.plan:${planId}`,
@@ -1171,10 +1576,12 @@ export function buildRemoteRunnerLaunchPlan(
     `remote.runner.herdr_target:${herdrRemoteTarget}`,
     ...imageResolution.evidence,
     ...repoBootstrap.evidence,
+    ...(egress?.evidence ?? []),
     ...wireGuard.evidence,
     ...(preflight?.evidence ?? []),
     ...attach.evidence,
     ...(mcpConfig?.evidence ?? []),
+    ...(workerSecretEnv?.evidence ?? []),
     ...runnerArtifacts.evidence,
     ...(input.dryRun === false ? ["remote.runner.launch:intent"] : ["remote.runner.launch:planned"])
   ];
@@ -1195,13 +1602,23 @@ export function buildRemoteRunnerLaunchPlan(
     herdrRemoteTarget,
     imageResolution,
     repoBootstrap,
+    ...(egress === undefined ? {} : { egress }),
     wireGuard,
     ...(preflight === undefined ? {} : { preflight }),
     attach,
     ...(mcpConfig === undefined ? {} : { mcpConfig }),
-    commands: runnerArtifacts.commands,
-    artifacts: [...runnerArtifacts.artifacts, ...(preflight?.artifacts ?? []), ...(mcpConfig?.artifacts ?? [])],
-    warnings: [...imageResolution.warnings, ...runnerArtifacts.warnings, ...(preflight?.warnings ?? []), ...(mcpConfig?.warnings ?? [])],
+    ...(workerSecretEnv === undefined ? {} : { workerSecretEnv }),
+    commands: [...(wireGuard.hostMaterialProvided ? wireGuard.commands : []), ...runnerArtifacts.commands],
+    artifacts: [...wireGuard.artifacts, ...runnerArtifacts.artifacts, ...(preflight?.artifacts ?? []), ...(mcpConfig?.artifacts ?? [])],
+    warnings: [
+      ...imageResolution.warnings,
+      ...(!wireGuard.hostMaterialProvided
+        ? ["WireGuard host config contains unresolved secret references; provide ciclo private key and runner public key material before running the host setup script."]
+        : []),
+      ...runnerArtifacts.warnings,
+      ...(preflight?.warnings ?? []),
+      ...(mcpConfig?.warnings ?? [])
+    ],
     evidence
   };
 }

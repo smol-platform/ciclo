@@ -232,7 +232,10 @@ test("loads the required remote-runner benchmark scenarios", () => {
 
   assert.equal(scenario.id, "remote_runner_kubernetes_wireguard_attach");
   assert.equal(scenario.remoteSessions[0]?.remoteSessionId, "runner-k8s-1");
+  assert.ok(scenario.expected.evidenceIncludes.includes("remote.runner.execution_model:kubernetes_statefulset"));
+  assert.ok(scenario.expected.evidenceIncludes.includes("remote.runner.egress:planned"));
   assert.ok(scenario.expected.evidenceIncludes.includes("remote.runner.wireguard:planned"));
+  assert.ok(scenario.expected.evidenceIncludes.includes("remote.runner.wireguard.host_routing:enabled"));
   assert.ok(scenario.expected.requiredActions.includes("provide_ciclo_attach_plan"));
 });
 

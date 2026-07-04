@@ -309,21 +309,35 @@ Example Kubernetes runner payload:
   "wireguard": {
     "runner_address": "10.44.0.2/24",
     "ciclo_endpoint": "198.51.100.10:51820",
-    "existing_config_secret_name": "ciclo-wireguard-runner"
+    "existing_config_secret_name": "ciclo-wireguard-runner",
+    "host_routing": {
+      "enabled": true,
+      "service_cidrs": ["192.168.0.0/16"],
+      "egress_interface": "auto"
+    }
   },
   "repo_bootstrap": {
     "use_devenv": true
   },
-  "preflight_only": true,
+  "egress": {
+    "enabled": true,
+    "cidrs": ["140.82.112.0/20"],
+    "domains": ["github.com", "api.github.com", "registry.npmjs.org"]
+  },
   "kubernetes": {
     "namespace": "ciclo-runners",
-    "job_name": "runner-k8s-1"
+    "mode": "statefulset",
+    "statefulset_name": "runner-k8s-1",
+    "service_name": "runner-k8s-1-headless",
+    "storage_size": "20Gi"
   },
   "dry_run": true
 }
 ```
 
-The response includes provider commands, artifacts, WireGuard config with secret references, a Herdr remote target like `ciclo@10.44.0.2:/workspace/ciclo`, and an attach plan.
+Kubernetes remote runners default to StatefulSets because Ciclo treats a worker as an interactive Herdr-attached session with stable identity. Add `"preflight_only": true` or `"kubernetes": { "mode": "job" }` when you only want a short validation run. CIDR egress allowlists emit a Kubernetes NetworkPolicy; domain entries are carried as Ciclo annotations for clusters that enforce domain-aware egress through a CNI gateway, DNS proxy, or provider policy. `wireguard.host_routing.service_cidrs` controls which private service ranges the remote worker routes through the Ciclo host; the launch plan includes a host WireGuard config and setup script that enables forwarding and NAT. If no key material or existing runner Secret is configured, Kubernetes plans also include a `*.wireguard-bootstrap.sh` script that generates a local hub/runner keypair, installs the host interface, and creates the Kubernetes `runner.conf` Secret.
+
+The response includes provider commands, artifacts, runner and host WireGuard config with secret references, a Herdr remote target like `ciclo@10.44.0.2:/workspace/ciclo`, and an attach plan.
 
 ### Third-Party Remote Runner Plugins
 

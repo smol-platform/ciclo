@@ -95,6 +95,17 @@
     "vars": {
       "CICLO_REMOTE_MODE": "interactive"
     },
+    "egress": {
+      "enabled": true,
+      "cidrs": [
+        "140.82.112.0/20"
+      ],
+      "domains": [
+        "github.com",
+        "api.github.com",
+        "registry.npmjs.org"
+      ]
+    },
     "wireGuard": {
       "interfaceName": "wg-ciclo",
       "networkCidr": "10.44.0.0/24",
@@ -103,13 +114,27 @@
       "cicloEndpoint": "vpn.example.invalid:51820",
       "runnerPrivateKeySecretRef": "ciclo/wireguard/runner_private_key",
       "cicloPublicKeySecretRef": "ciclo/wireguard/ciclo_public_key",
+      "cicloPrivateKeySecretRef": "ciclo/wireguard/ciclo_private_key",
+      "runnerPublicKeySecretRef": "ciclo/wireguard/runner_public_key",
       "existingConfigSecretName": "project-wireguard-runner",
-      "persistentKeepaliveSeconds": 25
+      "persistentKeepaliveSeconds": 25,
+      "hostRouting": {
+        "enabled": true,
+        "serviceCidrs": [
+          "192.168.0.0/16"
+        ],
+        "egressInterface": "auto",
+        "masquerade": true
+      }
     },
     "kubernetes": {
       "namespace": "ciclo-runners",
       "serviceAccount": "ciclo-runner",
-      "jobName": "ciclo-project-runner"
+      "mode": "statefulset",
+      "statefulSetName": "ciclo-project-runner",
+      "serviceName": "ciclo-project-runner-headless",
+      "replicas": 1,
+      "storageSize": "20Gi"
     },
     "awsLambda": {
       "microVmImageName": "ciclo-project-image",

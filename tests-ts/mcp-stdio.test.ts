@@ -1139,20 +1139,32 @@ test("MCP remote runner tools plan WireGuard Herdr runner environments", async (
             ssh_user: "ciclo",
             wireguard: {
               runner_address: "10.66.0.8/24",
-              ciclo_endpoint: "198.51.100.10:51820"
+              ciclo_endpoint: "198.51.100.10:51820",
+              host_routing: {
+                enabled: true,
+                service_cidrs: ["192.168.0.0/16"],
+                egress_interface: "en0"
+              }
             },
             preflight: {
               claude: true,
               build: true,
               report_path: "/tmp/ciclo-preflight-test.jsonl"
             },
-            preflight_only: true,
+            egress: {
+              enabled: true,
+              name: "runner-k8s-1-egress",
+              cidrs: ["140.82.112.0/20"],
+              domains: ["github.com"]
+            },
             repo_bootstrap: {
               use_devenv: true
             },
             kubernetes: {
               namespace: "ciclo-runners",
-              job_name: "runner-k8s-1"
+              mode: "statefulset",
+              statefulset_name: "runner-k8s-1",
+              service_name: "runner-k8s-1-headless"
             },
             dry_run: true
           }
@@ -1165,14 +1177,24 @@ test("MCP remote runner tools plan WireGuard Herdr runner environments", async (
 
   assert.equal(launched.accepted, true);
   assert.equal(launched.runner_kind, "kubernetes");
-  assert.equal(launched.provider_name, "kubernetes-job");
-  assert.equal(launched.execution_model, "kubernetes_job");
+  assert.equal(launched.provider_name, "kubernetes-statefulset");
+  assert.equal(launched.execution_model, "kubernetes_statefulset");
   assert.equal(launched.herdr_remote_target, "ciclo@10.66.0.8:/workspace/project");
+  assert.ok(((launched.wireguard as { runnerAllowedIps?: readonly string[] }).runnerAllowedIps ?? []).includes("192.168.0.0/16"));
   assert.equal((launched.image_resolution as { image?: string }).image, "ghcr.io/smol-platform/ciclo:codex-latest");
   assert.equal((launched.repo_bootstrap as { useDevenv?: boolean }).useDevenv, true);
   assert.equal((launched.preflight as { reportPath?: string }).reportPath, "/tmp/ciclo-preflight-test.jsonl");
   assert.ok(((launched.artifacts as readonly { name?: string; content?: string }[]) ?? []).some((artifact) =>
     artifact.name === "runner-k8s-1.preflight-configmap.yaml" && /claude-noninteractive/.test(artifact.content ?? "")
+  ));
+  assert.ok(((launched.artifacts as readonly { name?: string; content?: string }[]) ?? []).some((artifact) =>
+    artifact.name === "runner-k8s-1.statefulset.yaml" && /kind: StatefulSet/.test(artifact.content ?? "")
+  ));
+  assert.ok(((launched.artifacts as readonly { name?: string; content?: string }[]) ?? []).some((artifact) =>
+    artifact.name === "runner-k8s-1-egress.networkpolicy.yaml" && /kind: NetworkPolicy/.test(artifact.content ?? "")
+  ));
+  assert.ok(((launched.artifacts as readonly { name?: string; content?: string }[]) ?? []).some((artifact) =>
+    artifact.name === "wg-ciclo.host-setup.sh" && /MASQUERADE/.test(artifact.content ?? "")
   ));
   assert.deepEqual((launched.mcp_config as { clients?: readonly string[] }).clients, ["claude", "codex"]);
   assert.equal((launched.mcp_config as { serverName?: string }).serverName, "ciclo_remote");

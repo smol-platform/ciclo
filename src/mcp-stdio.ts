@@ -50,6 +50,7 @@ import {
   createDefaultRemoteRunnerImageResolverRegistry,
   RemoteRunnerRegistry,
   type RemoteRunnerKind,
+  type RemoteRunnerEgressPolicyRequest,
   type RemoteRunnerImageResolverRequest,
   type RemoteRunnerPreflightRequest,
   type RemoteRunnerRepoBootstrapRequest,
@@ -226,6 +227,11 @@ function numberParam(params: unknown, key: string, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function optionalNumberParam(params: unknown, key: string): number | undefined {
+  const value = asRecord(params)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function booleanParam(params: unknown, key: string, fallback = false): boolean {
   const value = asRecord(params)[key];
   return typeof value === "boolean" ? value : fallback;
@@ -280,6 +286,8 @@ function wireGuardParam(params: unknown): WireGuardTunnelRequest | undefined {
   const value = asRecord(params).wireguard;
   if (value === undefined) return undefined;
   const record = asRecord(value);
+  const hostRouting = asRecord(record.host_routing);
+  const serviceCidrs = stringListParam(hostRouting, "service_cidrs");
   return {
     interfaceName: stringParam(record, "interface_name") || undefined,
     networkCidr: stringParam(record, "network_cidr") || undefined,
@@ -287,11 +295,24 @@ function wireGuardParam(params: unknown): WireGuardTunnelRequest | undefined {
     runnerAddress: stringParam(record, "runner_address") || undefined,
     cicloEndpoint: stringParam(record, "ciclo_endpoint") || undefined,
     cicloPublicKeySecretRef: stringParam(record, "ciclo_public_key_secret_ref") || undefined,
+    cicloPrivateKeySecretRef: stringParam(record, "ciclo_private_key_secret_ref") || undefined,
     runnerPrivateKeySecretRef: stringParam(record, "runner_private_key_secret_ref") || undefined,
+    runnerPublicKeySecretRef: stringParam(record, "runner_public_key_secret_ref") || undefined,
     existingConfigSecretName: stringParam(record, "existing_config_secret_name") || undefined,
     runnerPrivateKeyValue: stringParam(record, "runner_private_key_value") || undefined,
     cicloPublicKeyValue: stringParam(record, "ciclo_public_key_value") || undefined,
-    persistentKeepaliveSeconds: numberParam(record, "persistent_keepalive_seconds", 25)
+    cicloPrivateKeyValue: stringParam(record, "ciclo_private_key_value") || undefined,
+    runnerPublicKeyValue: stringParam(record, "runner_public_key_value") || undefined,
+    persistentKeepaliveSeconds: numberParam(record, "persistent_keepalive_seconds", 25),
+    ...(record.host_routing === undefined ? {} : {
+      hostRouting: {
+        enabled: optionalBooleanParam(hostRouting, "enabled"),
+        ...(serviceCidrs.length === 0 ? {} : { serviceCidrs }),
+        routeAllTraffic: optionalBooleanParam(hostRouting, "route_all_traffic"),
+        egressInterface: stringParam(hostRouting, "egress_interface") || undefined,
+        masquerade: optionalBooleanParam(hostRouting, "masquerade")
+      }
+    })
   };
 }
 
@@ -346,6 +367,22 @@ function remoteRunnerRepoBootstrapParam(params: unknown): RemoteRunnerRepoBootst
   return {
     ...(enabled === undefined ? {} : { enabled }),
     ...(useDevenv === undefined ? {} : { useDevenv })
+  };
+}
+
+function remoteRunnerEgressParam(params: unknown): RemoteRunnerEgressPolicyRequest | undefined {
+  const value = asRecord(params).egress;
+  if (value === undefined) return undefined;
+  const record = asRecord(value);
+  const enabled = optionalBooleanParam(record, "enabled");
+  const name = stringParam(record, "name") || undefined;
+  const cidrs = stringListParam(record, "cidrs");
+  const domains = stringListParam(record, "domains");
+  return {
+    ...(enabled === undefined ? {} : { enabled }),
+    ...(name === undefined ? {} : { name }),
+    ...(cidrs.length === 0 ? {} : { cidrs }),
+    ...(domains.length === 0 ? {} : { domains })
   };
 }
 
@@ -1726,10 +1763,17 @@ async function callTool(
       preflightOnly: optionalBooleanParam(params, "preflight_only"),
       preflight: remoteRunnerPreflightParam(params),
       repoBootstrap: remoteRunnerRepoBootstrapParam(params),
+      egress: remoteRunnerEgressParam(params),
       kubernetes: {
         namespace: stringParam(kubernetes, "namespace") || undefined,
         serviceAccount: stringParam(kubernetes, "service_account") || undefined,
-        jobName: stringParam(kubernetes, "job_name") || undefined
+        jobName: stringParam(kubernetes, "job_name") || undefined,
+        mode: stringParam(kubernetes, "mode") === "job" ? "job" : stringParam(kubernetes, "mode") === "statefulset" ? "statefulset" : undefined,
+        statefulSetName: stringParam(kubernetes, "statefulset_name") || undefined,
+        serviceName: stringParam(kubernetes, "service_name") || undefined,
+        replicas: optionalNumberParam(kubernetes, "replicas"),
+        storageSize: stringParam(kubernetes, "storage_size") || undefined,
+        storageClassName: stringParam(kubernetes, "storage_class_name") || undefined
       },
       awsLambda: {
         microVmImageName: stringParam(awsLambda, "microvm_image_name") || undefined,
@@ -1748,6 +1792,19 @@ async function callTool(
       },
       dryRun: booleanParam(params, "dry_run", true)
     }, runtime.projectConfig ?? {});
+    const mcpSecretEnv = await resolveMcpSecretEnvBindings({
+      params,
+      runtime,
+      loopId: launchRequest.loopId,
+      beadId: launchRequest.beadId,
+      dryRun: launchRequest.dryRun ?? true
+    });
+    const workerSecretEnv = await resolveWorkerSecretEnvBindings({
+      params,
+      runtime,
+      loopId: launchRequest.loopId,
+      beadId: launchRequest.beadId
+    });
     const remoteAdditionalServerSecrets = await resolveAdditionalMcpServerSecretEnv({
       additionalServers: launchRequest.mcpAdditionalServers,
       runtime,
@@ -1759,6 +1816,8 @@ async function callTool(
       ...launchRequest,
       mcpAdditionalServers: remoteAdditionalServerSecrets.additionalServers,
       mcpAdditionalServerSecretEnv: remoteAdditionalServerSecrets.secretEnv,
+      mcpSecretEnv,
+      workerSecretEnv,
       runnerKind: remoteRunnerKindParam(launchRequest.runnerKind)
     });
     auditMutation({
@@ -1791,7 +1850,9 @@ async function callTool(
       attach: plan?.attach,
       image_resolution: plan?.imageResolution,
       repo_bootstrap: plan?.repoBootstrap,
+      egress: plan?.egress,
       mcp_config: plan?.mcpConfig,
+      worker_secret_env: plan?.workerSecretEnv,
       wireguard: plan?.wireGuard,
       preflight: plan?.preflight,
       commands: plan?.commands ?? [],
