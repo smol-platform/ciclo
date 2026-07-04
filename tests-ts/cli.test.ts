@@ -403,7 +403,12 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
       harnessCommand?: string;
       harnessArgs?: readonly string[];
       herdr?: { sessionName?: string; paneName?: string; attach?: boolean; attachCommand?: string; attachArgs?: readonly string[] };
-      mcpInstall?: { serverName?: string; targets?: readonly { client?: string }[]; additionalServers?: Record<string, unknown> };
+      mcpInstall?: {
+        serverName?: string;
+        server?: { env?: Record<string, string> };
+        targets?: readonly { client?: string }[];
+        additionalServers?: Record<string, unknown>;
+      };
     };
     assert.equal(codexPlan.client, "codex");
     assert.equal(codexPlan.launchMode, "herdr");
@@ -437,6 +442,10 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
     assert.equal(codexPlan.herdr?.attachCommand, "herdr");
     assert.deepEqual(codexPlan.herdr?.attachArgs, ["session", "attach", projectName]);
     assert.equal(codexPlan.mcpInstall?.serverName, "ciclo_launch");
+    const codexServerEnv = codexPlan.mcpInstall?.server?.["env"];
+    assert.equal(codexServerEnv?.CICLO_USER_PANE_ENABLED, "true");
+    assert.equal(codexServerEnv?.CICLO_USER_PANE_HERDR_SESSION, projectName);
+    assert.equal(codexServerEnv?.CICLO_USER_PANE_NAME, projectName);
     assert.deepEqual(codexPlan.mcpInstall?.targets?.map((target) => target.client), ["codex"]);
     assert.ok(codexPlan.mcpInstall?.additionalServers?.filesystem);
     assert.equal(existsSync(join(tempDir, ".codex", "config.toml")), false);
@@ -459,7 +468,7 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
       args?: readonly string[];
       harnessCommand?: string;
       harnessArgs?: readonly string[];
-      mcpInstall?: { claudeChannel?: { selector?: string }; targets?: readonly { client?: string }[] };
+      mcpInstall?: { claudeChannel?: { selector?: string }; server?: { env?: Record<string, string> }; targets?: readonly { client?: string }[] };
     };
     assert.equal(claudePlan.client, "claude");
     assert.equal(claudePlan.launchMode, "herdr");
@@ -473,6 +482,7 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
     assert.ok(claudePlan.args?.includes("claude"));
     assert.deepEqual(claudePlan.mcpInstall?.targets?.map((target) => target.client), ["claude"]);
     assert.equal(claudePlan.mcpInstall?.claudeChannel?.selector, "server:ciclo_launch");
+    assert.equal(claudePlan.mcpInstall?.server?.["env"]?.CICLO_USER_PANE_ENABLED, "true");
     assert.equal(existsSync(join(tempDir, ".mcp.json")), false);
 
     const terminal = captureIo();

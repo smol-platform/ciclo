@@ -44,6 +44,7 @@ import {
   WorkerSessionSupervisor,
   type WorkerHarnessId
 } from "./worker-session-supervisor.js";
+import { UserControlPaneNotifier, userControlPaneTargetFromEnv } from "./user-pane-notifier.js";
 import {
   buildCicloAttachPlan,
   createDefaultRemoteRunnerPluginRegistry,
@@ -166,6 +167,7 @@ export interface CicloMcpRuntimeContext {
   readonly secretProviderRegistry?: SecretProviderRegistry;
   readonly openAiBrain?: OpenAiBrain;
   readonly internalHeartbeat?: CicloInternalHeartbeat;
+  readonly userPaneNotifier?: UserControlPaneNotifier;
   readonly repoBoardProvider?: RepoBoardProvider;
   readonly repoBoardEventKeys?: Set<string>;
 }
@@ -1421,7 +1423,12 @@ export function createLocalMcpReadService(root = process.cwd()): CicloMcpReadSer
 export function createLocalMcpRuntimeContext(root = process.cwd()): CicloMcpRuntimeContext {
   const loadedConfig = loadCicloProjectConfig(root);
   const tokenRegistry = new TokenRegistry();
-  const eventStore = new CicloEventStore({ persistPath: cicloEventLogPath(root) });
+  const userPaneTarget = userControlPaneTargetFromEnv();
+  const userPaneNotifier = userPaneTarget === undefined ? undefined : new UserControlPaneNotifier(userPaneTarget);
+  const eventStore = new CicloEventStore({
+    persistPath: cicloEventLogPath(root),
+    ...(userPaneNotifier === undefined ? {} : { onAppend: (event) => { userPaneNotifier.notify(event); } })
+  });
   const runtime: CicloMcpRuntimeContext = {
     auth: {
       ...defaultClientAuthContext(root),
@@ -1437,10 +1444,12 @@ export function createLocalMcpRuntimeContext(root = process.cwd()): CicloMcpRunt
       verificationUri: "http://127.0.0.1:0/oauth/device"
     }),
     operatorRouting: new OperatorRoutingStore(),
+    beadsClient: new BeadsClient(root),
     workerSupervisor: new WorkerSessionSupervisor(root, undefined, undefined, eventStore),
     remoteRunnerRegistry: new RemoteRunnerRegistry(),
     secretProviderRegistry: createDefaultSecretProviderRegistry(),
     openAiBrain: new PiSdkOpenAiBrain({ promptInjections: loadedConfig.config.prompts?.systemInjections }),
+    ...(userPaneNotifier === undefined ? {} : { userPaneNotifier }),
     repoBoardProvider: new GitHubCliRepoBoardProvider(),
     repoBoardEventKeys: new Set<string>()
   };
@@ -1467,7 +1476,8 @@ export async function createLocalMcpRuntimeContextWithPlugins(root = process.cwd
     projectConfigEvidence: loadedConfig.evidence,
     remoteRunnerRegistry: new RemoteRunnerRegistry(pluginRegistry, imageResolverRegistry),
     secretProviderRegistry,
-    openAiBrain: new PiSdkOpenAiBrain({ promptInjections: loadedConfig.config.prompts?.systemInjections })
+    openAiBrain: new PiSdkOpenAiBrain({ promptInjections: loadedConfig.config.prompts?.systemInjections }),
+    userPaneNotifier: base.userPaneNotifier
   };
   return {
     ...runtime,
@@ -1660,6 +1670,16 @@ async function callTool(
       evidence: result.evidence,
       data: { question_id: result.questionId, urgency: result.question.urgency, waiting_workers: waitingWorkers.length }
     });
+    runtime.userPaneNotifier?.notifyMessage({
+      title: result.question.urgency === "blocking" ? "Ciclo needs blocking input" : "Ciclo needs input",
+      body: [
+        result.question.question,
+        `Question ${result.questionId}`,
+        result.question.beadId === undefined ? undefined : `Bead ${result.question.beadId}`,
+        result.question.loopId === undefined ? undefined : `Loop ${result.question.loopId}`
+      ].filter((line): line is string => line !== undefined).join("\n"),
+      sound: result.question.urgency === "low" ? "none" : "request"
+    });
     if (result.question.urgency === "blocking") {
       appendRuntimeEvent(runtime, {
         type: "blocker.raised",
@@ -1743,6 +1763,16 @@ async function callTool(
       beadId: stringParam(params, "bead_id") || undefined,
       evidence: result.evidence,
       data: { feedback_id: result.feedbackId, severity: result.feedback.severity }
+    });
+    runtime.userPaneNotifier?.notifyMessage({
+      title: `Ciclo feedback: ${result.feedback.severity}`,
+      body: [
+        result.feedback.message,
+        `Feedback ${result.feedbackId}`,
+        result.feedback.beadId === undefined ? undefined : `Bead ${result.feedback.beadId}`,
+        result.feedback.loopId === undefined ? undefined : `Loop ${result.feedback.loopId}`
+      ].filter((line): line is string => line !== undefined).join("\n"),
+      sound: result.feedback.severity === "critical" || result.feedback.severity === "error" ? "request" : "none"
     });
     return textContent({
       feedback_id: result.feedbackId,

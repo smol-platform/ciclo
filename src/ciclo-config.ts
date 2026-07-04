@@ -21,7 +21,7 @@ import {
   type SecretProviderRequest,
   type SecretProviderResult
 } from "./secret-provider.js";
-import type { WorkerSessionLaunchRequest } from "./worker-session-supervisor.js";
+import type { WorkerHarnessId, WorkerIsolationMode, WorkerSessionLaunchRequest } from "./worker-session-supervisor.js";
 
 export interface CicloConfigSecretProvider {
   readonly id: string;
@@ -100,6 +100,23 @@ export interface CicloConfigPrompts {
   readonly systemInjections?: readonly CicloPromptInjection[];
 }
 
+export interface CicloConfigHeartbeatPreemptiveWork {
+  readonly enabled?: boolean;
+  readonly loopId?: string;
+  readonly harnessId?: WorkerHarnessId;
+  readonly issueTypes?: readonly string[];
+  readonly maxConcurrent?: number;
+  readonly dryRun?: boolean;
+  readonly isolation?: WorkerIsolationMode;
+  readonly configureMcp?: boolean;
+  readonly model?: string;
+  readonly effort?: string;
+}
+
+export interface CicloConfigHeartbeat {
+  readonly preemptiveWork?: CicloConfigHeartbeatPreemptiveWork;
+}
+
 export interface CicloProjectConfig {
   readonly secrets?: {
     readonly providers?: readonly CicloConfigSecretProvider[];
@@ -107,6 +124,7 @@ export interface CicloProjectConfig {
   readonly mcp?: CicloConfigMcp;
   readonly remote?: CicloConfigRemote;
   readonly prompts?: CicloConfigPrompts;
+  readonly heartbeat?: CicloConfigHeartbeat;
 }
 
 export interface CicloProjectConfigLoadResult {
@@ -190,6 +208,30 @@ function clientList(record: Record<string, unknown>, key: string): readonly Cicl
     throw new Error(`${key} entries must be claude or codex`);
   });
   return [...new Set(clients)];
+}
+
+function optionalStringList(record: Record<string, unknown>, keys: readonly string[], path: string): readonly string[] | undefined {
+  const value = keys.map((key) => record[key]).find((candidate) => candidate !== undefined);
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
+  return value.map((entry, index) => {
+    if (typeof entry !== "string") throw new Error(`${path}[${index}] must be a string`);
+    const cleaned = clean(entry);
+    if (cleaned === undefined) throw new Error(`${path}[${index}] must not be empty`);
+    return cleaned;
+  });
+}
+
+function workerHarnessId(value: string | undefined, path: string): WorkerHarnessId | undefined {
+  if (value === undefined) return undefined;
+  if (value === "claude-code" || value === "codex") return value;
+  throw new Error(`${path} must be claude-code or codex`);
+}
+
+function workerIsolationMode(value: string | undefined, path: string): WorkerIsolationMode | undefined {
+  if (value === undefined) return undefined;
+  if (value === "none" || value === "worktree") return value;
+  throw new Error(`${path} must be none or worktree`);
 }
 
 function secretProviderConfig(value: unknown, index: number): CicloConfigSecretProvider {
@@ -481,6 +523,29 @@ function parsePrompts(root: Record<string, unknown>): CicloConfigPrompts | undef
   };
 }
 
+function parseHeartbeat(root: Record<string, unknown>): CicloConfigHeartbeat | undefined {
+  const heartbeatValue = root.heartbeat;
+  if (heartbeatValue === undefined) return undefined;
+  const heartbeat = objectValue(heartbeatValue, "heartbeat");
+  const preemptiveWorkValue = heartbeat.preemptive_work ?? heartbeat.preemptiveWork;
+  if (preemptiveWorkValue === undefined) return {};
+  const preemptiveWork = objectValue(preemptiveWorkValue, "heartbeat.preemptive_work");
+  return {
+    preemptiveWork: {
+      enabled: optionalBoolean(preemptiveWork, "enabled"),
+      loopId: optionalStringAny(preemptiveWork, ["loop_id", "loopId"]),
+      harnessId: workerHarnessId(optionalStringAny(preemptiveWork, ["harness_id", "harnessId"]), "heartbeat.preemptive_work.harness_id"),
+      issueTypes: optionalStringList(preemptiveWork, ["issue_types", "issueTypes"], "heartbeat.preemptive_work.issue_types"),
+      maxConcurrent: optionalNumberAny(preemptiveWork, ["max_concurrent", "maxConcurrent"]),
+      dryRun: optionalBooleanAny(preemptiveWork, ["dry_run", "dryRun"]),
+      isolation: workerIsolationMode(optionalString(preemptiveWork, "isolation"), "heartbeat.preemptive_work.isolation"),
+      configureMcp: optionalBooleanAny(preemptiveWork, ["configure_mcp", "configureMcp"]),
+      model: optionalString(preemptiveWork, "model"),
+      effort: optionalString(preemptiveWork, "effort")
+    }
+  };
+}
+
 export function parseCicloProjectConfigText(text: string): CicloProjectConfig {
   const trimmed = text.trim();
   if (trimmed.length === 0) return {};
@@ -489,11 +554,13 @@ export function parseCicloProjectConfigText(text: string): CicloProjectConfig {
   const mcp = parseMcp(root);
   const remote = parseRemote(root);
   const prompts = parsePrompts(root);
+  const heartbeat = parseHeartbeat(root);
   return {
     ...(secrets === undefined ? {} : { secrets }),
     ...(mcp === undefined ? {} : { mcp }),
     ...(remote === undefined ? {} : { remote }),
-    ...(prompts === undefined ? {} : { prompts })
+    ...(prompts === undefined ? {} : { prompts }),
+    ...(heartbeat === undefined ? {} : { heartbeat })
   };
 }
 
@@ -516,7 +583,8 @@ export function loadCicloProjectConfig(projectRoot = process.cwd(), explicitPath
       `ciclo.config.secret_providers:${config.secrets?.providers?.length ?? 0}`,
       `ciclo.config.mcp:${config.mcp === undefined ? "absent" : "present"}`,
       `ciclo.config.remote:${config.remote === undefined ? "absent" : "present"}`,
-      `ciclo.config.prompt_injections:${config.prompts?.systemInjections?.length ?? 0}`
+      `ciclo.config.prompt_injections:${config.prompts?.systemInjections?.length ?? 0}`,
+      `ciclo.config.heartbeat:${config.heartbeat === undefined ? "absent" : "present"}`
     ]
   };
 }
@@ -850,6 +918,17 @@ export const sampleCicloProjectConfig: CicloProjectConfig = {
         text: "When sessions stall, compare model fit, context size, validation state, PR status, and whether operator feedback is needed."
       }
     ]
+  },
+  heartbeat: {
+    preemptiveWork: {
+      enabled: true,
+      loopId: "preemptive-beads",
+      harnessId: "codex",
+      issueTypes: ["epic", "feature"],
+      maxConcurrent: 1,
+      isolation: "worktree",
+      configureMcp: true
+    }
   },
   remote: {
     runnerKind: "kubernetes",

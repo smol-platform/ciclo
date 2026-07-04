@@ -34,6 +34,7 @@ import {
   type WorkerProcessHandle,
   type WorkerProcessLauncher
 } from "../src/worker-session-supervisor.js";
+import { UserControlPaneNotifier } from "../src/user-pane-notifier.js";
 import {
   createLocalMcpRuntimeContextWithPlugins,
   handleMcpRequest,
@@ -983,9 +984,17 @@ test("MCP board flags workers that miss the expected PR artifact", async () => {
 
 test("MCP worker sessions expose waiting heartbeat stalled and usage rollups", async () => {
   let now = "2026-06-30T00:00:00.000Z";
+  const userPaneNotifications: Array<{ command: string; args: readonly string[] }> = [];
   const runtime: CicloMcpRuntimeContext = {
     ...singleRuntime,
     operatorRouting: new OperatorRoutingStore(),
+    userPaneNotifier: new UserControlPaneNotifier(
+      { enabled: true, herdrSession: "loop-live", paneName: "controller" },
+      (command, args) => {
+        userPaneNotifications.push({ command, args });
+        return { status: 0 };
+      }
+    ),
     workerSupervisor: new WorkerSessionSupervisor("/repo", new FakeWorkerLauncher(), {
       now: () => now
     })
@@ -1037,6 +1046,9 @@ test("MCP worker sessions expose waiting heartbeat stalled and usage rollups", a
     )
   );
   assert.equal(((question.waiting_workers as readonly { state?: string }[])[0])?.state, "waiting_on_operator");
+  assert.equal(userPaneNotifications[0]?.command, "herdr");
+  assert.match(userPaneNotifications[0]?.args.join("\n") ?? "", /Merge this risky change/u);
+  assert.match(userPaneNotifications[0]?.args.join("\n") ?? "", /Ciclo needs blocking input/u);
 
   const waitingStatus = structuredContent(
     await handleMcpRequest(

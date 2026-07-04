@@ -70,6 +70,7 @@ export interface CicloEventSink {
 export interface CicloEventStoreOptions {
   readonly now?: () => string;
   readonly persistPath?: string;
+  readonly onAppend?: (event: CicloEvent) => void;
 }
 
 function parseEventLine(line: string): CicloEvent | undefined {
@@ -103,6 +104,7 @@ export class CicloEventStore implements CicloEventSink {
   private readonly events: CicloEvent[] = [];
   private readonly now: () => string;
   private readonly persistPath?: string;
+  private readonly onAppend?: (event: CicloEvent) => void;
 
   constructor(nowOrOptions: (() => string) | CicloEventStoreOptions = () => new Date().toISOString()) {
     if (typeof nowOrOptions === "function") {
@@ -110,6 +112,7 @@ export class CicloEventStore implements CicloEventSink {
     } else {
       this.now = nowOrOptions.now ?? (() => new Date().toISOString());
       this.persistPath = nowOrOptions.persistPath;
+      this.onAppend = nowOrOptions.onAppend;
       this.loadPersistedEvents();
     }
   }
@@ -124,6 +127,7 @@ export class CicloEventStore implements CicloEventSink {
     };
     this.events.push(event);
     this.persist(event);
+    this.onAppend?.(event);
     return event;
   }
 

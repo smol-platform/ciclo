@@ -39,6 +39,7 @@ import {
   type RuntimeSecretEnvBinding
 } from "./secret-env-runtime.js";
 import { installCicloSkills, type CicloSkillInstallClient } from "./skill-install.js";
+import { userControlPaneEnv } from "./user-pane-notifier.js";
 import { CICLO_VERSION } from "./version.js";
 
 const DEFAULT_BENCHMARK_DIR = "tests/fixtures/benchmarks";
@@ -1075,6 +1076,17 @@ function herdrAttachArgs(sessionName: string): readonly string[] {
   return ["session", "attach", sessionName];
 }
 
+function launchUserPaneEnv(options: CliLaunchOptions, projectRoot: string): Record<string, string> | undefined {
+  if (!options.herdr) return undefined;
+  const sessionName = herdrSessionName(options, projectRoot);
+  const paneName = herdrPaneName(options, projectRoot);
+  return {
+    [userControlPaneEnv.enabled]: "true",
+    [userControlPaneEnv.herdrSession]: sessionName,
+    [userControlPaneEnv.paneName]: paneName
+  };
+}
+
 function appendClaudePermissionMode(args: string[], value: string | undefined): void {
   const mode = value?.trim() || DEFAULT_CLAUDE_PERMISSION_MODE;
   if (mode === undefined || mode.length === 0 || mode === "default") return;
@@ -1138,6 +1150,7 @@ async function buildLaunchPlan(options: CliLaunchOptions): Promise<CicloLaunchPl
     clients: [options.client],
     ...(options.serverName === undefined ? {} : { serverName: options.serverName }),
     ...(options.mcpCommand === undefined ? {} : { command: options.mcpCommand }),
+    env: launchUserPaneEnv(options, projectRoot),
     claudeChannel: options.client === "claude" ? options.claudeChannel : false,
     dryRun: options.dryRun
   });
