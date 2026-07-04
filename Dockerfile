@@ -15,6 +15,8 @@ RUN npm run build
 
 FROM node:${NODE_VERSION} AS runtime
 ARG RUNNER_VARIANT
+ARG TARGETARCH
+ARG JUST_VERSION=1.55.1
 
 LABEL org.opencontainers.image.title="ciclo"
 LABEL org.opencontainers.image.description="Ciclo orchestration runner base image"
@@ -38,8 +40,26 @@ RUN apt-get update \
   && apt-get clean
 
 RUN if [ "$RUNNER_VARIANT" != "base" ]; then \
-    apt-get update \
-    && apt-get install -y --no-install-recommends gh just \
+    mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      >/etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && case "$TARGETARCH" in \
+      amd64) just_arch="x86_64-unknown-linux-musl" ;; \
+      arm64) just_arch="aarch64-unknown-linux-musl" ;; \
+      *) echo "Unsupported TARGETARCH for just: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-${just_arch}.tar.gz" \
+      -o /tmp/just.tar.gz \
+    && tar -xzf /tmp/just.tar.gz -C /usr/local/bin just \
+    && chmod +x /usr/local/bin/just \
+    && rm -f /tmp/just.tar.gz \
+    && gh --version \
+    && just --version \
     && apt-get clean; \
   fi
 
