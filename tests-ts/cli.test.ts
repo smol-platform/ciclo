@@ -402,6 +402,8 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
     assert.equal(claudePlan.harnessCommand, "claude");
     assert.ok(claudePlan.harnessArgs?.includes("--dangerously-load-development-channels"));
     assert.ok(claudePlan.harnessArgs?.includes("server:ciclo_launch"));
+    assert.ok(!claudePlan.harnessArgs?.includes("--permission-mode"));
+    assert.ok(!claudePlan.harnessArgs?.includes("default"));
     assert.ok(claudePlan.args?.includes("claude"));
     assert.deepEqual(claudePlan.mcpInstall?.targets?.map((target) => target.client), ["claude"]);
     assert.equal(claudePlan.mcpInstall?.claudeChannel?.selector, "server:ciclo_launch");

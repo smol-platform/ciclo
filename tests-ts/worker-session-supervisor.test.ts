@@ -68,11 +68,11 @@ class FakeHandle implements WorkerProcessHandle {
 }
 
 class FakeLauncher implements WorkerProcessLauncher {
-  readonly launches: { command: string; args: readonly string[]; cwd?: string }[] = [];
+  readonly launches: { command: string; args: readonly string[]; cwd?: string; environment?: NodeJS.ProcessEnv }[] = [];
   readonly handle = new FakeHandle();
 
-  launch(command: string, args: readonly string[], options: { cwd?: string }): WorkerProcessHandle {
-    this.launches.push({ command, args, cwd: options.cwd });
+  launch(command: string, args: readonly string[], options: { cwd?: string; env?: NodeJS.ProcessEnv }): WorkerProcessHandle {
+    this.launches.push({ command, args, cwd: options.cwd, environment: options["env"] });
     return this.handle;
   }
 }
@@ -89,8 +89,9 @@ class FakeClaudeResolver implements ClaudeBackgroundAgentResolver {
 
 class FakeCommandRunner implements WorkerCommandRunner {
   readonly runs: { command: string; args: readonly string[]; cwd?: string }[] = [];
+  private index = 0;
 
-  constructor(private readonly result: WorkerCommandRunResult = {
+  constructor(private readonly result: WorkerCommandRunResult | readonly WorkerCommandRunResult[] = {
     status: 0,
     stdout: JSON.stringify({ workspace_id: "workspace-123" }),
     stderr: ""
@@ -98,7 +99,10 @@ class FakeCommandRunner implements WorkerCommandRunner {
 
   run(command: string, args: readonly string[], options: { cwd?: string } = {}): WorkerCommandRunResult {
     this.runs.push({ command, args, cwd: options.cwd });
-    return this.result;
+    if (Array.isArray(this.result)) {
+      return this.result[Math.min(this.index++, this.result.length - 1)]!;
+    }
+    return this.result as WorkerCommandRunResult;
   }
 }
 
@@ -162,14 +166,31 @@ test("Claude worker launch plan starts background named session with effort", ()
       "claude-fable-5",
       "--effort",
       "high",
-      "--permission-mode",
-      "default",
       "--allowedTools",
       "mcp__ciclo__ciclo_status",
       "Review through Ciclo."
     ]);
     assert.equal(plan.model, "claude-fable-5");
     assert.ok(plan.evidence.includes("worker.session.model:claude-fable-5"));
+  });
+});
+
+test("Claude worker launch plan passes only explicit valid permission mode", () => {
+  withHerdrReuseDisabled(() => {
+    const plan = buildWorkerLaunchPlan(
+      {
+        harnessId: "claude-code",
+        loopId: "loop-permissions",
+        permissionMode: "manual",
+        prompt: "Review through Ciclo."
+      },
+      "/repo",
+      "worker-claude-permissions"
+    );
+
+    assert.ok(plan.args.includes("--permission-mode"));
+    assert.ok(plan.args.includes("manual"));
+    assert.ok(!plan.args.includes("default"));
   });
 });
 
@@ -296,7 +317,28 @@ test("Herdr pane worktree launches use Herdr worktree workspace support", () => 
     const root = mkdtempSync(join(tmpdir(), "ciclo-herdr-worktree-root-"));
     const worktreePath = join(tmpdir(), `ciclo-herdr-worktree-${Date.now()}`);
     const launcher = new FakeLauncher();
-    const commandRunner = new FakeCommandRunner();
+    const commandRunner = new FakeCommandRunner([
+      {
+        status: 0,
+        stdout: JSON.stringify({ id: "cli:worktree:create", result: { id: "cli:worktree:create" } }),
+        stderr: ""
+      },
+      {
+        status: 0,
+        stdout: JSON.stringify({
+          result: {
+            worktrees: [
+              {
+                path: worktreePath,
+                branch: "ciclo/ciclo-9l0",
+                open_workspace_id: "workspace-123"
+              }
+            ]
+          }
+        }),
+        stderr: ""
+      }
+    ]);
     const supervisor = new WorkerSessionSupervisor(
       root,
       launcher,
@@ -344,7 +386,20 @@ test("Herdr pane worktree launches use Herdr worktree workspace support", () => 
         "--json"
       ]
     });
-    assert.deepEqual(launcher.launches[0]?.args.slice(0, 9), [
+    assert.deepEqual(commandRunner.runs[1], {
+      command: "herdr",
+      cwd: root,
+      args: [
+        "--session",
+        "operator-main",
+        "worktree",
+        "list",
+        "--cwd",
+        worktreePath,
+        "--json"
+      ]
+    });
+    assert.deepEqual(launcher.launches[0]?.args.slice(0, 11), [
       "--session",
       "operator-main",
       "agent",
@@ -352,10 +407,12 @@ test("Herdr pane worktree launches use Herdr worktree workspace support", () => 
       "operator-main-review-loop-ciclo-9l0-codex",
       "--workspace",
       "workspace-123",
+      "--cwd",
+      worktreePath,
       "--no-focus",
       "--"
     ]);
-    assert.ok(!launcher.launches[0]?.args.includes("--cwd"));
+    assert.ok(!launcher.launches[0]?.args.includes("cli:worktree:create"));
     assert.ok(running.evidence.includes("worker.worktree:herdr_create"));
     assert.ok(running.evidence.includes("worker.worktree.herdr_workspace:workspace-123"));
   });
@@ -395,6 +452,35 @@ test("Herdr pane worktree launches always create a fresh workspace", () => {
     assert.equal(commandRunner.runs[0]?.args[3], "create");
     assert.ok(!commandRunner.runs[0]?.args.includes("open"));
     assert.ok(running.evidence.includes("worker.worktree:herdr_create"));
+  });
+});
+
+test("Herdr pane worktree launch fails closed when Herdr omits workspace id", () => {
+  withHerdrSessionEnv("operator-main", () => {
+    const root = mkdtempSync(join(tmpdir(), "ciclo-herdr-missing-workspace-root-"));
+    const launcher = new FakeLauncher();
+    const commandRunner = new FakeCommandRunner({ status: 0, stdout: "{}", stderr: "" });
+    const supervisor = new WorkerSessionSupervisor(
+      root,
+      launcher,
+      { now: () => "2026-06-30T00:00:00.000Z" },
+      undefined,
+      undefined,
+      commandRunner
+    );
+
+    const failed = supervisor.launch({
+      harnessId: "claude-code",
+      loopId: "review-loop",
+      beadId: "ciclo-1mt",
+      prompt: "Work through Ciclo.",
+      isolation: "worktree"
+    });
+
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.cleanupReason, "herdr worktree create did not return a workspace id");
+    assert.equal(launcher.launches.length, 0);
+    assert.ok(failed.evidence.includes("worker.worktree:failed"));
   });
 });
 
@@ -592,6 +678,29 @@ test("worker session supervisor records completed worker exits", () => {
   });
 });
 
+test("worker launch passes non-secret values to the worker process", () => {
+  withHerdrReuseDisabled(() => {
+    const launcher = new FakeLauncher();
+    const supervisor = new WorkerSessionSupervisor("/repo", launcher, {
+      now: () => "2026-06-30T00:00:00.000Z"
+    });
+
+    const running = supervisor.launch({
+      harnessId: "codex",
+      loopId: "values-loop",
+      prompt: "Use configured values.",
+      workerEnv: {
+        GRAFANA_URL: "https://grafana.example.test"
+      }
+    });
+    const plan = running["workerEnv"];
+
+    assert.deepEqual(plan?.["envNames"], ["GRAFANA_URL"]);
+    assert.equal(launcher.launches[0]?.["environment"]?.GRAFANA_URL, "https://grafana.example.test");
+    assert.ok(running.evidence.includes("worker_environment.names:GRAFANA_URL"));
+  });
+});
+
 test("Claude background launcher exit does not complete detached worker", () => {
   withHerdrReuseDisabled(() => {
     const launcher = new FakeLauncher();
@@ -643,6 +752,29 @@ test("Herdr pane launcher exit does not complete visible pane worker", () => {
     assert.equal(afterLauncherExit?.agentRef?.kind, "herdr_agent");
     assert.equal(afterLauncherExit?.cleanupReason, "herdr pane launcher exited; pane agent is still tracked");
     assert.ok(afterLauncherExit?.evidence.includes("worker.session.launcher_exit:herdr_pane_still_running"));
+  });
+});
+
+test("Herdr pane worker launch passes non-secret values with agent start env flags", () => {
+  withHerdrSessionEnv("operator-main", () => {
+    const plan = buildWorkerLaunchPlan({
+      harnessId: "codex",
+      loopId: "pane-loop",
+      prompt: "Work through Ciclo.",
+      workerEnv: {
+        GRAFANA_URL: "https://grafana.example.test"
+      }
+    }, "/repo", "worker-herdr-values");
+
+    assert.equal(plan.launchMode, "herdr_pane");
+    assert.deepEqual(plan.args.slice(5, 11), [
+      "--cwd",
+      "/repo",
+      "--env",
+      "GRAFANA_URL=https://grafana.example.test",
+      "--no-focus",
+      "--"
+    ]);
   });
 });
 

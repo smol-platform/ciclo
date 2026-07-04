@@ -221,6 +221,7 @@ test("config merges into MCP install worker and remote requests", () => {
   assert.equal(worker.configureMcp, true);
   assert.equal(worker.mcpServerName, "ciclo_configured");
   assert.equal(worker.mcpEnv?.CICLO_REUSE_HERDR_SESSION, "true");
+  assert.equal(worker.workerEnv?.CICLO_REUSE_HERDR_SESSION, "true");
   assert.equal(worker.mcpAdditionalServers?.filesystem?.["env"].MCP_FS_MODE, "config");
   assert.deepEqual(worker.mcpSecretEnv?.map((binding) => binding.name), ["GITHUB_TOKEN", "GITHUB_AUTHORIZATION"]);
   assert.deepEqual(worker.workerSecretEnv?.map((binding) => binding.name), ["GRAFANA_URL"]);

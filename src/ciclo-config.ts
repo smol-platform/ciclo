@@ -713,6 +713,7 @@ export function mergeWorkerLaunchWithConfig(input: WorkerSessionLaunchRequest, c
     mcpServerName: input.mcpServerName ?? mcp?.serverName,
     mcpCommand: input.mcpCommand ?? mcp?.command,
     mcpEnv: mergeVars(mcp?.vars, input.mcpEnv),
+    workerEnv: mergeVars(mcp?.vars, input.workerEnv),
     mcpAdditionalServers: mergeAdditionalServers(mcp?.additionalServers, input.mcpAdditionalServers),
     mcpSecretEnv: input.mcpSecretEnv ?? configMcpSecretEnvBindings(config),
     workerSecretEnv: input.workerSecretEnv ?? configWorkerSecretEnvBindings(config),

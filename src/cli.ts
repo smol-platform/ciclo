@@ -247,7 +247,7 @@ function commandHelp(command: string): string {
       "  --claude-channel               Enable Claude Code channel capability for launched Claude sessions.",
       "  --model <model>                Pass model to the harness.",
       "  --effort <effort>              Pass effort to Claude Code.",
-      "  --permission-mode <mode>       Pass permission mode to Claude Code. Default: default.",
+      "  --permission-mode <mode>       Pass an explicit Claude Code permission mode.",
       "  --approval-policy <policy>     Pass approval policy to Codex. Default: on-request.",
       "  --sandbox <mode>               Pass sandbox mode to Codex. Default: workspace-write.",
       "  --prompt <text>                Optional initial prompt.",
@@ -926,13 +926,19 @@ function herdrAttachArgs(sessionName: string): readonly string[] {
   return ["session", "attach", sessionName];
 }
 
+function appendClaudePermissionMode(args: string[], value: string | undefined): void {
+  const mode = value?.trim();
+  if (mode === undefined || mode.length === 0 || mode === "default") return;
+  args.push("--permission-mode", mode);
+}
+
 function launchArgs(options: CliLaunchOptions, projectRoot: string, install: CicloMcpInstallResult): readonly string[] {
   const args: string[] = [];
   if (options.client === "claude") {
     if (install.claudeChannel !== undefined) args.push(...install.claudeChannel.launchArgs);
     if (options.model !== undefined) args.push("--model", options.model);
     if (options.effort !== undefined) args.push("--effort", options.effort);
-    args.push("--permission-mode", options.permissionMode ?? "default");
+    appendClaudePermissionMode(args, options.permissionMode);
     args.push(...options.extraArgs);
     if (options.prompt !== undefined) args.push(options.prompt);
     return args;

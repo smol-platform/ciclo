@@ -636,7 +636,10 @@ test("MCP worker launch resolves plugin secrets into generated MCP config withou
                   secret_ref: "op://Ciclo/Grafana/url",
                   reason: "provide Grafana URL to worker shell"
                 }
-              ]
+              ],
+              worker_env: {
+                GRAFANA_ORG: "platform"
+              }
             }
           }
         },
@@ -648,6 +651,8 @@ test("MCP worker launch resolves plugin secrets into generated MCP config withou
     assert.equal(launched.state, "running");
     assert.equal(launched.command, "ciclo");
     assert.deepEqual((launched.args as readonly string[]).slice(0, 3), ["secret", "exec", "--binding"]);
+    const workerValues = launched["worker_env"] as { ["envNames"]?: readonly string[] };
+    assert.deepEqual(workerValues["envNames"], ["GRAFANA_ORG"]);
     const workerInfo = launched["worker_secret_env"] as { ["envNames"]?: readonly string[] };
     assert.equal(workerInfo["envNames"]?.[0], "GRAFANA_URL");
     assert.doesNotMatch(JSON.stringify(launched), /super-secret-value/);

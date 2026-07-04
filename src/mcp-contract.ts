@@ -594,6 +594,7 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       mcp_server_name: stringSchema("MCP server name to install. Default: ciclo."),
       mcp_command: stringSchema("Ciclo command for MCP clients to run. Default: ciclo."),
       mcp_env: { type: "object", description: "Additional non-secret environment variables to write into the configured MCP server." },
+      worker_env: { type: "object", description: "Additional non-secret environment variables to pass to the launched worker process and its shell tools. Project mcp.vars are inherited here for worker launches unless overridden." },
       mcp_additional_servers: { type: "object", description: "Additional third-party MCP servers to install into the launched worker worktree/cwd. Object keys are server names; values accept command, args, and env. Raw env values must be non-secret; values may include ${secret://provider-id/ref} placeholders resolved at session MCP config install time." },
       mcp_secret_env: {
         type: "array",
@@ -629,6 +630,10 @@ export const cicloMcpTools: readonly McpToolContract[] = [
         serverName: stringSchema("Installed MCP server name."),
         command: stringSchema("Installed Ciclo command."),
         install: { type: "object" }
+      }),
+      worker_env: objectSchema("Worker process non-secret environment plan.", {
+        envNames: arrayOfStrings("Environment variable names that will be set in the worker process."),
+        evidence: arrayOfStrings("Runtime environment delivery evidence.")
       }),
       worker_secret_env: objectSchema("Redacted worker process secret env plan.", {
         envNames: arrayOfStrings("Environment variable names that will be set in the worker process."),

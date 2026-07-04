@@ -420,6 +420,19 @@ function mcpEnvParam(params: unknown): Record<string, string> | undefined {
   return output;
 }
 
+function workerEnvParam(params: unknown): Record<string, string> | undefined {
+  const input = asRecord(params).worker_env;
+  if (input === undefined) return undefined;
+  const env = asRecord(input);
+  const output: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    assertMcpEnvName(name);
+    if (typeof value !== "string") throw new Error(`worker_env.${name} must be a string`);
+    output[name] = value;
+  }
+  return output;
+}
+
 function mcpAdditionalServersParam(params: unknown): Record<string, CicloMcpAdditionalServerConfig> | undefined {
   const input = asRecord(params).mcp_additional_servers;
   if (input === undefined) return undefined;
@@ -1972,6 +1985,7 @@ async function callTool(
       mcpServerName: stringParam(params, "mcp_server_name") || undefined,
       mcpCommand: stringParam(params, "mcp_command") || undefined,
       mcpEnv: mcpEnvParam(params),
+      workerEnv: workerEnvParam(params),
       mcpAdditionalServers: mcpAdditionalServersParam(params),
       mcpSecretEnv,
       workerSecretEnv,
@@ -2007,6 +2021,7 @@ async function callTool(
       cwd: result.cwd,
       worktree: result.worktree,
       mcp_config: publicMcpConfig(result.mcpConfig),
+      worker_env: result.workerEnv,
       worker_secret_env: result.workerSecretEnv,
       pid: result.pid,
       session_name: result.sessionName,

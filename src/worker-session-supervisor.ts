@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
 import type { HarnessId } from "./ciclo-core.js";
@@ -56,6 +56,7 @@ export interface WorkerSessionLaunchRequest {
   readonly mcpServerName?: string;
   readonly mcpCommand?: string;
   readonly mcpEnv?: Record<string, string>;
+  readonly workerEnv?: Record<string, string>;
   readonly mcpAdditionalServers?: Record<string, CicloMcpAdditionalServerConfig>;
   readonly mcpAdditionalServerSecretEnv?: readonly CicloMcpAdditionalServerSecretEnvInstall[];
   readonly mcpSecretEnv?: readonly CicloMcpSecretEnvBinding[];
@@ -93,6 +94,7 @@ export interface WorkerLaunchPlan {
   readonly effort?: string;
   readonly worktree?: WorkerWorktreePlan;
   readonly mcpConfig?: WorkerMcpConfigPlan;
+  readonly workerEnv?: WorkerEnvironmentPlan;
   readonly workerSecretEnv?: WorkerSecretEnvPlan;
   readonly loopId: string;
   readonly beadId?: string;
@@ -125,6 +127,12 @@ export interface WorkerMcpConfigPlan {
 export interface WorkerSecretEnvPlan {
   readonly envNames: readonly string[];
   readonly bindings: readonly CicloMcpSecretEnvInstall[];
+  readonly evidence: readonly string[];
+}
+
+export interface WorkerEnvironmentPlan {
+  readonly values: Record<string, string>;
+  readonly envNames: readonly string[];
   readonly evidence: readonly string[];
 }
 
@@ -176,6 +184,7 @@ export interface WorkerSessionRecord {
   readonly effort?: string;
   readonly worktree?: WorkerWorktreePlan;
   readonly mcpConfig?: WorkerMcpConfigPlan;
+  readonly workerEnv?: WorkerEnvironmentPlan;
   readonly workerSecretEnv?: WorkerSecretEnvPlan;
   readonly sessionName: string;
   readonly trackingMode: WorkerTrackingMode;
@@ -351,11 +360,17 @@ function codexArgs(input: WorkerSessionLaunchRequest, cwd: string, extraArgs: re
   return args;
 }
 
+function appendClaudePermissionMode(args: string[], value: string | undefined): void {
+  const mode = clean(value);
+  if (mode === undefined || mode === "default") return;
+  args.push("--permission-mode", mode);
+}
+
 function claudeArgs(input: WorkerSessionLaunchRequest, name: string, extraArgs: readonly string[]): readonly string[] {
   const args: string[] = ["--bg", "--name", name];
   appendIfValue(args, "--model", input.model);
   appendIfValue(args, "--effort", input.effort);
-  args.push("--permission-mode", clean(input.permissionMode) ?? "default");
+  appendClaudePermissionMode(args, input.permissionMode);
   args.push(...extraArgs);
   args.push(input.prompt);
   return args;
@@ -365,7 +380,7 @@ function claudePaneArgs(input: WorkerSessionLaunchRequest, name: string, extraAr
   const args: string[] = ["--name", name];
   appendIfValue(args, "--model", input.model);
   appendIfValue(args, "--effort", input.effort);
-  args.push("--permission-mode", clean(input.permissionMode) ?? "default");
+  appendClaudePermissionMode(args, input.permissionMode);
   args.push(...extraArgs);
   args.push(input.prompt);
   return args;
@@ -429,6 +444,25 @@ function workerSecretEnvPlan(input: WorkerSessionLaunchRequest): WorkerSecretEnv
   };
 }
 
+function workerEnvironmentPlan(input: WorkerSessionLaunchRequest): WorkerEnvironmentPlan | undefined {
+  const values = input.workerEnv ?? {};
+  const envNames = Object.keys(values);
+  if (envNames.length === 0) return undefined;
+  return {
+    values,
+    envNames,
+    evidence: [
+      `worker_environment.count:${envNames.length}`,
+      `worker_environment.names:${envNames.join(",")}`
+    ]
+  };
+}
+
+function herdrEnvironmentArgs(environment: WorkerEnvironmentPlan | undefined): readonly string[] {
+  if (environment === undefined) return [];
+  return environment.envNames.flatMap((name) => ["--env", `${name}=${environment.values[name] ?? ""}`]);
+}
+
 function mcpClientsForHarness(input: WorkerSessionLaunchRequest): readonly CicloMcpInstallClient[] {
   if (input.mcpClients !== undefined && input.mcpClients.length > 0) return [...new Set(input.mcpClients)];
   return input.harnessId === "codex" ? ["codex"] : ["claude"];
@@ -484,7 +518,14 @@ function mcpConfigPlan(input: WorkerSessionLaunchRequest, cwd: string): WorkerMc
   };
 }
 
-function herdrPaneArgs(session: string, name: string, cwd: string, command: string, args: readonly string[]): readonly string[] {
+function herdrPaneArgs(
+  session: string,
+  name: string,
+  cwd: string,
+  environment: WorkerEnvironmentPlan | undefined,
+  command: string,
+  args: readonly string[]
+): readonly string[] {
   return [
     "--session",
     session,
@@ -493,6 +534,7 @@ function herdrPaneArgs(session: string, name: string, cwd: string, command: stri
     name,
     "--cwd",
     cwd,
+    ...herdrEnvironmentArgs(environment),
     "--no-focus",
     "--",
     command,
@@ -507,7 +549,7 @@ function herdrWorkspacePaneArgs(args: readonly string[], workspaceId: string): r
     ...args.slice(0, cwdIndex),
     "--workspace",
     workspaceId,
-    ...args.slice(cwdIndex + 2)
+    ...args.slice(cwdIndex)
   ];
 }
 
@@ -574,6 +616,7 @@ export function buildWorkerLaunchPlan(
   const cwd = worktree?.path ?? requestedCwd;
   const extraArgs = cleanArgs(input.extraArgs);
   const mcpConfig = mcpConfigPlan(launchInput, cwd);
+  const workerEnv = workerEnvironmentPlan(launchInput);
   const secretEnv = workerSecretEnvPlan(launchInput);
   const herdrSession = herdrPaneLaunchEnabled(launchInput);
   const localLaunchMode = launchMode(herdrSession);
@@ -587,7 +630,7 @@ export function buildWorkerLaunchPlan(
   const underlyingArgs = workerRuntimeSecrets.length === 0 ? harnessArgs : secretExecArgs(workerRuntimeSecrets, harnessCommand, harnessArgs);
   const command = localLaunchMode === "herdr_pane" ? "herdr" : underlyingCommand;
   const args = localLaunchMode === "herdr_pane"
-    ? herdrPaneArgs(herdrSession!, name, cwd, underlyingCommand, underlyingArgs)
+    ? herdrPaneArgs(herdrSession!, name, cwd, workerEnv, underlyingCommand, underlyingArgs)
     : underlyingArgs;
   return {
     sessionId,
@@ -600,6 +643,7 @@ export function buildWorkerLaunchPlan(
     effort: clean(input.effort),
     ...(worktree === undefined ? {} : { worktree }),
     ...(mcpConfig === undefined ? {} : { mcpConfig }),
+    ...(workerEnv === undefined ? {} : { workerEnv }),
     ...(secretEnv === undefined ? {} : { workerSecretEnv: secretEnv }),
     loopId: input.loopId,
     beadId: clean(input.beadId),
@@ -628,6 +672,7 @@ export function buildWorkerLaunchPlan(
             `worker.worktree.force:${worktree.force}`
           ]),
       ...(mcpConfig === undefined ? [] : mcpConfig.evidence),
+      ...(workerEnv === undefined ? [] : workerEnv.evidence),
       ...(secretEnv === undefined ? [] : secretEnv.evidence),
       input.dryRun === true ? "worker.session.dry_run:true" : "worker.session.dry_run:false"
     ]
@@ -690,10 +735,50 @@ function parseHerdrWorkspaceId(stdout: string): string | undefined {
   const trimmed = stdout.trim();
   if (trimmed.length === 0) return undefined;
   try {
-    return parseHerdrWorkspaceIdValue(JSON.parse(trimmed) as unknown);
+    const workspaceId = parseHerdrWorkspaceIdValue(JSON.parse(trimmed) as unknown);
+    return isConcreteHerdrWorkspaceId(workspaceId) ? workspaceId : undefined;
   } catch {
     return undefined;
   }
+}
+
+function isConcreteHerdrWorkspaceId(value: string | undefined): value is string {
+  return value !== undefined && !value.startsWith("cli:");
+}
+
+function canonicalExistingPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+function parseHerdrWorktreeWorkspaceId(stdout: string, worktreePath: string): string | undefined {
+  const trimmed = stdout.trim();
+  if (trimmed.length === 0) return undefined;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(trimmed) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (payload === null || typeof payload !== "object") return undefined;
+  const result = (payload as Record<string, unknown>).result;
+  if (result === null || typeof result !== "object") return undefined;
+  const worktrees = (result as Record<string, unknown>).worktrees;
+  if (!Array.isArray(worktrees)) return undefined;
+
+  const target = canonicalExistingPath(worktreePath);
+  for (const item of worktrees) {
+    if (item === null || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.path !== "string") continue;
+    if (canonicalExistingPath(record.path) !== target) continue;
+    const workspaceId = typeof record.open_workspace_id === "string" ? clean(record.open_workspace_id) : undefined;
+    if (isConcreteHerdrWorkspaceId(workspaceId)) return workspaceId;
+  }
+  return undefined;
 }
 
 function prepareHerdrWorktree(plan: WorkerLaunchPlan, root: string, runner: WorkerCommandRunner): PreparedWorktree {
@@ -722,13 +807,28 @@ function prepareHerdrWorktree(plan: WorkerLaunchPlan, root: string, runner: Work
     const message = (result.stderr || result.stdout || "herdr worktree command failed").trim();
     throw new Error(message);
   }
-  const workspaceId = parseHerdrWorkspaceId(result.stdout);
+  const listed = runner.run("herdr", [
+    ...(session === undefined ? [] : ["--session", session]),
+    "worktree",
+    "list",
+    "--cwd",
+    worktree.path,
+    "--json"
+  ], { cwd: root });
+  if (listed.status !== 0) {
+    const message = (listed.stderr || listed.stdout || "herdr worktree list failed").trim();
+    throw new Error(message);
+  }
+  const workspaceId = parseHerdrWorkspaceId(result.stdout) ?? parseHerdrWorktreeWorkspaceId(listed.stdout, worktree.path);
+  if (workspaceId === undefined) {
+    throw new Error("herdr worktree create did not return a workspace id");
+  }
   return {
     evidence: [
       `worker.worktree:herdr_${mode}`,
-      ...(workspaceId === undefined ? ["worker.worktree.herdr_workspace:unknown"] : [`worker.worktree.herdr_workspace:${workspaceId}`])
+      `worker.worktree.herdr_workspace:${workspaceId}`
     ],
-    ...(workspaceId === undefined ? {} : { herdrWorkspaceId: workspaceId })
+    herdrWorkspaceId: workspaceId
   };
 }
 
@@ -982,7 +1082,7 @@ export class WorkerSessionSupervisor {
     const startedAt = this.clock.now();
     const handle = this.launcher.launch(plan.command, launchArgs, {
       cwd: plan.cwd,
-      env: process.env,
+      env: { ...process.env, ...(plan.workerEnv?.values ?? {}) },
       detached: true,
       stdio: "ignore"
     });
