@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { CicloEventStore } from "../src/ciclo-events.js";
+import { CicloMemoryStore } from "../src/ciclo-memory.js";
 import type { BeadsTaskSnapshot } from "../src/beads-adapter.js";
 import type { BeadsWorkClaimClient } from "../src/beads-work-queue.js";
 import { CicloInternalHeartbeat } from "../src/internal-heartbeat.js";
@@ -14,6 +18,8 @@ import type {
 import { openAiBrainIntelligence, openAiBrainModelFamily, openAiBrainPolicy } from "../src/openai-brain.js";
 import {
   WorkerSessionSupervisor,
+  type WorkerCommandRunResult,
+  type WorkerCommandRunner,
   type WorkerProcessHandle,
   type WorkerProcessLauncher
 } from "../src/worker-session-supervisor.js";
@@ -29,6 +35,17 @@ class FakeHandle implements WorkerProcessHandle {
 class FakeLauncher implements WorkerProcessLauncher {
   launch(): WorkerProcessHandle {
     return new FakeHandle();
+  }
+}
+
+class FakeCommandRunner implements WorkerCommandRunner {
+  readonly runs: { command: string; args: readonly string[]; cwd?: string }[] = [];
+
+  constructor(private readonly result: WorkerCommandRunResult = { status: 0, stdout: "", stderr: "" }) {}
+
+  run(command: string, args: readonly string[], options: { cwd?: string } = {}): WorkerCommandRunResult {
+    this.runs.push({ command, args, cwd: options.cwd });
+    return this.result;
   }
 }
 
@@ -85,14 +102,24 @@ class FakeBrain implements OpenAiBrain {
 test("internal heartbeat marks stalled workers and asks OpenAI brain for follow-up", async () => {
   let now = "2026-07-02T00:00:00.000Z";
   const events = new CicloEventStore(() => now);
-  const supervisor = new WorkerSessionSupervisor("/repo", new FakeLauncher(), { now: () => now }, events);
+  const root = mkdtempSync(join(tmpdir(), "ciclo-heartbeat-stall-"));
+  const commandRunner = new FakeCommandRunner();
+  const memory = new CicloMemoryStore({ projectRoot: root, now: () => now, eventSink: events });
+  const supervisor = new WorkerSessionSupervisor("/repo", new FakeLauncher(), { now: () => now }, events, undefined, commandRunner);
   const brain = new FakeBrain();
-  supervisor.launch({
-    harnessId: "claude-code",
-    loopId: "review-loop",
-    beadId: "ciclo-1",
-    prompt: "Work through Ciclo."
-  });
+  const beforeHerdr = process.env.HERDR_SESSION_NAME;
+  process.env.HERDR_SESSION_NAME = "review-session";
+  try {
+    supervisor.launch({
+      harnessId: "claude-code",
+      loopId: "review-loop",
+      beadId: "ciclo-1",
+      prompt: "Work through Ciclo."
+    });
+  } finally {
+    if (beforeHerdr === undefined) delete process.env.HERDR_SESSION_NAME;
+    else process.env.HERDR_SESSION_NAME = beforeHerdr;
+  }
 
   now = "2026-07-02T00:11:00.000Z";
   const heartbeat = new CicloInternalHeartbeat(
@@ -100,6 +127,7 @@ test("internal heartbeat marks stalled workers and asks OpenAI brain for follow-
       workerSupervisor: supervisor,
       openAiBrain: brain,
       eventStore: events,
+      memoryStore: memory,
       claudeChannel: { enabled: true }
     },
     {
@@ -113,6 +141,7 @@ test("internal heartbeat marks stalled workers and asks OpenAI brain for follow-
   assert.equal(result.firstWake, true);
   assert.equal(result.workersStalled.length, 1);
   assert.equal(result.workerChecked, 1);
+  assert.deepEqual(result.workerRecoveryActions, [`nudged:${result.workersStalled[0]?.sessionId}`]);
   assert.equal(result.brainDecisions.length, 1);
   assert.equal(result.claudeChannel.enabled, true);
   assert.equal(result.claudeChannel.communicationReady, true);
@@ -132,6 +161,11 @@ test("internal heartbeat marks stalled workers and asks OpenAI brain for follow-
   assert.ok(poll.events.some((event) => event.type === "heartbeat.tick"));
   assert.ok(poll.events.some((event) => event.type === "heartbeat.monologue"));
   assert.ok(poll.events.some((event) => event.type === "brain.decision"));
+  assert.ok(poll.events.some((event) => event.type === "worker.nudged" && event.data?.delivered === true));
+  assert.ok(poll.events.some((event) => event.type === "memory.recorded" && event.data?.kind === "decision"));
+  assert.equal(commandRunner.runs.at(-1)?.command, "herdr");
+  assert.ok(commandRunner.runs.at(-1)?.args.includes("send"));
+  rmSync(root, { recursive: true, force: true });
 });
 
 test("internal heartbeat claims ready epic or feature work and launches an isolated worker when idle", async () => {
@@ -270,4 +304,139 @@ test("internal heartbeat does not launch preemptive work when worker capacity is
   assert.ok(result.evidence.includes("heartbeat.idle_workers.launched:0"));
   const readyEvent = events.poll(0).events.find((event) => event.type === "work.ready_listed");
   assert.equal(readyEvent?.data?.reason, "no eligible Beads work matched the selector");
+});
+
+test("internal heartbeat defaults preemptive worker capacity to ten sessions", async () => {
+  const now = "2026-07-02T02:30:00.000Z";
+  const events = new CicloEventStore(() => now);
+  const supervisor = new WorkerSessionSupervisor("/repo", new FakeLauncher(), { now: () => now }, events);
+  for (let index = 0; index < 10; index += 1) {
+    supervisor.launch({
+      harnessId: "codex",
+      loopId: "existing-work",
+      beadId: `ciclo-existing-${index}`,
+      prompt: "Already working."
+    });
+  }
+  const beads = new FakeBeadsClient([
+    {
+      id: "ciclo-default-cap",
+      title: "Ready feature",
+      status: "open",
+      priority: 1,
+      issueType: "feature",
+      description: "",
+      acceptanceCriteria: "",
+      labels: [],
+      dependencies: [],
+      externalRefs: []
+    }
+  ]);
+  const heartbeat = new CicloInternalHeartbeat(
+    {
+      auth: {
+        session: {
+          id: "mcp-session",
+          projectRoot: "/repo"
+        }
+      },
+      workerSupervisor: supervisor,
+      beadsClient: beads,
+      eventStore: events
+    },
+    { now: () => now }
+  );
+
+  const result = await heartbeat.tick();
+
+  assert.equal(result.readyWorkChecked, 1);
+  assert.equal(result.idleWorkersLaunched.length, 0);
+  assert.deepEqual(beads.claims, []);
+  const readyEvent = events.poll(0).events.find((event) => event.type === "work.ready_listed");
+  assert.equal(readyEvent?.data?.active_workers, 10);
+  assert.equal(readyEvent?.data?.max_concurrent, 10);
+});
+
+test("internal heartbeat releases capacity when a nudged stalled worker remains silent", async () => {
+  let now = "2026-07-02T03:00:00.000Z";
+  const root = mkdtempSync(join(tmpdir(), "ciclo-heartbeat-release-"));
+  const events = new CicloEventStore(() => now);
+  const supervisor = new WorkerSessionSupervisor(root, new FakeLauncher(), { now: () => now }, events);
+  const brain = new FakeBrain();
+  const memory = new CicloMemoryStore({ projectRoot: root, now: () => now, eventSink: events });
+  const stalled = supervisor.launch({
+    harnessId: "codex",
+    loopId: "preemptive-beads",
+    beadId: "ciclo-stalled",
+    prompt: "Existing worker."
+  });
+  const beads = new FakeBeadsClient([
+    {
+      id: "ciclo-feature",
+      title: "Ready feature after capacity is released",
+      status: "open",
+      priority: 1,
+      issueType: "feature",
+      description: "Launch once the old stalled worker no longer blocks capacity.",
+      acceptanceCriteria: "A replacement worker starts.",
+      labels: [],
+      dependencies: [],
+      externalRefs: []
+    }
+  ]);
+  const heartbeat = new CicloInternalHeartbeat(
+    {
+      auth: {
+        session: {
+          id: "mcp-session",
+          projectRoot: root
+        }
+      },
+      projectConfig: {
+        heartbeat: {
+          preemptiveWork: {
+            enabled: true,
+            harnessId: "codex",
+            loopId: "preemptive-beads",
+            issueTypes: ["feature"],
+            maxConcurrent: 1,
+            dryRun: true,
+            isolation: "worktree",
+            configureMcp: true
+          }
+        }
+      },
+      workerSupervisor: supervisor,
+      beadsClient: beads,
+      openAiBrain: brain,
+      eventStore: events,
+      memoryStore: memory
+    },
+    {
+      workerStaleAfterMs: 10 * 60 * 1000,
+      workerRecoveryGraceMs: 10 * 60 * 1000,
+      now: () => now
+    }
+  );
+
+  now = "2026-07-02T03:11:00.000Z";
+  const first = await heartbeat.tick();
+  assert.equal(first.workersStalled.length, 1);
+  assert.deepEqual(first.workerRecoveryActions, [`nudged:${stalled.sessionId}`]);
+  assert.equal(first.idleWorkersLaunched.length, 0);
+  assert.equal(supervisor.get(stalled.sessionId)?.state, "stalled");
+
+  now = "2026-07-02T03:22:00.000Z";
+  const second = await heartbeat.tick();
+  assert.deepEqual(second.workerRecoveryActions, [`stopped:${stalled.sessionId}`]);
+  assert.equal(supervisor.get(stalled.sessionId)?.state, "stopped");
+  assert.equal(second.idleWorkersLaunched.length, 1);
+  assert.equal(second.idleWorkersLaunched[0]?.beadId, "ciclo-feature");
+  assert.deepEqual(beads.claims, ["ciclo-feature"]);
+
+  const poll = events.poll(0);
+  assert.ok(poll.events.some((event) => event.type === "worker.nudged" && event.workerSessionId === stalled.sessionId));
+  assert.ok(poll.events.some((event) => event.type === "worker.capacity_released" && event.workerSessionId === stalled.sessionId));
+  assert.ok(poll.events.some((event) => event.type === "memory.recorded" && event.data?.kind === "learning"));
+  rmSync(root, { recursive: true, force: true });
 });

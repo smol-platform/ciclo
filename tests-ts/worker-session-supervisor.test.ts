@@ -308,9 +308,65 @@ test("worker launch plan can configure MCP clients in the worker cwd", () => {
     assert.equal(plan.mcpConfig?.command, "ciclo-dev");
     assert.deepEqual(plan.mcpConfig?.additionalServerNames, ["filesystem"]);
     assert.deepEqual(plan.mcpConfig?.install.targets.map((target) => target.client), ["claude", "codex"]);
+    assert.equal(plan.args[0], "-c");
+    const codexMcpOverride = plan.args[1] ?? "";
+    assert.match(codexMcpOverride, /^mcp_servers=/u);
+    assert.match(codexMcpOverride, /ciclo_local/u);
+    assert.match(codexMcpOverride, /filesystem/u);
+    assert.doesNotMatch(codexMcpOverride, /user_profile/u);
     assert.equal(existsSync(join(root, ".mcp.json")), false);
     assert.equal(existsSync(join(root, ".codex", "config.toml")), false);
     assert.ok(plan.evidence.includes("worker.mcp_config:planned"));
+  });
+});
+
+test("worker launch plan keeps the launched harness MCP client when config narrows clients", () => {
+  withHerdrReuseDisabled(() => {
+    const root = mkdtempSync(join(tmpdir(), "ciclo-mcp-worker-narrow-root-"));
+    const plan = buildWorkerLaunchPlan(
+      {
+        harnessId: "codex",
+        loopId: "loop-mcp",
+        prompt: "Work with Ciclo MCP.",
+        configureMcp: true,
+        mcpClients: ["claude"]
+      },
+      root,
+      "worker-mcp-narrow"
+    );
+
+    assert.deepEqual(plan.mcpConfig?.clients, ["claude", "codex"]);
+    assert.deepEqual(plan.mcpConfig?.install.targets.map((target) => target.client), ["claude", "codex"]);
+    const codexMcpOverride = plan.args[1] ?? "";
+    assert.match(codexMcpOverride, /^mcp_servers=/u);
+  });
+});
+
+test("worker supervisor nudges Herdr tracked workers through herdr agent send", () => {
+  withHerdrSessionEnv("infra-blocks", () => {
+    const root = mkdtempSync(join(tmpdir(), "ciclo-nudge-root-"));
+    const launcher = new FakeLauncher();
+    const runner = new FakeCommandRunner({ status: 0, stdout: "", stderr: "" });
+    const supervisor = new WorkerSessionSupervisor(root, launcher, { now: () => "2026-07-04T00:00:00.000Z" }, undefined, undefined, runner);
+    const running = supervisor.launch({
+      harnessId: "codex",
+      loopId: "loop-1",
+      beadId: "infra-1",
+      prompt: "Work through Ciclo."
+    });
+
+    const nudged = supervisor.nudge(running.sessionId, "Report status.");
+
+    assert.equal(nudged.recoveryAttempts, 1);
+    assert.equal(nudged.lastRecoveryAt, "2026-07-04T00:00:00.000Z");
+    assert.deepEqual(runner.runs.at(-1)?.args, [
+      "--session",
+      "infra-blocks",
+      "agent",
+      "send",
+      running.sessionName,
+      "Report status."
+    ]);
   });
 });
 

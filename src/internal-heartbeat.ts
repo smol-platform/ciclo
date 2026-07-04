@@ -1,6 +1,8 @@
 import type { CicloEventSink } from "./ciclo-events.js";
 import type { BeadsTaskSnapshot } from "./beads-adapter.js";
 import { selectAndClaimBeadsWork, type BeadsWorkClaimClient } from "./beads-work-queue.js";
+import { CicloCronScheduler, type CicloCronDueJob, type CicloCronRunRecord } from "./ciclo-cron.js";
+import { CicloMemoryStore, type CicloMemoryCompactResult } from "./ciclo-memory.js";
 import { mergeWorkerLaunchWithConfig, type CicloProjectConfig } from "./ciclo-config.js";
 import type { OpenAiBrain } from "./openai-brain.js";
 import type {
@@ -30,6 +32,8 @@ export interface CicloInternalHeartbeatRuntime {
   readonly remoteHeartbeatClient?: RemoteHeartbeatClient;
   readonly openAiBrain?: OpenAiBrain;
   readonly eventStore?: CicloEventSink;
+  readonly cronScheduler?: CicloCronScheduler;
+  readonly memoryStore?: CicloMemoryStore;
   readonly claudeChannel?: {
     readonly enabled: boolean;
   };
@@ -38,6 +42,7 @@ export interface CicloInternalHeartbeatRuntime {
 export interface CicloInternalHeartbeatOptions {
   readonly intervalMs?: number;
   readonly workerStaleAfterMs?: number;
+  readonly workerRecoveryGraceMs?: number;
   readonly remoteStaleAfterMs?: number;
   readonly remoteLostAfterMs?: number;
   readonly now?: () => string;
@@ -48,6 +53,7 @@ export interface CicloInternalHeartbeatTickResult {
   readonly firstWake: boolean;
   readonly workersRefreshed: number;
   readonly workersStalled: readonly WorkerSessionRecord[];
+  readonly workerRecoveryActions: readonly string[];
   readonly workerChecked: number;
   readonly claudeCodeWorkers: number;
   readonly remoteChecked: number;
@@ -55,6 +61,9 @@ export interface CicloInternalHeartbeatTickResult {
   readonly readyWorkChecked: number;
   readonly idleWorkersLaunched: readonly WorkerSessionRecord[];
   readonly brainDecisions: readonly string[];
+  readonly cronDue: readonly CicloCronDueJob[];
+  readonly cronRuns: readonly CicloCronRunRecord[];
+  readonly memoryCompactions: readonly CicloMemoryCompactResult[];
   readonly claudeChannel: {
     readonly enabled: boolean;
     readonly communicationReady: boolean;
@@ -74,6 +83,8 @@ export interface CicloInternalHeartbeatStatus {
   readonly running: boolean;
   readonly intervalMs: number;
   readonly lastTickAt?: string;
+  readonly cron?: Record<string, unknown>;
+  readonly memory?: Record<string, unknown>;
   readonly claudeChannel: {
     readonly enabled: boolean;
     readonly communicationReady: boolean;
@@ -85,6 +96,7 @@ export interface CicloInternalHeartbeatStatus {
 
 const defaultIntervalMs = 30_000;
 const defaultWorkerStaleAfterMs = 10 * 60 * 1000;
+const defaultWorkerRecoveryGraceMs = 10 * 60 * 1000;
 const defaultRemoteStaleAfterMs = 2 * 60 * 1000;
 const defaultRemoteLostAfterMs = 10 * 60 * 1000;
 const maxMonologueEntries = 50;
@@ -107,7 +119,7 @@ const defaultPreemptiveWork: PreemptiveWorkPolicy = {
   loopId: "preemptive-beads",
   harnessId: "codex",
   issueTypes: ["epic", "feature"],
-  maxConcurrent: 1,
+  maxConcurrent: 10,
   dryRun: false,
   isolation: "worktree",
   configureMcp: true
@@ -119,6 +131,14 @@ function activeRemote(session: RemoteSessionRecord): boolean {
 
 function activeWorker(session: WorkerSessionRecord): boolean {
   return session.state === "planned" || session.state === "running" || session.state === "waiting_on_operator" || session.state === "stalled";
+}
+
+function elapsedMs(fromIso: string | undefined, toIso: string): number | undefined {
+  if (fromIso === undefined) return undefined;
+  const from = Date.parse(fromIso);
+  const to = Date.parse(toIso);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return undefined;
+  return Math.max(0, to - from);
 }
 
 function compactText(value: string, maxLength: number): string {
@@ -175,6 +195,8 @@ export class CicloInternalHeartbeat {
       running: this.timer !== undefined,
       intervalMs: this.intervalMs,
       ...(this.lastTickAt === undefined ? {} : { lastTickAt: this.lastTickAt }),
+      ...(this.runtime.cronScheduler === undefined ? {} : { cron: this.runtime.cronScheduler.status(this.runtime.projectConfig?.cron?.jobs ?? [], this.options.now?.() ?? new Date().toISOString()) }),
+      ...(this.runtime.memoryStore === undefined ? {} : { memory: this.runtime.memoryStore.status() }),
       claudeChannel,
       monologue: [...this.monologueEntries],
       evidence
@@ -190,36 +212,44 @@ export class CicloInternalHeartbeat {
       checkedAt
     ) ?? [];
 
-    const workers = this.runtime.workerSupervisor?.list() ?? [];
-    const claudeCodeWorkers = workers.filter((worker) => worker.harnessId === "claude-code").length;
+    const workersBeforeRecovery = this.runtime.workerSupervisor?.list() ?? [];
+    const claudeCodeWorkers = workersBeforeRecovery.filter((worker) => worker.harnessId === "claude-code").length;
     const claudeChannel = this.claudeChannelSnapshot();
     this.lastClaudeChannel = claudeChannel;
     const remoteChanged = await this.checkRemoteSessions(checkedAt);
-    const idleDispatch = await this.dispatchReadyBeadsWork(checkedAt, workers);
-    const followUpBrainDecisions = await this.decideFollowUps([...workersStalled], remoteChanged);
-    const brainDecisions = [...idleDispatch.brainDecisions, ...followUpBrainDecisions];
+    const followUps = await this.decideFollowUps(workersBeforeRecovery, remoteChanged, checkedAt);
+    const workersAfterRecovery = this.runtime.workerSupervisor?.list() ?? workersBeforeRecovery;
+    const idleDispatch = await this.dispatchReadyBeadsWork(checkedAt, workersAfterRecovery);
+    const cron = await this.runDueCronJobs(checkedAt);
+    const brainDecisions = [...followUps.brainDecisions, ...idleDispatch.brainDecisions, ...cron.brainDecisions];
 
     const evidence = [
       "heartbeat.internal:tick",
-      `heartbeat.worker.checked:${workers.length}`,
+      `heartbeat.worker.checked:${workersBeforeRecovery.length}`,
       `heartbeat.worker.refreshed:${workersRefreshed.length}`,
       `heartbeat.worker.stalled:${workersStalled.length}`,
+      `heartbeat.worker.recovery_actions:${followUps.recoveryActions.length}`,
       `heartbeat.ready_work.checked:${idleDispatch.readyWorkChecked}`,
       `heartbeat.idle_workers.launched:${idleDispatch.launched.length}`,
       claudeChannel.enabled ? "heartbeat.claude_channel:enabled" : "heartbeat.claude_channel:disabled",
       `heartbeat.claude_channel.connected_workers:${claudeChannel.connectedWorkers}`,
       `heartbeat.remote.changed:${remoteChanged.length}`,
       `heartbeat.brain.decisions:${brainDecisions.length}`,
+      `heartbeat.cron.due:${cron.due.length}`,
+      `heartbeat.cron.ran:${cron.runs.length}`,
+      `heartbeat.memory.compactions:${cron.memoryCompactions.length}`,
       `heartbeat.first_wake:${firstWake}`
     ];
     const monologue = this.tickMonologue(checkedAt, {
       firstWake,
-      workerChecked: workers.length,
+      workerChecked: workersBeforeRecovery.length,
       workersStalled: workersStalled.length,
       remoteChanged: remoteChanged.length,
       readyWorkChecked: idleDispatch.readyWorkChecked,
       idleWorkersLaunched: idleDispatch.launched.length,
       brainDecisions: brainDecisions.length,
+      cronRuns: cron.runs.length,
+      memoryCompactions: cron.memoryCompactions.length,
       claudeChannel
     });
     this.lastTickAt = checkedAt;
@@ -228,14 +258,18 @@ export class CicloInternalHeartbeat {
       at: checkedAt,
       evidence,
       data: {
-        workers_checked: workers.length,
+        workers_checked: workersBeforeRecovery.length,
         workers_refreshed: workersRefreshed.length,
         workers_stalled: workersStalled.length,
+        worker_recovery_actions: followUps.recoveryActions.length,
         ready_work_checked: idleDispatch.readyWorkChecked,
         idle_workers_launched: idleDispatch.launched.length,
         claude_channel: claudeChannel,
         remote_changed: remoteChanged.length,
         brain_decisions: brainDecisions.length,
+        cron_due: cron.due.length,
+        cron_runs: cron.runs.length,
+        memory_compactions: cron.memoryCompactions.length,
         first_wake: firstWake
       }
     });
@@ -245,13 +279,17 @@ export class CicloInternalHeartbeat {
       firstWake,
       workersRefreshed: workersRefreshed.length,
       workersStalled,
-      workerChecked: workers.length,
+      workerRecoveryActions: followUps.recoveryActions,
+      workerChecked: workersBeforeRecovery.length,
       claudeCodeWorkers,
       remoteChecked: this.runtime.remoteSessionRegistry?.list().filter(activeRemote).length ?? 0,
       remoteChanged,
       readyWorkChecked: idleDispatch.readyWorkChecked,
       idleWorkersLaunched: idleDispatch.launched,
       brainDecisions,
+      cronDue: cron.due,
+      cronRuns: cron.runs,
+      memoryCompactions: cron.memoryCompactions,
       claudeChannel,
       monologue,
       evidence
@@ -297,6 +335,8 @@ export class CicloInternalHeartbeat {
       readonly readyWorkChecked: number;
       readonly idleWorkersLaunched: number;
       readonly brainDecisions: number;
+      readonly cronRuns: number;
+      readonly memoryCompactions: number;
       readonly claudeChannel: CicloInternalHeartbeatTickResult["claudeChannel"];
     }
   ): readonly CicloInternalHeartbeatMonologueEntry[] {
@@ -306,8 +346,8 @@ export class CicloInternalHeartbeat {
             "First wake should analyze repo, Beads, Herdr, PR/CI, remote, context, and worker state before choosing the first work to start."
           ]
         : []),
-      `Heartbeat checked ${input.workerChecked} worker session(s); ${input.workersStalled} stalled, ${input.remoteChanged} remote update(s), ${input.readyWorkChecked} ready Beads candidate(s), ${input.idleWorkersLaunched} worker launch(es), ${input.brainDecisions} brain decision(s).`,
-      "Heartbeat memory pass should keep Beads open/closed state, PR review needs, and model fit or escalation decisions current.",
+      `Heartbeat checked ${input.workerChecked} worker session(s); ${input.workersStalled} stalled, ${input.remoteChanged} remote update(s), ${input.readyWorkChecked} ready Beads candidate(s), ${input.idleWorkersLaunched} worker launch(es), ${input.brainDecisions} brain decision(s), ${input.cronRuns} cron run(s).`,
+      `Heartbeat memory pass should keep Beads open/closed state, PR review needs, model fit or escalation decisions current, and compact durable memory when needed; ${input.memoryCompactions} memory compaction(s) ran.`,
       input.claudeChannel.enabled
         ? `Claude channel communication is enabled for ${input.claudeChannel.connectedWorkers} Claude Code worker session(s).`
         : "Claude channel communication is disabled for this Ciclo MCP runtime."
@@ -556,6 +596,16 @@ export class CicloInternalHeartbeat {
         decision: decision.text
       }
     });
+    this.remember({
+      kind: "decision",
+      content: `Ready work ${task.id} selected for ${policy.harnessId}. Brain guidance: ${compactText(decision.text, 1000)}`,
+      tags: ["ready-work", "brain-decision", policy.harnessId],
+      importance: "normal",
+      confidence: 0.8,
+      loopId: policy.loopId,
+      beadId: task.id,
+      evidence: ["heartbeat.preemptive_work:brain_decision"]
+    });
     return decision.text;
   }
 
@@ -576,6 +626,172 @@ export class CicloInternalHeartbeat {
     ]
       .filter((line): line is string => line !== undefined)
       .join("\n");
+  }
+
+  private async runDueCronJobs(now: string): Promise<{
+    readonly due: readonly CicloCronDueJob[];
+    readonly runs: readonly CicloCronRunRecord[];
+    readonly brainDecisions: readonly string[];
+    readonly memoryCompactions: readonly CicloMemoryCompactResult[];
+  }> {
+    const scheduler = this.runtime.cronScheduler;
+    const jobs = this.runtime.projectConfig?.cron?.jobs ?? [];
+    if (scheduler === undefined || jobs.length === 0) {
+      return { due: [], runs: [], brainDecisions: [], memoryCompactions: [] };
+    }
+    const due = scheduler.dueJobs(jobs, now);
+    const runs: CicloCronRunRecord[] = [];
+    const brainDecisions: string[] = [];
+    const memoryCompactions: CicloMemoryCompactResult[] = [];
+    for (const dueJob of due) {
+      this.runtime.eventStore?.append({
+        type: "cron.due",
+        at: now,
+        evidence: dueJob.evidence,
+        data: {
+          job_id: dueJob.job.id,
+          task_kind: dueJob.job.task.kind,
+          reason: dueJob.reason
+        }
+      });
+      try {
+        const result = await this.runCronTask(dueJob, now);
+        if (result.brainDecision !== undefined) brainDecisions.push(result.brainDecision);
+        if (result.memoryCompaction !== undefined) memoryCompactions.push(result.memoryCompaction);
+        const run = scheduler.recordRun({
+          jobId: dueJob.job.id,
+          startedAt: now,
+          status: result.status,
+          reason: result.reason,
+          evidence: [...dueJob.evidence, ...result.evidence]
+        });
+        runs.push(run);
+        this.runtime.eventStore?.append({
+          type: "cron.ran",
+          at: now,
+          evidence: run.evidence,
+          data: {
+            job_id: run.jobId,
+            status: run.status,
+            reason: run.reason,
+            task_kind: dueJob.job.task.kind
+          }
+        });
+      } catch (error: unknown) {
+        const reason = error instanceof Error ? error.message : "unknown cron task error";
+        const run = scheduler.recordRun({
+          jobId: dueJob.job.id,
+          startedAt: now,
+          status: "failed",
+          reason,
+          evidence: [...dueJob.evidence, "cron.task:failed"]
+        });
+        runs.push(run);
+        this.runtime.eventStore?.append({
+          type: "cron.ran",
+          at: now,
+          evidence: run.evidence,
+          data: { job_id: run.jobId, status: run.status, reason, task_kind: dueJob.job.task.kind }
+        });
+      }
+    }
+    return { due, runs, brainDecisions, memoryCompactions };
+  }
+
+  private async runCronTask(
+    dueJob: CicloCronDueJob,
+    now: string
+  ): Promise<{
+    readonly status: "ran" | "skipped";
+    readonly reason: string;
+    readonly evidence: readonly string[];
+    readonly brainDecision?: string;
+    readonly memoryCompaction?: CicloMemoryCompactResult;
+  }> {
+    const task = dueJob.job.task;
+    if (task.kind === "memory_compact") {
+      const store = this.runtime.memoryStore;
+      if (store === undefined || this.runtime.projectConfig?.memory?.enabled === false) {
+        return { status: "skipped", reason: "memory store disabled", evidence: ["cron.task.memory_compact:skipped"] };
+      }
+      const result = store.compact({
+        now,
+        compactAfterDays: this.runtime.projectConfig?.memory?.compactAfterDays,
+        archiveAfterDays: this.runtime.projectConfig?.memory?.archiveAfterDays,
+        minCompoundEntries: this.runtime.projectConfig?.memory?.minCompoundEntries,
+        maxSummaryCharacters: this.runtime.projectConfig?.memory?.maxSummaryCharacters
+      });
+      return {
+        status: "ran",
+        reason: "memory compacted",
+        evidence: ["cron.task.memory_compact:ran", ...result.evidence],
+        memoryCompaction: result
+      };
+    }
+    if (task.kind === "worker_launch") {
+      const supervisor = this.runtime.workerSupervisor;
+      if (supervisor === undefined) return { status: "skipped", reason: "worker supervisor unavailable", evidence: ["cron.task.worker_launch:skipped"] };
+      const params = task.params ?? {};
+      const harnessId = params.harness_id === "claude-code" ? "claude-code" : "codex";
+      const loopId = typeof params.loop_id === "string" ? params.loop_id : dueJob.job.id;
+      const prompt = typeof params.prompt === "string" ? params.prompt : `Run scheduled Ciclo task ${dueJob.job.id}.`;
+      const launched = supervisor.launch(mergeWorkerLaunchWithConfig({
+        harnessId,
+        loopId,
+        prompt,
+        cwd: this.runtime.auth?.session.projectRoot,
+        dryRun: params.dry_run !== false,
+        configureMcp: params.configure_mcp !== false
+      }, this.runtime.projectConfig ?? {}));
+      return {
+        status: "ran",
+        reason: `worker launched:${launched.sessionId}`,
+        evidence: ["cron.task.worker_launch:ran", ...launched.evidence]
+      };
+    }
+    if (task.kind === "brain_decision") {
+      const brain = this.runtime.openAiBrain;
+      if (brain === undefined) return { status: "skipped", reason: "OpenAI brain unavailable", evidence: ["cron.task.brain_decision:skipped"] };
+      const params = task.params ?? {};
+      const decision = await brain.decide({
+        purpose: "remote_session_monitoring",
+        prompt: typeof params.prompt === "string" ? params.prompt : `Scheduled Ciclo brain decision for ${dueJob.job.id}.`,
+        context: Array.isArray(params.context) ? params.context.filter((item): item is string => typeof item === "string") : [],
+        evidence: ["cron.task.brain_decision"],
+        loopId: typeof params.loop_id === "string" ? params.loop_id : undefined
+      });
+      this.runtime.eventStore?.append({
+        type: "brain.decision",
+        at: now,
+        loopId: typeof params.loop_id === "string" ? params.loop_id : undefined,
+        evidence: decision.evidence,
+        data: {
+          purpose: decision.purpose,
+          intelligence: decision.intelligence,
+          model_family: decision.modelFamily,
+          model: decision.model,
+          decision: decision.text
+        }
+      });
+      return {
+        status: "ran",
+        reason: "brain decision recorded",
+        evidence: ["cron.task.brain_decision:ran", ...decision.evidence],
+        brainDecision: decision.text
+      };
+    }
+    if (task.kind === "dispatch_ready_work") {
+      return {
+        status: "ran",
+        reason: "ready Beads dispatch is handled by heartbeat preemptive work in the same tick",
+        evidence: ["cron.task.dispatch_ready_work:heartbeat_preemptive"]
+      };
+    }
+    return {
+      status: "ran",
+      reason: "heartbeat tick acknowledged",
+      evidence: ["cron.task.heartbeat_tick:ran"]
+    };
   }
 
   private async checkRemoteSessions(now: string): Promise<readonly RemoteSessionRecord[]> {
@@ -619,14 +835,90 @@ export class CicloInternalHeartbeat {
     return changed;
   }
 
+  private remember(input: Parameters<CicloMemoryStore["record"]>[0]): void {
+    try {
+      this.runtime.memoryStore?.record(input);
+    } catch {
+      // Memory should improve orchestration, not break heartbeat liveness.
+    }
+  }
+
+  private stalledWorkerNudge(worker: WorkerSessionRecord, decision: string): string {
+    return [
+      "Ciclo heartbeat detected this worker has stalled.",
+      "",
+      "Please stop any hung command and report through Ciclo MCP:",
+      "1. current objective",
+      "2. current cwd and git status",
+      "3. files changed and diff summary",
+      "4. last command run and whether it is blocked",
+      "5. validation run so far",
+      "6. whether operator input, secrets, deploy approval, or stronger model escalation is needed",
+      "",
+      `Ciclo brain guidance: ${compactText(decision, 1200)}`,
+      "",
+      `Worker session: ${worker.sessionId}`,
+      worker.beadId === undefined ? undefined : `Beads task: ${worker.beadId}`
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join("\n");
+  }
+
   private async decideFollowUps(
     workers: readonly WorkerSessionRecord[],
-    remotes: readonly RemoteSessionRecord[]
-  ): Promise<readonly string[]> {
+    remotes: readonly RemoteSessionRecord[],
+    now: string
+  ): Promise<{
+    readonly brainDecisions: readonly string[];
+    readonly recoveryActions: readonly string[];
+  }> {
     const brain = this.runtime.openAiBrain;
-    if (brain === undefined) return [];
     const decisions: string[] = [];
-    for (const worker of workers) {
+    const recoveryActions: string[] = [];
+    const supervisor = this.runtime.workerSupervisor;
+    for (const worker of workers.filter((candidate) => candidate.state === "stalled")) {
+      const recoveryAgeMs = elapsedMs(worker.lastRecoveryAt, now);
+      const recoveryGraceMs = this.options.workerRecoveryGraceMs ?? defaultWorkerRecoveryGraceMs;
+      if ((worker.recoveryAttempts ?? 0) > 0 && recoveryAgeMs !== undefined && recoveryAgeMs >= recoveryGraceMs) {
+        if (supervisor !== undefined) {
+          const reason = `stalled after Ciclo nudge for ${recoveryAgeMs}ms; freeing preemptive capacity`;
+          const stopped = supervisor.stop(worker.sessionId, reason);
+          recoveryActions.push(`stopped:${worker.sessionId}`);
+          this.runtime.eventStore?.append({
+            type: "worker.capacity_released",
+            at: now,
+            loopId: stopped.loopId,
+            beadId: stopped.beadId,
+            workerSessionId: stopped.sessionId,
+            state: stopped.state,
+            evidence: [
+              "worker.recovery:capacity_released",
+              `worker.recovery.age_ms:${recoveryAgeMs}`,
+              `worker.recovery.grace_ms:${recoveryGraceMs}`
+            ],
+            data: {
+              harness_id: stopped.harnessId,
+              session_name: stopped.sessionName,
+              reason,
+              recovery_attempts: stopped.recoveryAttempts ?? 0
+            }
+          });
+          this.remember({
+            kind: "learning",
+            content: `Worker ${worker.sessionName} stayed stalled after a Ciclo nudge and was stopped to free orchestration capacity. Relaunch with stronger context or model if ${worker.beadId ?? "the task"} is still needed.`,
+            tags: ["worker-stall", "capacity-release", worker.harnessId],
+            importance: "high",
+            confidence: 0.85,
+            loopId: worker.loopId,
+            beadId: worker.beadId,
+            workerSessionId: worker.sessionId,
+            evidence: ["worker.recovery:capacity_released"]
+          });
+        }
+        continue;
+      }
+      if ((worker.recoveryAttempts ?? 0) > 0) continue;
+      if (brain === undefined) continue;
       const decision = await brain.decide({
         purpose: "remote_session_monitoring",
         loopId: worker.loopId,
@@ -645,6 +937,17 @@ export class CicloInternalHeartbeat {
         evidence: worker.evidence
       });
       decisions.push(decision.text);
+      this.remember({
+        kind: "decision",
+        content: `Stalled worker ${worker.sessionName} follow-up decision: ${compactText(decision.text, 1000)}`,
+        tags: ["worker-stall", "brain-decision", worker.harnessId],
+        importance: "high",
+        confidence: 0.8,
+        loopId: worker.loopId,
+        beadId: worker.beadId,
+        workerSessionId: worker.sessionId,
+        evidence: ["heartbeat.worker_stall:brain_decision"]
+      });
       this.runtime.eventStore?.append({
         type: "brain.decision",
         loopId: worker.loopId,
@@ -659,9 +962,28 @@ export class CicloInternalHeartbeat {
           decision: decision.text
         }
       });
+      if (supervisor !== undefined) {
+        const nudged = supervisor.nudge(worker.sessionId, this.stalledWorkerNudge(worker, decision.text), [
+          "heartbeat.worker_stall:nudge",
+          ...decision.evidence
+        ]);
+        recoveryActions.push(`nudged:${worker.sessionId}`);
+        this.remember({
+          kind: "observation",
+          content: `Ciclo nudged stalled worker ${worker.sessionName}; delivered=${nudged.evidence.includes("worker.session.nudge:delivered")}.`,
+          tags: ["worker-stall", "nudge", worker.harnessId],
+          importance: nudged.evidence.includes("worker.session.nudge:delivered") ? "normal" : "high",
+          confidence: 0.8,
+          loopId: worker.loopId,
+          beadId: worker.beadId,
+          workerSessionId: worker.sessionId,
+          evidence: ["heartbeat.worker_stall:nudge"]
+        });
+      }
     }
     for (const remote of remotes) {
       if (remote.state !== "stale" && remote.state !== "lost" && remote.state !== "blocked") continue;
+      if (brain === undefined) continue;
       const decision = await brain.decide({
         purpose: "remote_session_monitoring",
         loopId: remote.activeLoopId,
@@ -677,6 +999,17 @@ export class CicloInternalHeartbeat {
         evidence: remote.evidence
       });
       decisions.push(decision.text);
+      this.remember({
+        kind: "decision",
+        content: `Remote session ${remote.id} follow-up decision: ${compactText(decision.text, 1000)}`,
+        tags: ["remote-session", "brain-decision"],
+        importance: "high",
+        confidence: 0.8,
+        loopId: remote.activeLoopId,
+        beadId: remote.activeBeadId,
+        remoteSessionId: remote.id,
+        evidence: ["heartbeat.remote:brain_decision"]
+      });
       this.runtime.eventStore?.append({
         type: "brain.decision",
         loopId: remote.activeLoopId,
@@ -692,6 +1025,6 @@ export class CicloInternalHeartbeat {
         }
       });
     }
-    return decisions;
+    return { brainDecisions: decisions, recoveryActions };
   }
 }

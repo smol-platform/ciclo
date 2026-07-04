@@ -62,6 +62,31 @@ test("user control pane notifier skips low-signal heartbeat events", () => {
   assert.equal(calls.length, 0);
 });
 
+test("user control pane notifier surfaces worker recovery nudges", () => {
+  const calls: Array<{ command: string; args: readonly string[] }> = [];
+  const notifier = new UserControlPaneNotifier(
+    { enabled: true, herdrSession: "infra-blocks", paneName: "infra-blocks" },
+    (command, args) => {
+      calls.push({ command, args });
+      return { status: 0 };
+    }
+  );
+
+  const result = notifier.notify(event({
+    type: "worker.nudged",
+    workerSessionId: "worker-1",
+    beadId: "infra-123",
+    data: {
+      reason: "nudge sent to worker agent"
+    }
+  }));
+
+  assert.equal(result.delivered, true);
+  assert.match(calls[0]?.args.join("\n") ?? "", /Ciclo nudged worker/u);
+  assert.match(calls[0]?.args.join("\n") ?? "", /nudge sent to worker agent/u);
+  assert.ok(calls[0]?.args.includes("request"));
+});
+
 test("user control pane target is read from Ciclo launch environment", () => {
   assert.deepEqual(userControlPaneTargetFromEnv({
     CICLO_USER_PANE_ENABLED: "true",

@@ -104,6 +104,51 @@
       }
     ]
   },
+  "memory": {
+    "enabled": true,
+    "compactAfterDays": 14,
+    "archiveAfterDays": 90,
+    "minCompoundEntries": 3,
+    "maxSummaryCharacters": 1600,
+    "defaultImportance": "normal"
+  },
+  "heartbeat": {
+    "preemptiveWork": {
+      "enabled": true,
+      "loopId": "preemptive-beads",
+      "harnessId": "codex",
+      "issueTypes": ["epic", "feature"],
+      "maxConcurrent": 10,
+      "isolation": "worktree",
+      "configureMcp": true
+    }
+  },
+  "cron": {
+    "jobs": [
+      {
+        "id": "memory-compact-daily",
+        "enabled": true,
+        "description": "Age, compact, archive, and compound Ciclo memory every day.",
+        "schedule": {
+          "dailyAt": "03:30"
+        },
+        "task": {
+          "kind": "memory_compact"
+        }
+      },
+      {
+        "id": "preemptive-work-scan",
+        "enabled": true,
+        "description": "Let the internal heartbeat scan configured Beads-ready work on an interval.",
+        "schedule": {
+          "everyMs": 900000
+        },
+        "task": {
+          "kind": "dispatch_ready_work"
+        }
+      }
+    ]
+  },
   "remote": {
     "runnerKind": "kubernetes",
     "imageResolver": {

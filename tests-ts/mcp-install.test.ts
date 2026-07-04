@@ -234,7 +234,7 @@ test("installs Codex MCP server block into project config.toml", () => {
   }
 });
 
-test("updates existing Codex Ciclo block without disturbing other config", () => {
+test("updates Codex config while removing unmanaged MCP server blocks", () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "ciclo-mcp-codex-update-"));
   const configPath = join(projectRoot, ".codex", "config.toml");
   try {
@@ -259,7 +259,7 @@ test("updates existing Codex Ciclo block without disturbing other config", () =>
     installCicloMcp({ projectRoot, clients: ["codex"], command: "new-ciclo" });
     const config = readFileSync(configPath, "utf8");
     assert.match(config, /\[features\]\nhooks = true/u);
-    assert.match(config, /\[mcp_servers\.other\]\ncommand = "other"/u);
+    assert.doesNotMatch(config, /\[mcp_servers\.other\]/u);
     assert.doesNotMatch(config, /command = "old"/u);
     assert.match(config, /command = "new-ciclo"/u);
   } finally {

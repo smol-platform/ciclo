@@ -264,6 +264,58 @@ test("CLI events command reads and follows the project event log", async () => {
   }
 });
 
+test("CLI memory and cron commands expose durable orchestration state", async () => {
+  const before = process.cwd();
+  const tempDir = mkdtempSync(join(tmpdir(), "ciclo-memory-cron-cli-"));
+  try {
+    process.chdir(tempDir);
+    mkdirSync(join(tempDir, ".ciclo"), { recursive: true });
+    writeFileSync(join(tempDir, ".ciclo", "config.json"), JSON.stringify({
+      cron: {
+        jobs: [
+          {
+            id: "compact-memory",
+            schedule: { everyMs: 1 },
+            task: { kind: "memory_compact" }
+          }
+        ]
+      },
+      memory: { enabled: true }
+    }));
+
+    const remember = captureIo();
+    assert.equal(await main([
+      "node",
+      "ciclo",
+      "memory",
+      "remember",
+      "--content",
+      "Codex is a good default for small TypeScript fixes.",
+      "--tag",
+      "model-fit",
+      "--importance",
+      "high",
+      "--compact"
+    ], remember.io), 0);
+    const remembered = JSON.parse(remember.stdout[0] ?? "{}") as { memory?: { tags?: readonly string[]; importance?: string } };
+    assert.deepEqual(remembered.memory?.tags, ["model-fit"]);
+    assert.equal(remembered.memory?.importance, "high");
+
+    const listed = captureIo();
+    assert.equal(await main(["node", "ciclo", "memory", "list", "--tag", "model-fit", "--compact"], listed.io), 0);
+    const listPayload = JSON.parse(listed.stdout[0] ?? "{}") as { memories?: readonly unknown[] };
+    assert.equal(listPayload.memories?.length, 1);
+
+    const cron = captureIo();
+    assert.equal(await main(["node", "ciclo", "cron", "list", "--compact"], cron.io), 0);
+    const cronPayload = JSON.parse(cron.stdout[0] ?? "{}") as { jobs?: readonly { id?: string }[] };
+    assert.equal(cronPayload.jobs?.[0]?.id, "compact-memory");
+  } finally {
+    process.chdir(before);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("CLI secret exec resolves configured providers only for the child process", async () => {
   const before = process.cwd();
   const tempDir = mkdtempSync(join(tmpdir(), "ciclo-secret-exec-cli-"));
@@ -414,6 +466,12 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
     assert.equal(codexPlan.launchMode, "herdr");
     assert.equal(codexPlan.command, "herdr");
     assert.equal(codexPlan.harnessCommand, "codex");
+    assert.equal(codexPlan.harnessArgs?.[0], "-c");
+    const codexMcpOverride = codexPlan.harnessArgs?.[1] ?? "";
+    assert.match(codexMcpOverride, /^mcp_servers=/u);
+    assert.match(codexMcpOverride, /ciclo_launch/u);
+    assert.match(codexMcpOverride, /filesystem/u);
+    assert.doesNotMatch(codexMcpOverride, /user_profile/u);
     assert.ok(codexPlan.harnessArgs?.includes("--cd"));
     assert.ok(codexPlan.harnessArgs?.includes("--ask-for-approval"));
     assert.ok(codexPlan.harnessArgs?.includes("never"));
@@ -422,7 +480,7 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
     assert.ok(codexPlan.projectRoot);
     assert.ok(codexPlan.harnessArgs?.includes(codexPlan.projectRoot));
     assert.ok(codexPlan.harnessArgs?.includes("Review the repo"));
-    assert.deepEqual(codexPlan.args?.slice(0, 12), [
+    assert.deepEqual(codexPlan.args?.slice(0, 13), [
       "--session",
       projectName,
       "agent",
@@ -433,9 +491,11 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
       "--focus",
       "--",
       "codex",
-      "--model",
-      "gpt-5.5"
+      "-c",
+      codexMcpOverride,
+      "--model"
     ]);
+    assert.equal(codexPlan.args?.[13], "gpt-5.5");
     assert.equal(codexPlan.herdr?.sessionName, projectName);
     assert.equal(codexPlan.herdr?.paneName, projectName);
     assert.equal(codexPlan.herdr?.attach, true);

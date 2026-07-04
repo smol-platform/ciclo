@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { accessSync, constants, realpathSync } from "node:fs";
 import type { AddressInfo } from "node:net";
-import { basename, resolve } from "node:path";
+import { basename, delimiter, isAbsolute, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
@@ -19,7 +19,14 @@ import {
 import { cicloEventLogPath, CicloEventStore, type CicloEvent } from "./ciclo-events.js";
 import { runtimeDecision } from "./ciclo-core.js";
 import { runMcpHttpServer, type McpHttpConfig } from "./mcp-http.js";
-import { installCicloMcp, type CicloMcpInstallClient, type CicloMcpInstallOptions, type CicloMcpInstallResult } from "./mcp-install.js";
+import { CicloMemoryStore } from "./ciclo-memory.js";
+import {
+  codexMcpServersOverrideArgs,
+  installCicloMcp,
+  type CicloMcpInstallClient,
+  type CicloMcpInstallOptions,
+  type CicloMcpInstallResult
+} from "./mcp-install.js";
 import { resolveMcpAdditionalServerSecretPlaceholders } from "./mcp-secret-placeholders.js";
 import {
   createLocalMcpReadService,
@@ -159,6 +166,8 @@ function usage(): string {
     "  runtime                        Print runtime/product-boundary JSON.",
     "  benchmark [scenario-dir]       Run benchmark scenarios.",
     "  events [--follow]              Show Ciclo command and decision events.",
+    "  memory <subcommand>            Record, list, and compact durable Ciclo memory.",
+    "  cron <subcommand>              List or run due Ciclo cron jobs.",
     "  attach [options]               Attach to Ciclo's Herdr session.",
     "  launch [claude|codex]          Install MCP config and start a Herdr harness session.",
     "  secret exec [options] -- <cmd> Resolve secret env for one child process.",
@@ -196,6 +205,8 @@ function usage(): string {
     "  ciclo status",
     `  ciclo benchmark ${DEFAULT_BENCHMARK_DIR}`,
     "  ciclo events --follow",
+    "  ciclo memory remember --content \"Review loop prefers codex for small fixes\" --tag model-fit",
+    "  ciclo cron list",
     "  ciclo attach --session ciclo",
     "  ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo",
     "  ciclo launch codex",
@@ -253,6 +264,43 @@ function commandHelp(command: string): string {
       "  ciclo events",
       "  ciclo events --follow",
       "  ciclo events --follow --cursor 42"
+    ].join("\n");
+  }
+  if (command === "memory") {
+    return [
+      "Usage: ciclo memory <list|remember|compact|status> [options]",
+      "",
+      "Record and inspect durable Ciclo project memory. Memories are stored under .ciclo/ and compacted by cron/heartbeat.",
+      "",
+      "Options:",
+      "  --project <dir>                Project root. Default: cwd.",
+      "  --content <text>               Memory content for remember.",
+      "  --kind <kind>                  observation, learning, decision, or summary.",
+      "  --tag <tag>                    Tag filter or tag to record. May be repeated.",
+      "  --importance <value>           low, normal, or high.",
+      "  --loop-id <id>                 Loop scope.",
+      "  --bead-id <id>                 Beads issue scope.",
+      "  --state <state>                active, compacted, or archived.",
+      "  --limit <count>                List limit. Default: 100.",
+      "",
+      "Examples:",
+      "  ciclo memory remember --content \"Deploy loop needs human approval\" --tag deploy --importance high",
+      "  ciclo memory list --tag deploy",
+      "  ciclo memory compact"
+    ].join("\n");
+  }
+  if (command === "cron") {
+    return [
+      "Usage: ciclo cron <list|run-due> [options]",
+      "",
+      "Inspect configured Ciclo cron jobs or ask the internal heartbeat to run due jobs now.",
+      "",
+      "Options:",
+      "  --project <dir>                Project root. Default: cwd.",
+      "",
+      "Examples:",
+      "  ciclo cron list",
+      "  ciclo cron run-due"
     ].join("\n");
   }
   if (command === "attach") {
@@ -1046,6 +1094,28 @@ function launchCommand(options: CliLaunchOptions): string {
   return options.harnessCommand ?? (options.client === "claude" ? "claude" : "codex");
 }
 
+function resolveExecutable(command: string, envPath = process.env.PATH): string | undefined {
+  if (command.includes("/") || isAbsolute(command)) {
+    try {
+      accessSync(command, constants.X_OK);
+      return command;
+    } catch {
+      return undefined;
+    }
+  }
+  for (const dir of (envPath ?? "").split(delimiter)) {
+    if (dir.trim().length === 0) continue;
+    const candidate = resolve(dir, command);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Keep scanning PATH.
+    }
+  }
+  return undefined;
+}
+
 function projectLaunchName(root: string): string {
   const name = basename(resolve(root))
     .toLowerCase()
@@ -1114,6 +1184,7 @@ function launchArgs(options: CliLaunchOptions, projectRoot: string, install: Cic
     if (options.prompt !== undefined) args.push(options.prompt);
     return args;
   }
+  args.push(...codexMcpServersOverrideArgs(install));
   if (options.model !== undefined) args.push("--model", options.model);
   args.push("--cd", projectRoot);
   args.push("--ask-for-approval", options.approvalPolicy ?? DEFAULT_CODEX_APPROVAL_POLICY);
@@ -1143,6 +1214,30 @@ function appendCliCommandEvent(projectRoot: string, input: {
   });
 }
 
+async function ensureHerdrSessionRunning(sessionName: string): Promise<readonly string[]> {
+  const status = spawnSync("herdr", ["--session", sessionName, "status", "server"], {
+    encoding: "utf8"
+  });
+  if (status.status === 0 && !`${status.stdout}\n${status.stderr}`.includes("status: not running")) {
+    return ["ciclo.launch.herdr_server:running"];
+  }
+  const server = spawn("herdr", ["--session", sessionName, "server"], {
+    detached: true,
+    stdio: "ignore"
+  });
+  server.unref();
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await sleep(100);
+    const next = spawnSync("herdr", ["--session", sessionName, "status", "server"], {
+      encoding: "utf8"
+    });
+    if (next.status === 0 && !`${next.stdout}\n${next.stderr}`.includes("status: not running")) {
+      return ["ciclo.launch.herdr_server:started", `ciclo.launch.herdr_server.wait_attempts:${attempt + 1}`];
+    }
+  }
+  return ["ciclo.launch.herdr_server:start_timeout"];
+}
+
 async function buildLaunchPlan(options: CliLaunchOptions): Promise<CicloLaunchPlan> {
   const projectRoot = resolve(options.projectRoot ?? process.cwd());
   const install = await configuredMcpInstall({
@@ -1155,13 +1250,16 @@ async function buildLaunchPlan(options: CliLaunchOptions): Promise<CicloLaunchPl
     dryRun: options.dryRun
   });
   const harnessCommand = launchCommand(options);
+  const launchHarnessCommand = options.herdr && !options.dryRun
+    ? resolveExecutable(harnessCommand) ?? harnessCommand
+    : harnessCommand;
   const harnessArgs = launchArgs(options, projectRoot, install);
   const sessionName = herdrSessionName(options, projectRoot);
   const paneName = herdrPaneName(options, projectRoot);
   const attachArgs = herdrAttachArgs(sessionName);
   const launchMode = options.herdr ? "herdr" : "terminal";
   const command = options.herdr ? "herdr" : harnessCommand;
-  const args = options.herdr ? herdrStartArgs(sessionName, paneName, projectRoot, harnessCommand, harnessArgs) : harnessArgs;
+  const args = options.herdr ? herdrStartArgs(sessionName, paneName, projectRoot, launchHarnessCommand, harnessArgs) : harnessArgs;
   return {
     client: options.client,
     launchMode,
@@ -1189,6 +1287,7 @@ async function buildLaunchPlan(options: CliLaunchOptions): Promise<CicloLaunchPl
         `ciclo.launch.herdr_session:${sessionName}`,
         `ciclo.launch.herdr_pane:${paneName}`
       ] : []),
+      ...(launchHarnessCommand === harnessCommand ? [] : [`ciclo.launch.harness_command_resolved:${launchHarnessCommand}`]),
       ...effectiveCliPermissionEvidence(options),
       `ciclo.launch.mcp_targets:${install.targets.map((target) => target.client).join(",")}`,
       options.dryRun ? "ciclo.launch.dry_run:true" : "ciclo.launch.dry_run:false"
@@ -1213,6 +1312,20 @@ async function runLaunch(args: readonly string[], io: CliIo): Promise<number> {
   if (options.dryRun) {
     printJson(plan, parseJsonMode(args), io);
     return 0;
+  }
+  if (plan.launchMode === "herdr" && plan.herdr?.sessionName !== undefined) {
+    const herdrServerEvidence = await ensureHerdrSessionRunning(plan.herdr.sessionName);
+    appendCliCommandEvent(plan.projectRoot, {
+      command: "launch",
+      phase: "herdr_server",
+      evidence: ["cli.command:launch", "cli.command.phase:herdr_server", ...herdrServerEvidence],
+      data: {
+        client: plan.client,
+        launch_mode: plan.launchMode,
+        herdr_session: plan.herdr.sessionName
+      }
+    });
+    if (herdrServerEvidence.includes("ciclo.launch.herdr_server:start_timeout")) return 1;
   }
   const result = spawnSync(plan.command, [...plan.args], {
     cwd: plan.projectRoot,
@@ -1401,6 +1514,170 @@ function runConfig(args: readonly string[], io: CliIo): number {
   throw new Error(`unknown config subcommand: ${subcommand}`);
 }
 
+function parseProjectOption(args: readonly string[], context: string): { readonly projectRoot?: string; readonly rest: readonly string[] } {
+  let projectRoot: string | undefined;
+  const rest: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--project") {
+      projectRoot = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--json" || arg === "--compact") {
+      rest.push(arg);
+      continue;
+    }
+    if (arg === undefined) throw new Error(`unknown ${context} option: ${arg}`);
+    rest.push(arg);
+  }
+  return { ...(projectRoot === undefined ? {} : { projectRoot }), rest };
+}
+
+function runMemory(args: readonly string[], io: CliIo): number {
+  const subcommand = args[0];
+  if (subcommand === undefined || subcommand === "--help" || subcommand === "-h") {
+    io.stdout(commandHelp("memory"));
+    return 0;
+  }
+  const parsed = parseProjectOption(args.slice(1), "memory");
+  const root = resolve(parsed.projectRoot ?? process.cwd());
+  const store = new CicloMemoryStore({ projectRoot: root });
+  if (subcommand === "status") {
+    printJson({ memory: store.status() }, parseJsonMode(parsed.rest), io);
+    return 0;
+  }
+  if (subcommand === "list") {
+    let tag: string | undefined;
+    let state: "active" | "compacted" | "archived" | undefined;
+    let loopId: string | undefined;
+    let beadId: string | undefined;
+    let limit = 100;
+    for (let index = 0; index < parsed.rest.length; index += 1) {
+      const arg = parsed.rest[index];
+      if (arg === "--tag") {
+        tag = requireValue(parsed.rest, index, arg);
+        index += 1;
+        continue;
+      }
+      if (arg === "--state") {
+        const value = requireValue(parsed.rest, index, arg);
+        if (value !== "active" && value !== "compacted" && value !== "archived") throw new Error("--state must be active, compacted, or archived");
+        state = value;
+        index += 1;
+        continue;
+      }
+      if (arg === "--loop-id") {
+        loopId = requireValue(parsed.rest, index, arg);
+        index += 1;
+        continue;
+      }
+      if (arg === "--bead-id") {
+        beadId = requireValue(parsed.rest, index, arg);
+        index += 1;
+        continue;
+      }
+      if (arg === "--limit") {
+        limit = parsePositiveInteger(requireValue(parsed.rest, index, arg), arg);
+        index += 1;
+        continue;
+      }
+      if (arg === "--json" || arg === "--compact") continue;
+      throw new Error(`unknown memory list option: ${arg}`);
+    }
+    printJson({ memories: store.list({ tag, state, loopId, beadId, limit }), status: store.status() }, parseJsonMode(parsed.rest), io);
+    return 0;
+  }
+  if (subcommand === "remember") {
+    let content: string | undefined;
+    let kind: "observation" | "learning" | "decision" | "summary" | undefined;
+    let importance: "low" | "normal" | "high" | undefined;
+    let loopId: string | undefined;
+    let beadId: string | undefined;
+    const tags: string[] = [];
+    for (let index = 0; index < parsed.rest.length; index += 1) {
+      const arg = parsed.rest[index];
+      if (arg === "--content") {
+        content = requireAnyValue(parsed.rest, index, arg);
+        index += 1;
+        continue;
+      }
+      if (arg === "--kind") {
+        const value = requireValue(parsed.rest, index, arg);
+        if (value !== "observation" && value !== "learning" && value !== "decision" && value !== "summary") throw new Error("--kind must be observation, learning, decision, or summary");
+        kind = value;
+        index += 1;
+        continue;
+      }
+      if (arg === "--importance") {
+        const value = requireValue(parsed.rest, index, arg);
+        if (value !== "low" && value !== "normal" && value !== "high") throw new Error("--importance must be low, normal, or high");
+        importance = value;
+        index += 1;
+        continue;
+      }
+      if (arg === "--tag") {
+        tags.push(requireValue(parsed.rest, index, arg));
+        index += 1;
+        continue;
+      }
+      if (arg === "--loop-id") {
+        loopId = requireValue(parsed.rest, index, arg);
+        index += 1;
+        continue;
+      }
+      if (arg === "--bead-id") {
+        beadId = requireValue(parsed.rest, index, arg);
+        index += 1;
+        continue;
+      }
+      if (arg === "--json" || arg === "--compact") continue;
+      throw new Error(`unknown memory remember option: ${arg}`);
+    }
+    if (content === undefined) throw new Error("memory remember requires --content");
+    const memory = store.record({ content, kind, importance, tags, loopId, beadId, evidence: ["cli.memory:remember"] });
+    printJson({ memory, evidence: memory.evidence }, parseJsonMode(parsed.rest), io);
+    return 0;
+  }
+  if (subcommand === "compact") {
+    printJson(store.compact(), parseJsonMode(parsed.rest), io);
+    return 0;
+  }
+  throw new Error(`unknown memory subcommand: ${subcommand}`);
+}
+
+async function runCron(args: readonly string[], io: CliIo): Promise<number> {
+  const subcommand = args[0];
+  if (subcommand === undefined || subcommand === "--help" || subcommand === "-h") {
+    io.stdout(commandHelp("cron"));
+    return 0;
+  }
+  const parsed = parseProjectOption(args.slice(1), "cron");
+  const root = resolve(parsed.projectRoot ?? process.cwd());
+  const runtime = await createLocalMcpRuntimeContextWithPlugins(root);
+  if (subcommand === "list") {
+    printJson(runtime.cronScheduler?.status(runtime.projectConfig?.cron?.jobs ?? [], new Date().toISOString()) ?? {
+      jobs: [],
+      due: [],
+      recent_runs: [],
+      evidence: ["cron.scheduler:unavailable"]
+    }, parseJsonMode(parsed.rest), io);
+    return 0;
+  }
+  if (subcommand === "run-due") {
+    const result = await runtime.internalHeartbeat?.tick();
+    printJson({
+      checked_at: result?.checkedAt,
+      cron_due: result?.cronDue ?? [],
+      cron_runs: result?.cronRuns ?? [],
+      memory_compactions: result?.memoryCompactions ?? [],
+      evidence: result?.evidence ?? ["heartbeat.internal:unavailable"]
+    }, parseJsonMode(parsed.rest), io);
+    return 0;
+  }
+  throw new Error(`unknown cron subcommand: ${subcommand}`);
+}
+
 function requirePluginPackage(args: readonly string[], index: number, command: string): string {
   const value = args[index];
   if (value === undefined || value.startsWith("-")) {
@@ -1527,6 +1804,14 @@ export async function main(argv: readonly string[] = process.argv, io: CliIo = d
 
     if (command === "events") {
       return await runEvents(args, io);
+    }
+
+    if (command === "memory") {
+      return runMemory(args, io);
+    }
+
+    if (command === "cron") {
+      return await runCron(args, io);
     }
 
     if (command === "attach") {

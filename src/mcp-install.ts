@@ -272,7 +272,16 @@ function tomlStringList(values: readonly string[]): string {
   return `[${values.map(tomlString).join(", ")}]`;
 }
 
-function stripCodexServerBlock(input: string, serverName: string): string {
+function tomlBareKey(key: string): string {
+  return /^[A-Za-z0-9_-]+$/u.test(key) ? key : tomlString(key);
+}
+
+function tomlInlineTable(entries: readonly [string, string][]): string {
+  if (entries.length === 0) return "{}";
+  return `{ ${entries.map(([key, value]) => `${tomlBareKey(key)} = ${value}`).join(", ")} }`;
+}
+
+function stripCodexMcpServerBlocks(input: string): string {
   const lines = input.split(/\r?\n/u);
   const kept: string[] = [];
   let dropping = false;
@@ -280,7 +289,7 @@ function stripCodexServerBlock(input: string, serverName: string): string {
   for (const line of lines) {
     const table = line.match(/^\s*\[([^\]]+)\]\s*$/u)?.[1];
     if (table !== undefined) {
-      dropping = table === `mcp_servers.${serverName}` || table.startsWith(`mcp_servers.${serverName}.`);
+      dropping = table === "mcp_servers" || table.startsWith("mcp_servers.");
     }
     if (!dropping) kept.push(line);
   }
@@ -312,8 +321,7 @@ function installCodex(
 ): CicloMcpInstallTargetResult {
   const path = join(projectRoot, ".codex", "config.toml");
   const previous = existsSync(path) ? readFileSync(path, "utf8") : "";
-  const managedServerNames = [serverName, ...Object.keys(additionalServers)];
-  const stripped = managedServerNames.reduce((current, managedServerName) => stripCodexServerBlock(current, managedServerName), previous);
+  const stripped = stripCodexMcpServerBlocks(previous);
   const generatedBlocks = [
     codexTomlBlock(serverName, config),
     ...Object.entries(additionalServers).map(([additionalName, additionalConfig]) => codexTomlBlock(additionalName, additionalConfig))
@@ -321,6 +329,23 @@ function installCodex(
   const next = `${stripped.trimEnd().length === 0 ? "" : `${stripped.trimEnd()}\n\n`}${generatedBlocks}\n`;
   const changed = writeIfChanged(path, next, dryRun);
   return { client: "codex", path, changed, dryRun };
+}
+
+export function codexMcpServersOverrideArgs(install: CicloMcpInstallResult): readonly string[] {
+  if (!install.targets.some((target) => target.client === "codex")) return [];
+  const servers: [string, CicloMcpServerConfig][] = [
+    [install.serverName, install.server],
+    ...Object.entries(install.additionalServers)
+  ];
+  const overrideValue = tomlInlineTable(servers.map(([name, server]) => [
+    name,
+    tomlInlineTable([
+      ["command", tomlString(server.command)],
+      ["args", tomlStringList(server.args)],
+      ["env", tomlInlineTable(Object.entries(server.env).map(([envName, value]) => [envName, tomlString(value)]))]
+    ])
+  ]));
+  return ["-c", `mcp_servers=${overrideValue}`];
 }
 
 export function installCicloMcp(options: CicloMcpInstallOptions = {}): CicloMcpInstallResult {

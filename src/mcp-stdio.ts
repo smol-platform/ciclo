@@ -16,6 +16,8 @@ import { BeadsRemoteTrackerSync, type BeadsRemoteTrackerSyncInput } from "./bead
 import { selectAndClaimBeadsWork, type BeadsWorkClaimClient } from "./beads-work-queue.js";
 import { runtimeDecision, type HarnessId, type LoopConfig } from "./ciclo-core.js";
 import { cicloEventLogPath, CicloEventStore, type CicloEventInput } from "./ciclo-events.js";
+import { CicloCronScheduler } from "./ciclo-cron.js";
+import { CicloMemoryStore } from "./ciclo-memory.js";
 import {
   authorizeClientRequest,
   clientAccessView,
@@ -149,6 +151,8 @@ export interface CicloMcpRuntimeContext {
   readonly projectConfigEvidence?: readonly string[];
   readonly claudeChannel?: CicloClaudeChannelRuntimeConfig;
   readonly eventStore?: CicloEventStore;
+  readonly cronScheduler?: CicloCronScheduler;
+  readonly memoryStore?: CicloMemoryStore;
   readonly deviceFlow?: DeviceAuthorizationFlow;
   readonly beadsClient?: BeadsWorkClaimClient & BeadsProgressClient;
   readonly sync?: BeadsProgressSync;
@@ -528,6 +532,24 @@ function staleAfterMs(params: unknown): number {
 
 function expectedPrAfterMs(params: unknown): number {
   return numberParam(params, "expected_pr_after_ms", 30 * 60 * 1000);
+}
+
+function memoryKindParam(params: unknown): "observation" | "learning" | "decision" | "summary" | undefined {
+  const value = stringParam(params, "kind");
+  if (value === "observation" || value === "learning" || value === "decision" || value === "summary") return value;
+  return undefined;
+}
+
+function memoryImportanceParam(params: unknown): "low" | "normal" | "high" | undefined {
+  const value = stringParam(params, "importance");
+  if (value === "low" || value === "normal" || value === "high") return value;
+  return undefined;
+}
+
+function memoryStateParam(params: unknown): "active" | "compacted" | "archived" | undefined {
+  const value = stringParam(params, "state");
+  if (value === "active" || value === "compacted" || value === "archived") return value;
+  return undefined;
 }
 
 function responseId(request: JsonRpcRequest | undefined): string | number | null {
@@ -1321,6 +1343,17 @@ async function liveStatus(service: CicloMcpReadService, runtime: CicloMcpRuntime
       monologue: [],
       evidence: ["heartbeat.internal:unavailable"]
     },
+    cron: runtime.cronScheduler?.status(runtime.projectConfig?.cron?.jobs ?? [], new Date().toISOString()) ?? {
+      jobs: [],
+      due: [],
+      recent_runs: [],
+      evidence: ["cron.scheduler:unavailable"]
+    },
+    memory: runtime.memoryStore?.status() ?? {
+      total: 0,
+      active: 0,
+      evidence: ["memory.store:unavailable"]
+    },
     loops: loopIds.map((loopId) => liveLoop(loopId, runtime)).filter((loop): loop is LoopStatus => loop !== undefined),
     workers: {
       total: workers.length,
@@ -1429,6 +1462,8 @@ export function createLocalMcpRuntimeContext(root = process.cwd()): CicloMcpRunt
     persistPath: cicloEventLogPath(root),
     ...(userPaneNotifier === undefined ? {} : { onAppend: (event) => { userPaneNotifier.notify(event); } })
   });
+  const cronScheduler = new CicloCronScheduler({ projectRoot: root });
+  const memoryStore = new CicloMemoryStore({ projectRoot: root, eventSink: eventStore });
   const runtime: CicloMcpRuntimeContext = {
     auth: {
       ...defaultClientAuthContext(root),
@@ -1440,6 +1475,8 @@ export function createLocalMcpRuntimeContext(root = process.cwd()): CicloMcpRunt
       enabled: process.env.CICLO_CLAUDE_CHANNEL === "true"
     },
     eventStore,
+    cronScheduler,
+    memoryStore,
     deviceFlow: new DeviceAuthorizationFlow({
       verificationUri: "http://127.0.0.1:0/oauth/device"
     }),
@@ -1599,6 +1636,93 @@ async function callTool(
       cursor: poll.cursor,
       next_cursor: poll.nextCursor,
       events: poll.events
+    });
+  }
+
+  if (name === "ciclo_remember") {
+    if (runtime.memoryStore === undefined) throw new Error("Ciclo memory store is unavailable");
+    const entry = runtime.memoryStore.record({
+      kind: memoryKindParam(params),
+      content: stringParam(params, "content"),
+      tags: stringListParam(params, "tags"),
+      importance: memoryImportanceParam(params) ?? runtime.projectConfig?.memory?.defaultImportance,
+      confidence: numberParam(params, "confidence", 0.7),
+      loopId: stringParam(params, "loop_id") || undefined,
+      beadId: stringParam(params, "bead_id") || undefined,
+      workerSessionId: stringParam(params, "worker_session_id") || undefined,
+      remoteSessionId: stringParam(params, "remote_session_id") || undefined,
+      evidence: stringListParam(params, "evidence")
+    });
+    auditMutation({
+      runtime,
+      tool: name,
+      action: "update_beads_progress",
+      authorization,
+      reason: "Ciclo durable memory recorded",
+      evidence: entry.evidence
+    });
+    return textContent({ memory: entry, evidence: entry.evidence });
+  }
+
+  if (name === "ciclo_list_memories") {
+    const memories = runtime.memoryStore?.list({
+      loopId: stringParam(params, "loop_id") || undefined,
+      beadId: stringParam(params, "bead_id") || undefined,
+      workerSessionId: stringParam(params, "worker_session_id") || undefined,
+      remoteSessionId: stringParam(params, "remote_session_id") || undefined,
+      tag: stringParam(params, "tag") || undefined,
+      state: memoryStateParam(params),
+      limit: numberParam(params, "limit", 100)
+    }) ?? [];
+    return textContent({ memories, status: runtime.memoryStore?.status() ?? { evidence: ["memory.store:unavailable"] } });
+  }
+
+  if (name === "ciclo_compact_memories") {
+    if (runtime.memoryStore === undefined) throw new Error("Ciclo memory store is unavailable");
+    const result = runtime.memoryStore.compact({
+      compactAfterDays: numberParam(params, "compact_after_days", runtime.projectConfig?.memory?.compactAfterDays ?? 14),
+      archiveAfterDays: numberParam(params, "archive_after_days", runtime.projectConfig?.memory?.archiveAfterDays ?? 90),
+      minCompoundEntries: numberParam(params, "min_compound_entries", runtime.projectConfig?.memory?.minCompoundEntries ?? 3),
+      maxSummaryCharacters: numberParam(params, "max_summary_characters", runtime.projectConfig?.memory?.maxSummaryCharacters ?? 1600)
+    });
+    auditMutation({
+      runtime,
+      tool: name,
+      action: "update_beads_progress",
+      authorization,
+      reason: "Ciclo memory compaction ran",
+      evidence: result.evidence
+    });
+    return textContent(result);
+  }
+
+  if (name === "ciclo_list_cron_jobs") {
+    const now = new Date().toISOString();
+    return textContent(runtime.cronScheduler?.status(runtime.projectConfig?.cron?.jobs ?? [], now) ?? {
+      jobs: [],
+      due: [],
+      recent_runs: [],
+      evidence: ["cron.scheduler:unavailable"]
+    });
+  }
+
+  if (name === "ciclo_run_due_cron") {
+    if (runtime.internalHeartbeat === undefined) throw new Error("Ciclo internal heartbeat is unavailable");
+    const result = await runtime.internalHeartbeat.tick();
+    auditMutation({
+      runtime,
+      tool: name,
+      action: "update_beads_progress",
+      authorization,
+      reason: "Ciclo due cron evaluated through heartbeat",
+      evidence: result.evidence
+    });
+    return textContent({
+      checked_at: result.checkedAt,
+      cron_due: result.cronDue,
+      cron_runs: result.cronRuns,
+      memory_compactions: result.memoryCompactions,
+      evidence: result.evidence
     });
   }
 
@@ -2589,6 +2713,20 @@ async function readResource(
         monologue: [],
         evidence: ["heartbeat.internal:unavailable"]
       }
+    };
+  } else if (uri === "ciclo://cron") {
+    payload = {
+      cron: runtime.cronScheduler?.status(runtime.projectConfig?.cron?.jobs ?? [], new Date().toISOString()) ?? {
+        jobs: [],
+        due: [],
+        recent_runs: [],
+        evidence: ["cron.scheduler:unavailable"]
+      }
+    };
+  } else if (uri === "ciclo://memory") {
+    payload = {
+      memory: runtime.memoryStore?.status() ?? { evidence: ["memory.store:unavailable"] },
+      memories: runtime.memoryStore?.list({ limit: 100 }) ?? []
     };
   } else if (uri === "ciclo://board") {
     payload = await liveBoard(service, runtime);

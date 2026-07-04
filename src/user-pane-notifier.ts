@@ -29,6 +29,8 @@ const notifyEventTypes = new Set([
   "brain.decision",
   "work.started",
   "worker.state_change",
+  "worker.nudged",
+  "worker.capacity_released",
   "bead.claimed",
   "question.asked",
   "feedback.reported",
@@ -73,6 +75,10 @@ function eventTitle(event: CicloEvent): string {
       return "Ciclo decision";
     case "work.started":
       return "Ciclo started work";
+    case "worker.nudged":
+      return "Ciclo nudged worker";
+    case "worker.capacity_released":
+      return "Ciclo freed worker capacity";
     case "bead.claimed":
       return "Ciclo claimed a Bead";
     case "question.asked":
@@ -119,7 +125,7 @@ function eventBody(event: CicloEvent, target: UserControlPaneTarget): string {
 }
 
 function eventSound(event: CicloEvent): "none" | "done" | "request" {
-  if (event.type === "question.asked" || event.type === "blocker.raised" || event.type === "validation.failed") return "request";
+  if (event.type === "question.asked" || event.type === "blocker.raised" || event.type === "validation.failed" || event.type === "worker.nudged") return "request";
   if (event.type === "validation.passed" || event.type === "worker.state_change" && event.state === "completed") return "done";
   return "none";
 }

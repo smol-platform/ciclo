@@ -13,6 +13,8 @@ export type McpSideEffect =
   | "remote_runner_update"
   | "worker_session_update"
   | "secret_read"
+  | "memory_update"
+  | "cron_run"
   | "model_call"
   | "auth_token_issue"
   | "access_grant_update"
@@ -185,6 +187,98 @@ export const cicloMcpTools: readonly McpToolContract[] = [
     permission: permission("read_status", "status.read", true),
     sideEffects: ["none"],
     audit: audit("mcp.events_polled", ["principal_id", "session_id"])
+  },
+  {
+    name: "ciclo_remember",
+    description: "Record durable Ciclo memory for project learnings, loop decisions, model fit, blockers, PR review needs, and cross-session handoff context.",
+    inputSchema: objectSchema("Memory record request.", {
+      kind: { type: "string", enum: ["observation", "learning", "decision", "summary"], description: "Memory kind." },
+      content: stringSchema("Memory content. Do not include secret values."),
+      tags: arrayOfStrings("Memory tags."),
+      importance: { type: "string", enum: ["low", "normal", "high"], description: "Memory importance." },
+      confidence: { type: "number", description: "Confidence from 0 to 1." },
+      loop_id: loopId,
+      bead_id: beadId,
+      worker_session_id: stringSchema("Worker session id."),
+      remote_session_id: remoteSessionId,
+      evidence: arrayOfStrings("Evidence for this memory.")
+    }, ["content"]),
+    outputSchema: objectSchema("Recorded memory.", {
+      memory: { type: "object" },
+      evidence: arrayOfStrings("Memory persistence evidence.")
+    }),
+    permission: permission("update_beads_progress", "work.update"),
+    sideEffects: ["memory_update"],
+    audit: audit("mcp.memory_recorded", ["principal_id", "loop_id", "bead_id", "worker_session_id"], ["content"])
+  },
+  {
+    name: "ciclo_list_memories",
+    description: "List durable Ciclo memories filtered by loop, Beads issue, worker, remote session, tag, or state.",
+    inputSchema: objectSchema("Memory list request.", {
+      loop_id: loopId,
+      bead_id: beadId,
+      worker_session_id: stringSchema("Worker session id."),
+      remote_session_id: remoteSessionId,
+      tag: stringSchema("Tag filter."),
+      state: { type: "string", enum: ["active", "compacted", "archived"], description: "Memory state." },
+      limit: { type: "number", description: "Maximum memories." }
+    }),
+    outputSchema: objectSchema("Memory list.", {
+      memories: { type: "array", items: { type: "object" } },
+      status: { type: "object" }
+    }),
+    permission: permission("read_status", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.memories_read", ["principal_id", "loop_id", "bead_id"])
+  },
+  {
+    name: "ciclo_compact_memories",
+    description: "Run Ciclo memory compaction: age entries, archive stale low-value details, and compound related memories into summaries.",
+    inputSchema: objectSchema("Memory compaction request.", {
+      compact_after_days: { type: "number", description: "Compact active memories older than this many days." },
+      archive_after_days: { type: "number", description: "Archive memories older than this many days." },
+      min_compound_entries: { type: "number", description: "Minimum related entries before compounding a summary." },
+      max_summary_characters: { type: "number", description: "Maximum generated summary length." }
+    }),
+    outputSchema: objectSchema("Memory compaction result.", {
+      aged: { type: "array", items: { type: "object" } },
+      compacted: { type: "array", items: { type: "object" } },
+      archived: { type: "array", items: { type: "object" } },
+      compounded: { type: "array", items: { type: "object" } },
+      evidence: arrayOfStrings("Compaction evidence.")
+    }),
+    permission: permission("update_beads_progress", "work.update"),
+    sideEffects: ["memory_update"],
+    audit: audit("mcp.memories_compacted", ["principal_id"])
+  },
+  {
+    name: "ciclo_list_cron_jobs",
+    description: "List configured Ciclo cron jobs, due state, and recent run history.",
+    inputSchema: objectSchema("Cron list request.", {}),
+    outputSchema: objectSchema("Cron status.", {
+      jobs: { type: "array", items: { type: "object" } },
+      due: { type: "array", items: { type: "object" } },
+      recent_runs: { type: "array", items: { type: "object" } },
+      evidence: arrayOfStrings("Cron scheduler evidence.")
+    }),
+    permission: permission("read_status", "status.read", true),
+    sideEffects: ["none"],
+    audit: audit("mcp.cron_read", ["principal_id", "session_id"])
+  },
+  {
+    name: "ciclo_run_due_cron",
+    description: "Ask Ciclo to evaluate due cron jobs now. In normal MCP operation the internal heartbeat does this automatically.",
+    inputSchema: objectSchema("Cron run request.", {}),
+    outputSchema: objectSchema("Cron run result.", {
+      checked_at: stringSchema("Check timestamp."),
+      cron_due: { type: "array", items: { type: "object" } },
+      cron_runs: { type: "array", items: { type: "object" } },
+      memory_compactions: { type: "array", items: { type: "object" } },
+      evidence: arrayOfStrings("Heartbeat/cron evidence.")
+    }),
+    permission: permission("update_beads_progress", "work.update"),
+    sideEffects: ["cron_run", "memory_update", "harness_dispatch", "model_call"],
+    audit: audit("mcp.cron_due_ran", ["principal_id", "session_id"])
   },
   {
     name: "ciclo_board",
@@ -832,6 +926,27 @@ export const cicloMcpResources: readonly McpResourceContract[] = [
     permission: permission("read_status", "status.read", true),
     cachePolicy: "short_poll",
     audit: audit("mcp.resource.heartbeat", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://cron",
+    description: "Configured Ciclo cron jobs, due status, and recent run history.",
+    outputSchema: objectSchema("Cron status.", {
+      cron: { type: "object" }
+    }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.cron", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://memory",
+    description: "Durable Ciclo project memory and compaction status.",
+    outputSchema: objectSchema("Memory status.", {
+      memory: { type: "object" },
+      memories: { type: "array", items: { type: "object" } }
+    }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.memory", ["principal_id"])
   },
   {
     uriTemplate: "ciclo://board",

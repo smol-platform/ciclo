@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
+import type { CicloCronJob, CicloCronSchedule, CicloCronTask, CicloCronTaskKind } from "./ciclo-cron.js";
 import type { CicloMcpAdditionalServerConfig, CicloMcpInstallClient, CicloMcpInstallOptions, CicloMcpSecretEnvBinding } from "./mcp-install.js";
+import type { CicloMemoryImportance } from "./ciclo-memory.js";
 import { normalizePromptInjection, type CicloPromptInjection } from "./prompt-injection.js";
 import type {
   RemoteRunnerImageResolverRequest,
@@ -117,6 +119,16 @@ export interface CicloConfigHeartbeat {
   readonly preemptiveWork?: CicloConfigHeartbeatPreemptiveWork;
 }
 
+export interface CicloConfigMemory {
+  readonly enabled?: boolean;
+  readonly compactEveryMs?: number;
+  readonly compactAfterDays?: number;
+  readonly archiveAfterDays?: number;
+  readonly minCompoundEntries?: number;
+  readonly maxSummaryCharacters?: number;
+  readonly defaultImportance?: CicloMemoryImportance;
+}
+
 export interface CicloProjectConfig {
   readonly secrets?: {
     readonly providers?: readonly CicloConfigSecretProvider[];
@@ -125,6 +137,10 @@ export interface CicloProjectConfig {
   readonly remote?: CicloConfigRemote;
   readonly prompts?: CicloConfigPrompts;
   readonly heartbeat?: CicloConfigHeartbeat;
+  readonly cron?: {
+    readonly jobs?: readonly CicloCronJob[];
+  };
+  readonly memory?: CicloConfigMemory;
 }
 
 export interface CicloProjectConfigLoadResult {
@@ -232,6 +248,25 @@ function workerIsolationMode(value: string | undefined, path: string): WorkerIso
   if (value === undefined) return undefined;
   if (value === "none" || value === "worktree") return value;
   throw new Error(`${path} must be none or worktree`);
+}
+
+function memoryImportance(value: string | undefined, path: string): CicloMemoryImportance | undefined {
+  if (value === undefined) return undefined;
+  if (value === "low" || value === "normal" || value === "high") return value;
+  throw new Error(`${path} must be low, normal, or high`);
+}
+
+function cronTaskKind(value: string | undefined, path: string): CicloCronTaskKind {
+  if (
+    value === "heartbeat_tick" ||
+    value === "dispatch_ready_work" ||
+    value === "memory_compact" ||
+    value === "worker_launch" ||
+    value === "brain_decision"
+  ) {
+    return value;
+  }
+  throw new Error(`${path} must be heartbeat_tick, dispatch_ready_work, memory_compact, worker_launch, or brain_decision`);
 }
 
 function secretProviderConfig(value: unknown, index: number): CicloConfigSecretProvider {
@@ -546,6 +581,69 @@ function parseHeartbeat(root: Record<string, unknown>): CicloConfigHeartbeat | u
   };
 }
 
+function parseCronSchedule(value: unknown, path: string): CicloCronSchedule {
+  const record = objectValue(value, path);
+  const everyMs = optionalNumberAny(record, ["every_ms", "everyMs"]);
+  const cron = optionalString(record, "cron");
+  const dailyAt = optionalStringAny(record, ["daily_at", "dailyAt"]);
+  if (everyMs === undefined && cron === undefined && dailyAt === undefined) {
+    throw new Error(`${path} requires one of every_ms, cron, or daily_at`);
+  }
+  return {
+    ...(everyMs === undefined ? {} : { everyMs }),
+    ...(cron === undefined ? {} : { cron }),
+    ...(dailyAt === undefined ? {} : { dailyAt })
+  };
+}
+
+function parseCronTask(value: unknown, path: string): CicloCronTask {
+  const record = objectValue(value, path);
+  const kind = cronTaskKind(optionalString(record, "kind"), `${path}.kind`);
+  const params = record.params === undefined ? undefined : objectValue(record.params, `${path}.params`);
+  return {
+    kind,
+    ...(params === undefined ? {} : { params })
+  };
+}
+
+function parseCron(root: Record<string, unknown>): CicloProjectConfig["cron"] | undefined {
+  const value = root.cron;
+  if (value === undefined) return undefined;
+  const record = objectValue(value, "cron");
+  const jobsValue = record.jobs;
+  if (jobsValue === undefined) return {};
+  if (!Array.isArray(jobsValue)) throw new Error("cron.jobs must be an array");
+  return {
+    jobs: jobsValue.map((entry, index): CicloCronJob => {
+      const job = objectValue(entry, `cron.jobs[${index}]`);
+      const id = optionalString(job, "id");
+      if (id === undefined) throw new Error(`cron.jobs[${index}].id is required`);
+      return {
+        id,
+        enabled: optionalBoolean(job, "enabled") ?? true,
+        schedule: parseCronSchedule(job.schedule, `cron.jobs[${index}].schedule`),
+        task: parseCronTask(job.task, `cron.jobs[${index}].task`),
+        ...(optionalString(job, "description") === undefined ? {} : { description: optionalString(job, "description") })
+      };
+    })
+  };
+}
+
+function parseMemory(root: Record<string, unknown>): CicloConfigMemory | undefined {
+  const value = root.memory;
+  if (value === undefined) return undefined;
+  const record = objectValue(value, "memory");
+  return {
+    enabled: optionalBoolean(record, "enabled"),
+    compactEveryMs: optionalNumberAny(record, ["compact_every_ms", "compactEveryMs"]),
+    compactAfterDays: optionalNumberAny(record, ["compact_after_days", "compactAfterDays"]),
+    archiveAfterDays: optionalNumberAny(record, ["archive_after_days", "archiveAfterDays"]),
+    minCompoundEntries: optionalNumberAny(record, ["min_compound_entries", "minCompoundEntries"]),
+    maxSummaryCharacters: optionalNumberAny(record, ["max_summary_characters", "maxSummaryCharacters"]),
+    defaultImportance: memoryImportance(optionalStringAny(record, ["default_importance", "defaultImportance"]), "memory.default_importance")
+  };
+}
+
 export function parseCicloProjectConfigText(text: string): CicloProjectConfig {
   const trimmed = text.trim();
   if (trimmed.length === 0) return {};
@@ -555,12 +653,16 @@ export function parseCicloProjectConfigText(text: string): CicloProjectConfig {
   const remote = parseRemote(root);
   const prompts = parsePrompts(root);
   const heartbeat = parseHeartbeat(root);
+  const cron = parseCron(root);
+  const memory = parseMemory(root);
   return {
     ...(secrets === undefined ? {} : { secrets }),
     ...(mcp === undefined ? {} : { mcp }),
     ...(remote === undefined ? {} : { remote }),
     ...(prompts === undefined ? {} : { prompts }),
-    ...(heartbeat === undefined ? {} : { heartbeat })
+    ...(heartbeat === undefined ? {} : { heartbeat }),
+    ...(cron === undefined ? {} : { cron }),
+    ...(memory === undefined ? {} : { memory })
   };
 }
 
@@ -584,7 +686,9 @@ export function loadCicloProjectConfig(projectRoot = process.cwd(), explicitPath
       `ciclo.config.mcp:${config.mcp === undefined ? "absent" : "present"}`,
       `ciclo.config.remote:${config.remote === undefined ? "absent" : "present"}`,
       `ciclo.config.prompt_injections:${config.prompts?.systemInjections?.length ?? 0}`,
-      `ciclo.config.heartbeat:${config.heartbeat === undefined ? "absent" : "present"}`
+      `ciclo.config.heartbeat:${config.heartbeat === undefined ? "absent" : "present"}`,
+      `ciclo.config.cron_jobs:${config.cron?.jobs?.length ?? 0}`,
+      `ciclo.config.memory:${config.memory === undefined ? "absent" : "present"}`
     ]
   };
 }
@@ -925,10 +1029,37 @@ export const sampleCicloProjectConfig: CicloProjectConfig = {
       loopId: "preemptive-beads",
       harnessId: "codex",
       issueTypes: ["epic", "feature"],
-      maxConcurrent: 1,
+      maxConcurrent: 10,
       isolation: "worktree",
       configureMcp: true
     }
+  },
+  cron: {
+    jobs: [
+      {
+        id: "memory-compact-daily",
+        enabled: true,
+        description: "Compact, age, and compound Ciclo project memory every day.",
+        schedule: { dailyAt: "03:30" },
+        task: { kind: "memory_compact" }
+      },
+      {
+        id: "preemptive-work-scan",
+        enabled: true,
+        description: "Ask Ciclo heartbeat to scan ready Beads work on a fixed interval.",
+        schedule: { everyMs: 15 * 60 * 1000 },
+        task: { kind: "dispatch_ready_work" }
+      }
+    ]
+  },
+  memory: {
+    enabled: true,
+    compactEveryMs: 24 * 60 * 60 * 1000,
+    compactAfterDays: 14,
+    archiveAfterDays: 90,
+    minCompoundEntries: 3,
+    maxSummaryCharacters: 1600,
+    defaultImportance: "normal"
   },
   remote: {
     runnerKind: "kubernetes",

@@ -11,6 +11,7 @@ import {
 } from "./claude-background-agent.js";
 import { CicloEventStore, type CicloEventPollResult } from "./ciclo-events.js";
 import {
+  codexMcpServersOverrideArgs,
   installCicloMcp,
   type CicloMcpAdditionalServerConfig,
   type CicloMcpInstallClient,
@@ -200,6 +201,8 @@ export interface WorkerSessionRecord {
   readonly stoppedAt?: string;
   readonly stateEnteredAt?: string;
   readonly lastHeartbeatAt?: string;
+  readonly lastRecoveryAt?: string;
+  readonly recoveryAttempts?: number;
   readonly usage?: WorkerUsageMetrics;
   readonly cleanupReason?: string;
   readonly exitCode?: number | null;
@@ -355,8 +358,14 @@ function worktreePlan(
   };
 }
 
-function codexArgs(input: WorkerSessionLaunchRequest, cwd: string, extraArgs: readonly string[]): readonly string[] {
+function codexArgs(
+  input: WorkerSessionLaunchRequest,
+  cwd: string,
+  extraArgs: readonly string[],
+  mcpConfig: WorkerMcpConfigPlan | undefined
+): readonly string[] {
   const args: string[] = [];
+  if (mcpConfig?.clients.includes("codex")) args.push(...codexMcpServersOverrideArgs(mcpConfig.install));
   appendIfValue(args, "--model", input.model);
   args.push("--cd", cwd);
   args.push("--ask-for-approval", effectiveCodexApprovalPolicy(input));
@@ -416,12 +425,24 @@ function workerCommand(input: WorkerSessionLaunchRequest): string {
   return input.harnessId === "codex" ? "codex" : "claude";
 }
 
-function directWorkerArgs(input: WorkerSessionLaunchRequest, cwd: string, name: string, extraArgs: readonly string[]): readonly string[] {
-  return input.harnessId === "codex" ? codexArgs(input, cwd, extraArgs) : claudeArgs(input, name, extraArgs);
+function directWorkerArgs(
+  input: WorkerSessionLaunchRequest,
+  cwd: string,
+  name: string,
+  extraArgs: readonly string[],
+  mcpConfig: WorkerMcpConfigPlan | undefined
+): readonly string[] {
+  return input.harnessId === "codex" ? codexArgs(input, cwd, extraArgs, mcpConfig) : claudeArgs(input, name, extraArgs);
 }
 
-function paneWorkerArgs(input: WorkerSessionLaunchRequest, cwd: string, name: string, extraArgs: readonly string[]): readonly string[] {
-  return input.harnessId === "codex" ? codexArgs(input, cwd, extraArgs) : claudePaneArgs(input, name, extraArgs);
+function paneWorkerArgs(
+  input: WorkerSessionLaunchRequest,
+  cwd: string,
+  name: string,
+  extraArgs: readonly string[],
+  mcpConfig: WorkerMcpConfigPlan | undefined
+): readonly string[] {
+  return input.harnessId === "codex" ? codexArgs(input, cwd, extraArgs, mcpConfig) : claudePaneArgs(input, name, extraArgs);
 }
 
 function runtimeSecretBindings(secretEnv: readonly CicloMcpSecretEnvBinding[] | undefined, target: string): readonly RuntimeSecretEnvBinding[] {
@@ -482,8 +503,11 @@ function herdrEnvironmentArgs(environment: WorkerEnvironmentPlan | undefined): r
 }
 
 function mcpClientsForHarness(input: WorkerSessionLaunchRequest): readonly CicloMcpInstallClient[] {
-  if (input.mcpClients !== undefined && input.mcpClients.length > 0) return [...new Set(input.mcpClients)];
-  return ["claude", "codex"];
+  const requiredClient: CicloMcpInstallClient = input.harnessId === "codex" ? "codex" : "claude";
+  const requested = input.mcpClients !== undefined && input.mcpClients.length > 0
+    ? input.mcpClients
+    : ["claude", "codex"] as const;
+  return [...new Set([...requested, requiredClient])];
 }
 
 function mcpConfigPlan(input: WorkerSessionLaunchRequest, cwd: string): WorkerMcpConfigPlan | undefined {
@@ -642,8 +666,8 @@ export function buildWorkerLaunchPlan(
   const mode = localLaunchMode === "herdr_pane" ? "herdr_agent" : directTrackingMode(launchInput);
   const harnessCommand = workerCommand(launchInput);
   const harnessArgs = localLaunchMode === "herdr_pane"
-    ? paneWorkerArgs(launchInput, cwd, name, extraArgs)
-    : directWorkerArgs(launchInput, cwd, name, extraArgs);
+    ? paneWorkerArgs(launchInput, cwd, name, extraArgs, mcpConfig)
+    : directWorkerArgs(launchInput, cwd, name, extraArgs, mcpConfig);
   const workerRuntimeSecrets = runtimeSecretBindings(launchInput.workerSecretEnv, "worker");
   const underlyingCommand = workerRuntimeSecrets.length === 0 ? harnessCommand : "ciclo";
   const underlyingArgs = workerRuntimeSecrets.length === 0 ? harnessArgs : secretExecArgs(workerRuntimeSecrets, harnessCommand, harnessArgs);
@@ -947,6 +971,8 @@ export class WorkerSessionSupervisor {
         worktree: record.worktree,
         state_entered_at: record.stateEnteredAt,
         last_heartbeat_at: record.lastHeartbeatAt,
+        last_recovery_at: record.lastRecoveryAt,
+        recovery_attempts: record.recoveryAttempts ?? 0,
         usage: record.usage
       }
     });
@@ -979,7 +1005,9 @@ export class WorkerSessionSupervisor {
         data: {
           harness_id: updated.harnessId,
           session_name: updated.sessionName,
-          last_heartbeat_at: updated.lastHeartbeatAt
+          last_heartbeat_at: updated.lastHeartbeatAt,
+          last_recovery_at: updated.lastRecoveryAt,
+          recovery_attempts: updated.recoveryAttempts ?? 0
         }
       });
     } else {
@@ -1267,6 +1295,63 @@ export class WorkerSessionSupervisor {
         ...evidence
       ])
     );
+  }
+
+  nudge(sessionId: string, message: string, evidence: readonly string[] = []): WorkerSessionRecord {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) throw new Error(`worker session not found: ${sessionId}`);
+    const now = this.clock.now();
+    const attempts = (session.recoveryAttempts ?? 0) + 1;
+    const agentTarget = session.agentRef?.target ?? session.agentRef?.id;
+    const canSend = session.agentRef?.kind === "herdr_agent" && agentTarget !== undefined;
+    const args = canSend
+      ? [
+          ...(session.agentRef?.herdrSession === undefined ? [] : ["--session", session.agentRef.herdrSession]),
+          "agent",
+          "send",
+          agentTarget,
+          message
+        ]
+      : [];
+    const result = canSend
+      ? this.commandRunner.run("herdr", args, { cwd: session.cwd })
+      : { status: 1, stdout: "", stderr: "worker is not a Herdr agent" };
+    const delivered = result.status === 0;
+    const reason = delivered
+      ? "nudge sent to worker agent"
+      : (result.stderr || result.stdout || "worker nudge could not be delivered").trim();
+    const nudgeEvidence = [
+      delivered ? "worker.session.nudge:delivered" : "worker.session.nudge:failed",
+      `worker.session.recovery_attempts:${attempts}`,
+      ...evidence
+    ];
+    const updated: WorkerSessionRecord = {
+      ...session,
+      lastRecoveryAt: now,
+      recoveryAttempts: attempts,
+      evidence: [...session.evidence, ...nudgeEvidence]
+    };
+    this.sessions.set(sessionId, updated);
+    this.events.append({
+      type: "worker.nudged",
+      at: now,
+      workerSessionId: updated.sessionId,
+      loopId: updated.loopId,
+      beadId: updated.beadId,
+      state: updated.state,
+      evidence: nudgeEvidence,
+      data: {
+        harness_id: updated.harnessId,
+        session_name: updated.sessionName,
+        delivered,
+        reason,
+        target: agentTarget,
+        herdr_session: updated.agentRef?.herdrSession,
+        recovery_attempts: attempts,
+        message
+      }
+    });
+    return updated;
   }
 
   resumeAfterOperator(match: WorkerSessionMatch, evidence: readonly string[] = []): readonly WorkerSessionRecord[] {

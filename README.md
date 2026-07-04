@@ -89,7 +89,7 @@ Start MCP over stdio for Claude, Codex, or a generic MCP client:
 ciclo mcp stdio
 ```
 
-When MCP is running, Ciclo starts an internal heartbeat for the sessions it owns. The heartbeat refreshes worker state, marks silent workers stale or stalled, checks registered remote sessions through Herdr remote attach when a remote heartbeat client is configured, and asks the OpenAI brain for follow-up decisions instead of waiting for an external poll.
+When MCP is running, Ciclo starts an internal heartbeat for the sessions it owns. The heartbeat refreshes worker state, marks silent workers stale or stalled, checks registered remote sessions through Herdr remote attach when a remote heartbeat client is configured, evaluates configured cron jobs, compacts project memory, and asks the OpenAI brain for follow-up decisions instead of waiting for an external poll.
 
 Project defaults can live in `.ciclo/config.json`:
 
@@ -99,9 +99,21 @@ ciclo config show --project /path/to/project --compact
 ciclo config path --project /path/to/project
 ```
 
-The config stores secret provider references, MCP defaults, remote runner defaults, and optional prompt guidance. It should contain provider ids, secret references, non-secret `vars`, and non-secret guidance text, not raw secret values. `ciclo mcp install`, MCP runtime startup, spawned worker MCP setup, prompt builders, and remote runner planning all read this file; explicit CLI or MCP tool arguments override config values.
+The config stores secret provider references, MCP defaults, heartbeat preemptive work limits, remote runner defaults, cron jobs, memory policy, and optional prompt guidance. It should contain provider ids, secret references, non-secret `vars`, and non-secret guidance text, not raw secret values. The heartbeat preemptive worker cap is `heartbeat.preemptiveWork.maxConcurrent`; when omitted, Ciclo defaults to launching at most 10 active worker sessions. `ciclo mcp install`, MCP runtime startup, spawned worker MCP setup, prompt builders, remote runner planning, cron scheduling, and memory compaction all read this file; explicit CLI or MCP tool arguments override config values.
 
-Use [examples/ciclo-config.json](/Users/ztaylor/repos/workspaces/ciclo/examples/ciclo-config.json) as the checked-in reference shape. It shows OpenBao, 1Password CLI, 1Password Connect, and plugin-backed provider aliases, MCP secret bindings for spawned workers, Claude/Codex client defaults, prompt guidance, remote runner defaults, WireGuard tunnel fields, and provider-specific Kubernetes, AWS Lambda MicroVM, and Cloudflare runner settings. `ciclo config show --compact` redacts secret references before display.
+Use [examples/ciclo-config.json](/Users/ztaylor/repos/workspaces/ciclo/examples/ciclo-config.json) as the checked-in reference shape. It shows OpenBao, 1Password CLI, 1Password Connect, and plugin-backed provider aliases, MCP secret bindings for spawned workers, Claude/Codex client defaults, prompt guidance, cron jobs, memory compaction policy, remote runner defaults, WireGuard tunnel fields, and provider-specific Kubernetes, AWS Lambda MicroVM, and Cloudflare runner settings. `ciclo config show --compact` redacts secret references before display.
+
+Cron and memory are project-scoped runtime systems. Ciclo stores memory snapshots in `.ciclo/memory.jsonl` and cron run history in `.ciclo/cron-runs.jsonl`; both are append-only so sessions can recover after MCP restarts. Memory entries capture loop, Beads, worker, remote, model-fit, blocker, PR review, and operator learnings. Compaction ages memories, archives stale low-value details, and compounds related memories into higher-generation summaries.
+
+```bash
+ciclo memory remember --content "Codex is a good default for small TypeScript fixes" --tag model-fit
+ciclo memory list --tag model-fit --compact
+ciclo memory compact
+ciclo cron list --compact
+ciclo cron run-due --compact
+```
+
+Agents can use `ciclo_remember`, `ciclo_list_memories`, `ciclo_compact_memories`, `ciclo_list_cron_jobs`, `ciclo_run_due_cron`, `ciclo://memory`, and `ciclo://cron` through MCP. The internal heartbeat automatically evaluates due cron jobs while MCP is running, so `ciclo cron run-due` is mainly for manual checks and tests.
 
 Use `prompts.systemInjections` for shared project goals or helper instructions that Ciclo should append after its built-in ground rules:
 
