@@ -17,6 +17,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "npm run build && node --test dist/tests-ts/*.test.js",
+    "test:herdr": "npm run build && CICLO_HERDR_INTEGRATION=1 node --test dist/tests-ts/herdr-launch-integration.test.js",
     "demo": "npm run build && node dist/src/demo.js",
     "mcp:stdio": "npm run build && node dist/src/mcp-stdio-cli.js",
     "mcp:http": "npm run build && node dist/src/mcp-http-cli.js"

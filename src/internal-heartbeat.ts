@@ -52,6 +52,7 @@ export interface CicloInternalHeartbeatTickResult {
   readonly checkedAt: string;
   readonly firstWake: boolean;
   readonly workersRefreshed: number;
+  readonly workerPromptSubmissions: number;
   readonly workersStalled: readonly WorkerSessionRecord[];
   readonly workerRecoveryActions: readonly string[];
   readonly workerChecked: number;
@@ -104,7 +105,7 @@ const maxMonologueEntries = 50;
 interface PreemptiveWorkPolicy {
   readonly enabled: boolean;
   readonly loopId: string;
-  readonly harnessId: WorkerHarnessId;
+  readonly harnesses: readonly PreemptiveHarnessProfile[];
   readonly issueTypes: readonly string[];
   readonly maxConcurrent: number;
   readonly dryRun: boolean;
@@ -114,10 +115,19 @@ interface PreemptiveWorkPolicy {
   readonly effort?: string;
 }
 
+interface PreemptiveHarnessProfile {
+  readonly harnessId: WorkerHarnessId;
+  readonly model?: string;
+  readonly effort?: string;
+}
+
 const defaultPreemptiveWork: PreemptiveWorkPolicy = {
   enabled: true,
   loopId: "preemptive-beads",
-  harnessId: "codex",
+  harnesses: [
+    { harnessId: "codex" },
+    { harnessId: "claude-code", model: "claude-fable-5" }
+  ],
   issueTypes: ["epic", "feature"],
   maxConcurrent: 10,
   dryRun: false,
@@ -144,6 +154,25 @@ function elapsedMs(fromIso: string | undefined, toIso: string): number | undefin
 function compactText(value: string, maxLength: number): string {
   const normalized = value.replace(/\s+/gu, " ").trim();
   return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 1)}...`;
+}
+
+function stableHash(value: string): number {
+  let hash = 0;
+  for (const char of value) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+  return hash;
+}
+
+function uniqueHarnessProfiles(input: readonly PreemptiveHarnessProfile[]): readonly PreemptiveHarnessProfile[] {
+  const seen = new Set<WorkerHarnessId>();
+  const output: PreemptiveHarnessProfile[] = [];
+  for (const profile of input) {
+    if (seen.has(profile.harnessId)) continue;
+    seen.add(profile.harnessId);
+    output.push(profile);
+  }
+  return output;
 }
 
 export class CicloInternalHeartbeat {
@@ -207,6 +236,7 @@ export class CicloInternalHeartbeat {
     const checkedAt = this.options.now?.() ?? new Date().toISOString();
     const firstWake = this.lastTickAt === undefined;
     const workersRefreshed = this.runtime.workerSupervisor?.refreshDetachedAgents() ?? [];
+    const workerPromptSubmissions = this.runtime.workerSupervisor?.recoverPendingHerdrInputs() ?? [];
     const workersStalled = this.runtime.workerSupervisor?.refreshStalled(
       this.options.workerStaleAfterMs ?? defaultWorkerStaleAfterMs,
       checkedAt
@@ -227,6 +257,7 @@ export class CicloInternalHeartbeat {
       "heartbeat.internal:tick",
       `heartbeat.worker.checked:${workersBeforeRecovery.length}`,
       `heartbeat.worker.refreshed:${workersRefreshed.length}`,
+      `heartbeat.worker.prompt_submissions:${workerPromptSubmissions.length}`,
       `heartbeat.worker.stalled:${workersStalled.length}`,
       `heartbeat.worker.recovery_actions:${followUps.recoveryActions.length}`,
       `heartbeat.ready_work.checked:${idleDispatch.readyWorkChecked}`,
@@ -244,6 +275,7 @@ export class CicloInternalHeartbeat {
       firstWake,
       workerChecked: workersBeforeRecovery.length,
       workersStalled: workersStalled.length,
+      workerPromptSubmissions: workerPromptSubmissions.length,
       remoteChanged: remoteChanged.length,
       readyWorkChecked: idleDispatch.readyWorkChecked,
       idleWorkersLaunched: idleDispatch.launched.length,
@@ -260,6 +292,7 @@ export class CicloInternalHeartbeat {
       data: {
         workers_checked: workersBeforeRecovery.length,
         workers_refreshed: workersRefreshed.length,
+        worker_prompt_submissions: workerPromptSubmissions.length,
         workers_stalled: workersStalled.length,
         worker_recovery_actions: followUps.recoveryActions.length,
         ready_work_checked: idleDispatch.readyWorkChecked,
@@ -278,6 +311,7 @@ export class CicloInternalHeartbeat {
       checkedAt,
       firstWake,
       workersRefreshed: workersRefreshed.length,
+      workerPromptSubmissions: workerPromptSubmissions.length,
       workersStalled,
       workerRecoveryActions: followUps.recoveryActions,
       workerChecked: workersBeforeRecovery.length,
@@ -331,6 +365,7 @@ export class CicloInternalHeartbeat {
       readonly firstWake: boolean;
       readonly workerChecked: number;
       readonly workersStalled: number;
+      readonly workerPromptSubmissions: number;
       readonly remoteChanged: number;
       readonly readyWorkChecked: number;
       readonly idleWorkersLaunched: number;
@@ -346,7 +381,7 @@ export class CicloInternalHeartbeat {
             "First wake should analyze repo, Beads, Herdr, PR/CI, remote, context, and worker state before choosing the first work to start."
           ]
         : []),
-      `Heartbeat checked ${input.workerChecked} worker session(s); ${input.workersStalled} stalled, ${input.remoteChanged} remote update(s), ${input.readyWorkChecked} ready Beads candidate(s), ${input.idleWorkersLaunched} worker launch(es), ${input.brainDecisions} brain decision(s), ${input.cronRuns} cron run(s).`,
+      `Heartbeat checked ${input.workerChecked} worker session(s); ${input.workersStalled} stalled, ${input.workerPromptSubmissions} pending prompt submission(s), ${input.remoteChanged} remote update(s), ${input.readyWorkChecked} ready Beads candidate(s), ${input.idleWorkersLaunched} worker launch(es), ${input.brainDecisions} brain decision(s), ${input.cronRuns} cron run(s).`,
       `Heartbeat memory pass should keep Beads open/closed state, PR review needs, model fit or escalation decisions current, and compact durable memory when needed; ${input.memoryCompactions} memory compaction(s) ran.`,
       input.claudeChannel.enabled
         ? `Claude channel communication is enabled for ${input.claudeChannel.connectedWorkers} Claude Code worker session(s).`
@@ -369,10 +404,17 @@ export class CicloInternalHeartbeat {
 
   private preemptiveWorkPolicy(): PreemptiveWorkPolicy {
     const config = this.runtime.projectConfig?.heartbeat?.preemptiveWork;
+    const configuredHarnesses = config?.harnessId !== undefined
+      ? [{
+          harnessId: config.harnessId,
+          ...(config.model === undefined ? {} : { model: config.model }),
+          ...(config.effort === undefined ? {} : { effort: config.effort })
+        }]
+      : uniqueHarnessProfiles(config?.harnesses ?? defaultPreemptiveWork.harnesses);
     return {
       enabled: config?.enabled ?? defaultPreemptiveWork.enabled,
       loopId: config?.loopId ?? defaultPreemptiveWork.loopId,
-      harnessId: config?.harnessId ?? defaultPreemptiveWork.harnessId,
+      harnesses: configuredHarnesses.length === 0 ? defaultPreemptiveWork.harnesses : configuredHarnesses,
       issueTypes: [...(config?.issueTypes ?? defaultPreemptiveWork.issueTypes)],
       maxConcurrent: config?.maxConcurrent ?? defaultPreemptiveWork.maxConcurrent,
       dryRun: config?.dryRun ?? defaultPreemptiveWork.dryRun,
@@ -381,6 +423,20 @@ export class CicloInternalHeartbeat {
       ...(config?.model === undefined ? {} : { model: config.model }),
       ...(config?.effort === undefined ? {} : { effort: config.effort })
     };
+  }
+
+  private selectPreemptiveHarness(
+    policy: PreemptiveWorkPolicy,
+    workers: readonly WorkerSessionRecord[],
+    beadId: string
+  ): PreemptiveHarnessProfile {
+    const activeCounts = new Map<WorkerHarnessId, number>();
+    for (const worker of workers.filter(activeWorker)) {
+      activeCounts.set(worker.harnessId, (activeCounts.get(worker.harnessId) ?? 0) + 1);
+    }
+    const minCount = Math.min(...policy.harnesses.map((profile) => activeCounts.get(profile.harnessId) ?? 0));
+    const leastBusy = policy.harnesses.filter((profile) => (activeCounts.get(profile.harnessId) ?? 0) === minCount);
+    return leastBusy[stableHash(beadId) % leastBusy.length] ?? policy.harnesses[0]!;
   }
 
   private async dispatchReadyBeadsWork(
@@ -414,7 +470,7 @@ export class CicloInternalHeartbeat {
       id: policy.loopId,
       kind: "beads_work" as const,
       goal: "Discover ready Beads epic/feature work and start an appropriate Ciclo-managed worker.",
-      harnesses: [policy.harnessId],
+      harnesses: policy.harnesses.map((profile) => profile.harnessId),
       dryRun: policy.dryRun
     };
     const result = await selectAndClaimBeadsWork(beadsClient, {
@@ -427,7 +483,7 @@ export class CicloInternalHeartbeat {
         }
       },
       limit: 20,
-      harnessId: policy.harnessId,
+      harnessForTask: (task) => this.selectPreemptiveHarness(policy, workers, task.id).harnessId,
       principalId: this.runtime.auth?.session.ownerPrincipalId,
       sessionId: this.runtime.auth?.session.id
     }).catch((error: unknown) => {
@@ -465,7 +521,8 @@ export class CicloInternalHeartbeat {
         reason: result.reason,
         issue_types: policy.issueTypes,
         active_workers: activeCount,
-        max_concurrent: policy.maxConcurrent
+        max_concurrent: policy.maxConcurrent,
+        harness_pool: policy.harnesses.map((profile) => profile.harnessId)
       }
     });
 
@@ -482,16 +539,20 @@ export class CicloInternalHeartbeat {
       data: {
         title: result.after.title,
         issue_type: result.after.issueType,
-        harness_id: policy.harnessId,
+        harness_id: result.selectedHarness,
+        harness_pool: policy.harnesses.map((profile) => profile.harnessId),
         preemptive: true
       }
     });
 
-    const brainDecision = await this.decideReadyWorkLaunch(result.after, policy);
+    const selectedHarness = this.selectPreemptiveHarness(policy, workers, result.after.id);
+    const selectedModel = selectedHarness.model ?? policy.model;
+    const selectedEffort = selectedHarness.effort ?? policy.effort;
+    const brainDecision = await this.decideReadyWorkLaunch(result.after, policy, selectedHarness);
     const prompt = this.readyWorkPrompt(result.after, brainDecision);
     const launchRequest = mergeWorkerLaunchWithConfig(
       {
-        harnessId: policy.harnessId,
+        harnessId: selectedHarness.harnessId,
         loopId: policy.loopId,
         beadId: result.after.id,
         prompt,
@@ -499,8 +560,8 @@ export class CicloInternalHeartbeat {
         dryRun: policy.dryRun,
         isolation: policy.isolation,
         configureMcp: policy.configureMcp,
-        ...(policy.model === undefined ? {} : { model: policy.model }),
-        ...(policy.effort === undefined ? {} : { effort: policy.effort })
+        ...(selectedModel === undefined ? {} : { model: selectedModel }),
+        ...(selectedEffort === undefined ? {} : { effort: selectedEffort })
       },
       this.runtime.projectConfig ?? {}
     );
@@ -517,7 +578,7 @@ export class CicloInternalHeartbeat {
           evidence: ["heartbeat.preemptive_work:launch_failed", ...result.evidence],
           data: {
             reason,
-            harness_id: policy.harnessId,
+            harness_id: selectedHarness.harnessId,
             preemptive: true
           }
         });
@@ -543,6 +604,9 @@ export class CicloInternalHeartbeat {
         title: result.after.title,
         issue_type: result.after.issueType,
         harness_id: launched.harnessId,
+        model: launched.model,
+        effort: launched.effort,
+        harness_pool: policy.harnesses.map((profile) => profile.harnessId),
         launch_mode: launched.launchMode,
         tracking_mode: launched.trackingMode,
         preemptive: true,
@@ -559,7 +623,8 @@ export class CicloInternalHeartbeat {
 
   private async decideReadyWorkLaunch(
     task: BeadsTaskSnapshot,
-    policy: PreemptiveWorkPolicy
+    policy: PreemptiveWorkPolicy,
+    selectedHarness: PreemptiveHarnessProfile
   ): Promise<string | undefined> {
     const brain = this.runtime.openAiBrain;
     if (brain === undefined) return undefined;
@@ -567,7 +632,7 @@ export class CicloInternalHeartbeat {
       purpose: "remote_session_monitoring",
       loopId: policy.loopId,
       beadId: task.id,
-      harnessId: policy.harnessId,
+      harnessId: selectedHarness.harnessId,
       prompt: "Ciclo discovered ready Beads epic or feature work while idle. Decide whether launching a worker is appropriate, what context that worker needs first, what model/effort is suitable, what should be kept in Beads memory, and what operator feedback should be surfaced before risky actions.",
       context: [
         `id=${task.id}`,
@@ -577,9 +642,10 @@ export class CicloInternalHeartbeat {
         `labels=${task.labels.join(",") || "none"}`,
         `description=${compactText(task.description, 600) || "none"}`,
         `acceptance=${compactText(task.acceptanceCriteria, 600) || "none"}`,
-        `configured_harness=${policy.harnessId}`,
-        `configured_model=${policy.model ?? "unspecified"}`,
-        `configured_effort=${policy.effort ?? "unspecified"}`
+        `harness_pool=${policy.harnesses.map((profile) => profile.harnessId).join(",")}`,
+        `selected_harness=${selectedHarness.harnessId}`,
+        `configured_model=${selectedHarness.model ?? policy.model ?? "unspecified"}`,
+        `configured_effort=${selectedHarness.effort ?? policy.effort ?? "unspecified"}`
       ],
       evidence: [`beads.ready.selected:${task.id}`, "heartbeat.preemptive_work:brain_decision"]
     });
@@ -598,8 +664,8 @@ export class CicloInternalHeartbeat {
     });
     this.remember({
       kind: "decision",
-      content: `Ready work ${task.id} selected for ${policy.harnessId}. Brain guidance: ${compactText(decision.text, 1000)}`,
-      tags: ["ready-work", "brain-decision", policy.harnessId],
+      content: `Ready work ${task.id} selected for ${selectedHarness.harnessId}. Brain guidance: ${compactText(decision.text, 1000)}`,
+      tags: ["ready-work", "brain-decision", selectedHarness.harnessId],
       importance: "normal",
       confidence: 0.8,
       loopId: policy.loopId,

@@ -106,11 +106,18 @@ export interface CicloConfigHeartbeatPreemptiveWork {
   readonly enabled?: boolean;
   readonly loopId?: string;
   readonly harnessId?: WorkerHarnessId;
+  readonly harnesses?: readonly CicloConfigPreemptiveHarness[];
   readonly issueTypes?: readonly string[];
   readonly maxConcurrent?: number;
   readonly dryRun?: boolean;
   readonly isolation?: WorkerIsolationMode;
   readonly configureMcp?: boolean;
+  readonly model?: string;
+  readonly effort?: string;
+}
+
+export interface CicloConfigPreemptiveHarness {
+  readonly harnessId: WorkerHarnessId;
   readonly model?: string;
   readonly effort?: string;
 }
@@ -242,6 +249,32 @@ function workerHarnessId(value: string | undefined, path: string): WorkerHarness
   if (value === undefined) return undefined;
   if (value === "claude-code" || value === "codex") return value;
   throw new Error(`${path} must be claude-code or codex`);
+}
+
+function preemptiveHarnessConfig(value: unknown, index: number): CicloConfigPreemptiveHarness {
+  if (typeof value === "string") {
+    const harnessId = workerHarnessId(clean(value), `heartbeat.preemptive_work.harnesses[${index}]`);
+    if (harnessId === undefined) throw new Error(`heartbeat.preemptive_work.harnesses[${index}] must not be empty`);
+    return { harnessId };
+  }
+  const record = objectValue(value, `heartbeat.preemptive_work.harnesses[${index}]`);
+  const harnessId = workerHarnessId(optionalStringAny(record, ["harness_id", "harnessId", "id"]), `heartbeat.preemptive_work.harnesses[${index}].harness_id`);
+  if (harnessId === undefined) throw new Error(`heartbeat.preemptive_work.harnesses[${index}].harness_id is required`);
+  const model = optionalString(record, "model");
+  const effort = optionalString(record, "effort");
+  return {
+    harnessId,
+    ...(model === undefined ? {} : { model }),
+    ...(effort === undefined ? {} : { effort })
+  };
+}
+
+function preemptiveHarnessList(record: Record<string, unknown>): readonly CicloConfigPreemptiveHarness[] | undefined {
+  const value = record.harnesses ?? record.harness_pool ?? record.harnessPool;
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error("heartbeat.preemptive_work.harnesses must be an array");
+  if (value.length === 0) throw new Error("heartbeat.preemptive_work.harnesses must not be empty");
+  return value.map(preemptiveHarnessConfig);
 }
 
 function workerIsolationMode(value: string | undefined, path: string): WorkerIsolationMode | undefined {
@@ -570,6 +603,7 @@ function parseHeartbeat(root: Record<string, unknown>): CicloConfigHeartbeat | u
       enabled: optionalBoolean(preemptiveWork, "enabled"),
       loopId: optionalStringAny(preemptiveWork, ["loop_id", "loopId"]),
       harnessId: workerHarnessId(optionalStringAny(preemptiveWork, ["harness_id", "harnessId"]), "heartbeat.preemptive_work.harness_id"),
+      harnesses: preemptiveHarnessList(preemptiveWork),
       issueTypes: optionalStringList(preemptiveWork, ["issue_types", "issueTypes"], "heartbeat.preemptive_work.issue_types"),
       maxConcurrent: optionalNumberAny(preemptiveWork, ["max_concurrent", "maxConcurrent"]),
       dryRun: optionalBooleanAny(preemptiveWork, ["dry_run", "dryRun"]),

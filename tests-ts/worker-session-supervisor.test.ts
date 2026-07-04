@@ -342,11 +342,18 @@ test("worker launch plan keeps the launched harness MCP client when config narro
   });
 });
 
-test("worker supervisor nudges Herdr tracked workers through herdr agent send", () => {
+test("worker supervisor nudges Herdr tracked workers through pane run so Enter is submitted", () => {
   withHerdrSessionEnv("infra-blocks", () => {
     const root = mkdtempSync(join(tmpdir(), "ciclo-nudge-root-"));
     const launcher = new FakeLauncher();
-    const runner = new FakeCommandRunner({ status: 0, stdout: "", stderr: "" });
+    const runner = new FakeCommandRunner([
+      {
+        status: 0,
+        stdout: JSON.stringify({ result: { agent: { pane_id: "wF:p2", agent_status: "idle" } } }),
+        stderr: ""
+      },
+      { status: 0, stdout: "", stderr: "" }
+    ]);
     const supervisor = new WorkerSessionSupervisor(root, launcher, { now: () => "2026-07-04T00:00:00.000Z" }, undefined, undefined, runner);
     const running = supervisor.launch({
       harnessId: "codex",
@@ -359,14 +366,67 @@ test("worker supervisor nudges Herdr tracked workers through herdr agent send", 
 
     assert.equal(nudged.recoveryAttempts, 1);
     assert.equal(nudged.lastRecoveryAt, "2026-07-04T00:00:00.000Z");
-    assert.deepEqual(runner.runs.at(-1)?.args, [
+    assert.deepEqual(runner.runs.at(0)?.args, [
       "--session",
       "infra-blocks",
       "agent",
-      "send",
-      running.sessionName,
+      "get",
+      running.sessionName
+    ]);
+    assert.deepEqual(runner.runs.at(1)?.args, [
+      "--session",
+      "infra-blocks",
+      "pane",
+      "run",
+      "wF:p2",
       "Report status."
     ]);
+    assert.ok(nudged.evidence.includes("worker.session.nudge.submit:pane_run"));
+  });
+});
+
+test("worker supervisor reads visible Herdr pane and submits pending Codex prompt", () => {
+  withHerdrSessionEnv("infra-blocks", () => {
+    const root = mkdtempSync(join(tmpdir(), "ciclo-pending-prompt-root-"));
+    const launcher = new FakeLauncher();
+    const runner = new FakeCommandRunner([
+      {
+        status: 0,
+        stdout: JSON.stringify({ result: { agent: { pane_id: "wF:p2", agent_status: "idle" } } }),
+        stderr: ""
+      },
+      {
+        status: 0,
+        stdout: "• Previous worker output\n\n› Summarize recent commits\n\n  gpt-5.5 high · ~/repo\n",
+        stderr: ""
+      },
+      { status: 0, stdout: "", stderr: "" }
+    ]);
+    const supervisor = new WorkerSessionSupervisor(root, launcher, { now: () => "2026-07-04T00:00:00.000Z" }, undefined, undefined, runner);
+    const running = supervisor.launch({
+      harnessId: "codex",
+      loopId: "loop-1",
+      beadId: "infra-1",
+      prompt: "Work through Ciclo."
+    });
+
+    const recovered = supervisor.recoverPendingHerdrInputs();
+    const updated = supervisor.get(running.sessionId);
+
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0]?.submitted, true);
+    assert.equal(recovered[0]?.pendingPrompt, "Summarize recent commits");
+    assert.equal(updated?.lastHeartbeatAt, "2026-07-04T00:00:00.000Z");
+    assert.deepEqual(runner.runs.at(2)?.args, [
+      "--session",
+      "infra-blocks",
+      "pane",
+      "run",
+      "wF:p2",
+      ""
+    ]);
+    const events = supervisor.pollEvents(0).events;
+    assert.ok(events.some((event) => event.type === "worker.prompt_submitted" && event.data?.submitted === true));
   });
 });
 

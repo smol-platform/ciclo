@@ -40,6 +40,7 @@ import {
   setPluginEnabled
 } from "./plugin-manager.js";
 import { buildCicloAttachPlan } from "./remote-runner.js";
+import { activeHerdrSessionName } from "./repo-session-name.js";
 import {
   decodeRuntimeSecretEnvBindings,
   resolveRuntimeSecretEnv,
@@ -129,6 +130,7 @@ export interface CicloLaunchPlan {
     readonly sessionName: string;
     readonly paneName: string;
     readonly attach: boolean;
+    readonly reuseFirstPane: boolean;
     readonly attachCommand?: string;
     readonly attachArgs?: readonly string[];
   };
@@ -1125,7 +1127,7 @@ function projectLaunchName(root: string): string {
 }
 
 function herdrSessionName(options: CliLaunchOptions, projectRoot: string): string {
-  return options.herdrSession ?? projectLaunchName(projectRoot);
+  return options.herdrSession ?? activeHerdrSessionName() ?? projectLaunchName(projectRoot);
 }
 
 function herdrPaneName(options: CliLaunchOptions, projectRoot: string): string {
@@ -1144,6 +1146,81 @@ function herdrStartArgs(
 
 function herdrAttachArgs(sessionName: string): readonly string[] {
   return ["session", "attach", sessionName];
+}
+
+export interface HerdrPaneListEntry {
+  readonly paneId: string;
+  readonly workspaceId?: string;
+  readonly label?: string;
+  readonly focused?: boolean;
+}
+
+function stringRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function cleanString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
+}
+
+export function parseHerdrPaneList(stdout: string): readonly HerdrPaneListEntry[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return [];
+  }
+  const root = stringRecord(parsed);
+  const result = stringRecord(root?.result);
+  const panes = Array.isArray(result?.panes) ? result.panes : Array.isArray(root?.panes) ? root.panes : [];
+  return panes.flatMap((item) => {
+    const pane = stringRecord(item);
+    const paneId = cleanString(pane?.pane_id) ?? cleanString(pane?.paneId) ?? cleanString(pane?.id);
+    if (paneId === undefined) return [];
+    const workspaceId = cleanString(pane?.workspace_id) ?? cleanString(pane?.workspaceId);
+    const label = cleanString(pane?.label) ?? cleanString(pane?.name);
+    return [{
+      paneId,
+      ...(workspaceId === undefined ? {} : { workspaceId }),
+      ...(label === undefined ? {} : { label }),
+      ...(typeof pane?.focused === "boolean" ? { focused: pane.focused } : {})
+    }];
+  });
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function shellCommand(command: string, args: readonly string[]): string {
+  return [command, ...args].map(shellQuote).join(" ");
+}
+
+function firstHerdrPane(sessionName: string): HerdrPaneListEntry | undefined {
+  const result = spawnSync("herdr", ["--session", sessionName, "pane", "list"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  if (result.status !== 0 || typeof result.stdout !== "string") return undefined;
+  return parseHerdrPaneList(result.stdout)[0];
+}
+
+function herdrHarnessCommand(plan: CicloLaunchPlan): { command: string; args: readonly string[] } {
+  const separator = plan.args.indexOf("--");
+  if (separator < 0 || separator >= plan.args.length - 1) {
+    return { command: plan.harnessCommand, args: plan.harnessArgs };
+  }
+  const command = plan.args[separator + 1] ?? plan.harnessCommand;
+  return { command, args: plan.args.slice(separator + 2) };
+}
+
+function herdrPaneRunCommand(plan: CicloLaunchPlan): string {
+  const harness = herdrHarnessCommand(plan);
+  return `cd ${shellQuote(plan.projectRoot)} && exec ${shellCommand(harness.command, harness.args)}`;
 }
 
 function launchUserPaneEnv(options: CliLaunchOptions, projectRoot: string): Record<string, string> | undefined {
@@ -1273,6 +1350,7 @@ async function buildLaunchPlan(options: CliLaunchOptions): Promise<CicloLaunchPl
         sessionName,
         paneName,
         attach: options.attach,
+        reuseFirstPane: true,
         ...(options.attach ? { attachCommand: "herdr", attachArgs } : {})
       }
     } : {}),
@@ -1285,13 +1363,61 @@ async function buildLaunchPlan(options: CliLaunchOptions): Promise<CicloLaunchPl
       `ciclo.launch.project_root:${projectRoot}`,
       ...(options.herdr ? [
         `ciclo.launch.herdr_session:${sessionName}`,
-        `ciclo.launch.herdr_pane:${paneName}`
+        `ciclo.launch.herdr_pane:${paneName}`,
+        "ciclo.launch.herdr_pane.reuse_first:true"
       ] : []),
       ...(launchHarnessCommand === harnessCommand ? [] : [`ciclo.launch.harness_command_resolved:${launchHarnessCommand}`]),
       ...effectiveCliPermissionEvidence(options),
       `ciclo.launch.mcp_targets:${install.targets.map((target) => target.client).join(",")}`,
       options.dryRun ? "ciclo.launch.dry_run:true" : "ciclo.launch.dry_run:false"
     ]
+  };
+}
+
+function runHerdrLaunch(plan: CicloLaunchPlan): { readonly status: number; readonly evidence: readonly string[]; readonly data: Record<string, unknown> } {
+  const herdr = plan.herdr;
+  if (herdr === undefined) {
+    const result = spawnSync(plan.command, [...plan.args], {
+      cwd: plan.projectRoot,
+      stdio: "inherit"
+    });
+    return { status: result.status ?? 1, evidence: ["ciclo.launch.terminal:spawned"], data: {} };
+  }
+
+  const firstPane = herdr.reuseFirstPane ? firstHerdrPane(herdr.sessionName) : undefined;
+  if (firstPane !== undefined) {
+    spawnSync("herdr", ["--session", herdr.sessionName, "pane", "rename", firstPane.paneId, herdr.paneName], {
+      cwd: plan.projectRoot,
+      stdio: "ignore"
+    });
+    const command = herdrPaneRunCommand(plan);
+    const result = spawnSync("herdr", ["--session", herdr.sessionName, "pane", "run", firstPane.paneId, command], {
+      cwd: plan.projectRoot,
+      stdio: "inherit"
+    });
+    return {
+      status: result.status ?? 1,
+      evidence: [
+        "ciclo.launch.herdr_pane:reused_first",
+        `ciclo.launch.herdr_pane.id:${firstPane.paneId}`,
+        ...(firstPane.workspaceId === undefined ? [] : [`ciclo.launch.herdr_workspace:${firstPane.workspaceId}`])
+      ],
+      data: {
+        herdr_pane: firstPane.paneId,
+        ...(firstPane.workspaceId === undefined ? {} : { herdr_workspace: firstPane.workspaceId }),
+        herdr_pane_reused: true
+      }
+    };
+  }
+
+  const result = spawnSync(plan.command, [...plan.args], {
+    cwd: plan.projectRoot,
+    stdio: "inherit"
+  });
+  return {
+    status: result.status ?? 1,
+    evidence: ["ciclo.launch.herdr_pane:created_first"],
+    data: { herdr_pane_reused: false }
   };
 }
 
@@ -1327,21 +1453,20 @@ async function runLaunch(args: readonly string[], io: CliIo): Promise<number> {
     });
     if (herdrServerEvidence.includes("ciclo.launch.herdr_server:start_timeout")) return 1;
   }
-  const result = spawnSync(plan.command, [...plan.args], {
-    cwd: plan.projectRoot,
-    stdio: "inherit"
-  });
+  const result = runHerdrLaunch(plan);
   appendCliCommandEvent(plan.projectRoot, {
     command: "launch",
     phase: "launcher_exit",
-    exitCode: result.status ?? 1,
+    exitCode: result.status,
+    evidence: ["cli.command:launch", "cli.command.phase:launcher_exit", ...result.evidence],
     data: {
       client: plan.client,
       launch_mode: plan.launchMode,
-      harness_command: plan.harnessCommand
+      harness_command: plan.harnessCommand,
+      ...result.data
     }
   });
-  if (result.status !== 0 || plan.launchMode !== "herdr" || plan.herdr?.attachCommand === undefined) return result.status ?? 1;
+  if (result.status !== 0 || plan.launchMode !== "herdr" || plan.herdr?.attachCommand === undefined) return result.status;
   const attach = spawnSync(plan.herdr.attachCommand, [...(plan.herdr.attachArgs ?? [])], {
     cwd: plan.projectRoot,
     stdio: "inherit"

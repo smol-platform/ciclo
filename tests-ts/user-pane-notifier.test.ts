@@ -77,13 +77,13 @@ test("user control pane notifier surfaces worker recovery nudges", () => {
     workerSessionId: "worker-1",
     beadId: "infra-123",
     data: {
-      reason: "nudge sent to worker agent"
+      reason: "nudge submitted to worker agent"
     }
   }));
 
   assert.equal(result.delivered, true);
   assert.match(calls[0]?.args.join("\n") ?? "", /Ciclo nudged worker/u);
-  assert.match(calls[0]?.args.join("\n") ?? "", /nudge sent to worker agent/u);
+  assert.match(calls[0]?.args.join("\n") ?? "", /nudge submitted to worker agent/u);
   assert.ok(calls[0]?.args.includes("request"));
 });
 

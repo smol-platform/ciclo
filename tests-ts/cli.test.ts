@@ -12,6 +12,7 @@ import {
   parseBenchmarkOptions,
   parseBenchmarkScenarioDir,
   parseEventsOptions,
+  parseHerdrPaneList,
   parseLaunchOptions,
   parseMcpHttpOptions,
   parseMcpInstallOptions,
@@ -411,8 +412,10 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
   assert.throws(() => parseLaunchOptions(["--client", "wat"]), /--client must be/);
 
   const before = process.cwd();
+  const beforeReuse = process.env.CICLO_REUSE_HERDR_SESSION;
   const tempDir = mkdtempSync(join(tmpdir(), "ciclo-launch-cli-"));
   try {
+    process.env.CICLO_REUSE_HERDR_SESSION = "false";
     process.chdir(tempDir);
     mkdirSync(join(tempDir, ".ciclo"), { recursive: true });
     writeFileSync(join(tempDir, ".ciclo", "config.json"), JSON.stringify({
@@ -578,7 +581,102 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
     assert.match(events, /"launch_mode":"herdr"/);
   } finally {
     process.chdir(before);
+    if (beforeReuse === undefined) delete process.env.CICLO_REUSE_HERDR_SESSION;
+    else process.env.CICLO_REUSE_HERDR_SESSION = beforeReuse;
     rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Herdr pane list parser extracts reusable bootstrap panes", () => {
+  assert.deepEqual(parseHerdrPaneList(JSON.stringify({
+    id: "cli:pane:list",
+    result: {
+      panes: [
+        {
+          pane_id: "w1:p1",
+          workspace_id: "w1",
+          label: "shell",
+          focused: true
+        }
+      ]
+    }
+  })), [
+    {
+      paneId: "w1:p1",
+      workspaceId: "w1",
+      label: "shell",
+      focused: true
+    }
+  ]);
+  assert.deepEqual(parseHerdrPaneList("{not-json"), []);
+});
+
+test("CLI launch reuses first existing Herdr pane instead of starting a second pane", async () => {
+  const before = {
+    PATH: process.env.PATH,
+    HERDR_LOG: process.env.HERDR_LOG,
+    CICLO_REUSE_HERDR_SESSION: process.env.CICLO_REUSE_HERDR_SESSION,
+    HERDR_SESSION_NAME: process.env.HERDR_SESSION_NAME,
+    CICLO_HERDR_SESSION: process.env.CICLO_HERDR_SESSION,
+    HERDR_SESSION: process.env.HERDR_SESSION
+  };
+  const tempDir = mkdtempSync(join(tmpdir(), "ciclo-launch-herdr-reuse-"));
+  try {
+    const binDir = join(tempDir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const herdrLog = join(tempDir, "herdr.log");
+    const herdrBin = join(binDir, "herdr");
+    writeFileSync(herdrBin, [
+      "#!/bin/sh",
+      "printf '%s\\n' \"$*\" >> \"$HERDR_LOG\"",
+      "if [ \"$3\" = \"pane\" ] && [ \"$4\" = \"list\" ]; then",
+      "  printf '%s\\n' '{\"id\":\"cli:pane:list\",\"result\":{\"panes\":[{\"pane_id\":\"w1:p1\",\"workspace_id\":\"w1\",\"label\":\"shell\"}]}}'",
+      "  exit 0",
+      "fi",
+      "exit 0",
+      ""
+    ].join("\n"));
+    chmodSync(herdrBin, 0o700);
+    const codexBin = join(binDir, "codex");
+    writeFileSync(codexBin, "#!/bin/sh\nexit 0\n");
+    chmodSync(codexBin, 0o700);
+
+    process.env.PATH = `${binDir}:${before.PATH ?? ""}`;
+    process.env.HERDR_LOG = herdrLog;
+    process.env.CICLO_REUSE_HERDR_SESSION = "false";
+    delete process.env.HERDR_SESSION_NAME;
+    delete process.env.CICLO_HERDR_SESSION;
+    delete process.env.HERDR_SESSION;
+
+    const launch = captureIo();
+    assert.equal(await main([
+      "node",
+      "ciclo",
+      "launch",
+      "codex",
+      "--project",
+      tempDir,
+      "--no-attach",
+      "--prompt",
+      "Review the repo"
+    ], launch.io), 0);
+
+    const log = readFileSync(herdrLog, "utf8");
+    assert.match(log, /--session ciclo-launch-herdr-reuse-[^ ]+ status server/u);
+    assert.match(log, /--session ciclo-launch-herdr-reuse-[^ ]+ pane list/u);
+    assert.match(log, /--session ciclo-launch-herdr-reuse-[^ ]+ pane rename w1:p1 ciclo-launch-herdr-reuse-/u);
+    assert.match(log, /--session ciclo-launch-herdr-reuse-[^ ]+ pane run w1:p1 /u);
+    assert.doesNotMatch(log, / agent start /u);
+
+    const events = readFileSync(cicloEventLogPath(tempDir), "utf8");
+    assert.match(events, /"herdr_pane_reused":true/u);
+    assert.match(events, /"herdr_pane":"w1:p1"/u);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 

@@ -41,6 +41,7 @@ export interface BeadsWorkClaimRequest {
   readonly selector: BeadsWorkSelector;
   readonly limit?: number;
   readonly harnessId?: HarnessId;
+  readonly harnessForTask?: (task: BeadsTaskSnapshot) => HarnessId;
   readonly principalId?: PrincipalId;
   readonly sessionId?: string;
   readonly remoteSession?: CicloBeadsRemoteMetadata;
@@ -249,7 +250,7 @@ export async function selectAndClaimBeadsWork(
     };
   }
 
-  const selectedHarness = harnessFor(request.selector.loop, request.harnessId);
+  const selectedHarness = request.harnessForTask?.(before) ?? harnessFor(request.selector.loop, request.harnessId);
   const after = await client.claim(before.id);
   const remoteSession = request.remoteSession ?? request.activeOwners?.find((owner) => owner.id === request.sessionId);
   const ownership =

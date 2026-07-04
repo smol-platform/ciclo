@@ -83,6 +83,12 @@ Run the benchmark fixture suite:
 ciclo benchmark --scenario-dir tests/fixtures/benchmarks
 ```
 
+Run the real Herdr launch integration check when Herdr is installed locally:
+
+```bash
+npm run test:herdr
+```
+
 Start MCP over stdio for Claude, Codex, or a generic MCP client:
 
 ```bash
@@ -99,7 +105,7 @@ ciclo config show --project /path/to/project --compact
 ciclo config path --project /path/to/project
 ```
 
-The config stores secret provider references, MCP defaults, heartbeat preemptive work limits, remote runner defaults, cron jobs, memory policy, and optional prompt guidance. It should contain provider ids, secret references, non-secret `vars`, and non-secret guidance text, not raw secret values. The heartbeat preemptive worker cap is `heartbeat.preemptiveWork.maxConcurrent`; when omitted, Ciclo defaults to launching at most 10 active worker sessions. `ciclo mcp install`, MCP runtime startup, spawned worker MCP setup, prompt builders, remote runner planning, cron scheduling, and memory compaction all read this file; explicit CLI or MCP tool arguments override config values.
+The config stores secret provider references, MCP defaults, heartbeat preemptive work limits, remote runner defaults, cron jobs, memory policy, and optional prompt guidance. It should contain provider ids, secret references, non-secret `vars`, and non-secret guidance text, not raw secret values. The heartbeat preemptive worker cap is `heartbeat.preemptiveWork.maxConcurrent`; when omitted, Ciclo defaults to launching at most 10 active worker sessions. Preemptive workers use `heartbeat.preemptiveWork.harnesses` as a pool; the built-in pool spreads work across Codex and Claude Code with `claude-fable-5`, while `heartbeat.preemptiveWork.harnessId` remains the fixed-harness override. `ciclo mcp install`, MCP runtime startup, spawned worker MCP setup, prompt builders, remote runner planning, cron scheduling, and memory compaction all read this file; explicit CLI or MCP tool arguments override config values.
 
 Use [examples/ciclo-config.json](/Users/ztaylor/repos/workspaces/ciclo/examples/ciclo-config.json) as the checked-in reference shape. It shows OpenBao, 1Password CLI, 1Password Connect, and plugin-backed provider aliases, MCP secret bindings for spawned workers, Claude/Codex client defaults, prompt guidance, cron jobs, memory compaction policy, remote runner defaults, WireGuard tunnel fields, and provider-specific Kubernetes, AWS Lambda MicroVM, and Cloudflare runner settings. `ciclo config show --compact` redacts secret references before display.
 
@@ -168,7 +174,7 @@ ciclo launch codex --terminal
 ciclo events --follow
 ```
 
-`ciclo launch` reads `.ciclo/config.json`, writes the generated `.mcp.json` or `.codex/config.toml`, then starts the selected harness as the first pane in a named Herdr session. Secret-backed MCP entries are written as `ciclo secret exec` runtime wrappers that carry provider references, not resolved secret values; the wrapper resolves the secret immediately before starting the intended child process. The default Herdr session and pane name are the project directory name, so `ciclo launch codex` in this repository starts session `ciclo` with pane `ciclo` and then attaches to it. Use `--session`, `--pane-name`, or `--no-attach` to control the Herdr wrapper, and use `--terminal` when you explicitly want the harness process in the current terminal instead. Use `--project`, `--server-name`, `--mcp-command`, `--harness-command`, `--model`, `--effort`, `--permission-mode`, `--approval-policy`, `--sandbox`, `--prompt`, and `--extra-arg` to override one launch.
+`ciclo launch` reads `.ciclo/config.json`, writes the generated `.mcp.json` or `.codex/config.toml`, then starts the selected harness in a named Herdr session. If that session already has a bootstrap pane, Ciclo renames and reuses the first pane instead of creating a second pane or workspace; if the session has no panes yet, Ciclo creates the first pane with `herdr agent start`. Secret-backed MCP entries are written as `ciclo secret exec` runtime wrappers that carry provider references, not resolved secret values; the wrapper resolves the secret immediately before starting the intended child process. The default Herdr session and pane name are the project directory name, so `ciclo launch codex` in this repository starts session `ciclo` with pane `ciclo` and then attaches to it. Use `--session`, `--pane-name`, or `--no-attach` to control the Herdr wrapper, and use `--terminal` when you explicitly want the harness process in the current terminal instead. Use `--project`, `--server-name`, `--mcp-command`, `--harness-command`, `--model`, `--effort`, `--permission-mode`, `--approval-policy`, `--sandbox`, `--prompt`, and `--extra-arg` to override one launch.
 
 Use `ciclo events --follow` from a terminal to follow the same persisted project event stream that Ciclo MCP writes to `.ciclo/events.jsonl`. The stream includes worker state changes, heartbeat monologue entries, OpenAI brain decisions, operator questions, validation/PR events, and other redacted runtime events. Use `--cursor <n>` to resume after a known cursor, `--limit <n>` to bound each poll, and `--json` or `--compact` for machine-readable output.
 

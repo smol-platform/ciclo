@@ -14,6 +14,7 @@ export type CicloEventType =
   | "worker.listed"
   | "worker.stalled"
   | "worker.nudged"
+  | "worker.prompt_submitted"
   | "worker.capacity_released"
   | "bead.claimed"
   | "bead.closed"

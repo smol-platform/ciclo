@@ -116,7 +116,10 @@
     "preemptiveWork": {
       "enabled": true,
       "loopId": "preemptive-beads",
-      "harnessId": "codex",
+      "harnesses": [
+        { "harnessId": "codex" },
+        { "harnessId": "claude-code", "model": "claude-fable-5", "effort": "high" }
+      ],
       "issueTypes": ["epic", "feature"],
       "maxConcurrent": 10,
       "isolation": "worktree",

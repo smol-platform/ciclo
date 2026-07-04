@@ -221,6 +221,15 @@ export interface WorkerSessionMetrics {
   };
 }
 
+export interface WorkerPromptSubmitResult {
+  readonly sessionId: string;
+  readonly submitted: boolean;
+  readonly reason: string;
+  readonly paneId?: string;
+  readonly pendingPrompt?: string;
+  readonly evidence: readonly string[];
+}
+
 export interface WorkerProcessHandle {
   readonly pid?: number;
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
@@ -593,6 +602,70 @@ function herdrWorkspacePaneArgs(args: readonly string[], workspaceId: string): r
     workspaceId,
     ...args.slice(cwdIndex)
   ];
+}
+
+function stringField(value: unknown, ...keys: readonly string[]): string | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    const field = record[key];
+    if (typeof field === "string" && field.trim().length > 0) return field.trim();
+  }
+  return undefined;
+}
+
+function parseHerdrAgentObject(stdout: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(stdout) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const root = parsed as Record<string, unknown>;
+    const result = root.result;
+    if (result !== null && typeof result === "object" && !Array.isArray(result)) {
+      const agent = (result as Record<string, unknown>).agent;
+      if (agent !== null && typeof agent === "object" && !Array.isArray(agent)) return agent as Record<string, unknown>;
+      return result as Record<string, unknown>;
+    }
+    const agent = root.agent;
+    if (agent !== null && typeof agent === "object" && !Array.isArray(agent)) return agent as Record<string, unknown>;
+    return root;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseHerdrAgentPaneId(stdout: string): string | undefined {
+  const agent = parseHerdrAgentObject(stdout);
+  return stringField(agent, "pane_id", "paneId", "pane", "terminal_id", "terminalId", "terminal");
+}
+
+function parseHerdrAgentStatus(stdout: string): string | undefined {
+  const agent = parseHerdrAgentObject(stdout);
+  return stringField(agent, "agent_status", "agentStatus", "status", "state");
+}
+
+function pendingAgentPromptText(visibleText: string, harnessId: WorkerHarnessId): string | undefined {
+  const lines = visibleText.split(/\r?\n/u).map((line) => line.trimEnd());
+  const search = lines.slice(Math.max(0, lines.length - 12));
+  const promptPatterns = harnessId === "codex"
+    ? [/^\s*›\s+(?<text>.+)$/u]
+    : [/^\s*(?:›|>)\s+(?<text>.+)$/u];
+  for (let index = search.length - 1; index >= 0; index -= 1) {
+    const line = search[index]?.trimEnd() ?? "";
+    for (const pattern of promptPatterns) {
+      const text = line.match(pattern)?.groups?.text?.trim();
+      if (text !== undefined && text.length > 0) return text;
+    }
+  }
+  return undefined;
+}
+
+function herdrSessionArgs(session: WorkerSessionRecord): readonly string[] {
+  return session.agentRef?.herdrSession === undefined ? [] : ["--session", session.agentRef.herdrSession];
+}
+
+function compactReason(value: string, maxLength = 300): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 1)}...`;
 }
 
 function launchMode(herdrSession: string | undefined): WorkerLaunchMode {
@@ -1023,6 +1096,57 @@ export class WorkerSessionSupervisor {
     return loopMatches && beadMatches;
   }
 
+  private resolveHerdrPane(session: WorkerSessionRecord): {
+    readonly paneId?: string;
+    readonly status?: string;
+    readonly reason?: string;
+    readonly evidence: readonly string[];
+  } {
+    const agentTarget = session.agentRef?.target ?? session.agentRef?.id;
+    if (session.agentRef?.kind !== "herdr_agent" || agentTarget === undefined) {
+      return { reason: "worker is not a Herdr agent", evidence: ["worker.session.herdr_pane:unavailable"] };
+    }
+    const result = this.commandRunner.run("herdr", [
+      ...herdrSessionArgs(session),
+      "agent",
+      "get",
+      agentTarget
+    ], { cwd: session.cwd });
+    if (result.status !== 0) {
+      return {
+        reason: compactReason(result.stderr || result.stdout || "herdr agent get failed"),
+        evidence: ["worker.session.herdr_pane:resolve_failed"]
+      };
+    }
+    const paneId = parseHerdrAgentPaneId(result.stdout);
+    if (paneId === undefined) {
+      return {
+        reason: "herdr agent get did not return a pane id",
+        evidence: ["worker.session.herdr_pane:missing_pane_id"]
+      };
+    }
+    const status = parseHerdrAgentStatus(result.stdout);
+    return {
+      paneId,
+      status,
+      evidence: [
+        "worker.session.herdr_pane:resolved",
+        `worker.session.herdr_pane.id:${paneId}`,
+        ...(status === undefined ? [] : [`worker.session.herdr_agent.status:${status}`])
+      ]
+    };
+  }
+
+  private submitHerdrPaneText(session: WorkerSessionRecord, paneId: string, text: string): WorkerCommandRunResult {
+    return this.commandRunner.run("herdr", [
+      ...herdrSessionArgs(session),
+      "pane",
+      "run",
+      paneId,
+      text
+    ], { cwd: session.cwd });
+  }
+
   private refreshDetachedAgent(session: WorkerSessionRecord): WorkerSessionRecord {
     if (session.trackingMode !== "detached_agent" || session.agentRef?.kind !== "claude_background_session") return session;
     if (isTerminalState(session.state)) return session;
@@ -1303,25 +1427,18 @@ export class WorkerSessionSupervisor {
     const now = this.clock.now();
     const attempts = (session.recoveryAttempts ?? 0) + 1;
     const agentTarget = session.agentRef?.target ?? session.agentRef?.id;
-    const canSend = session.agentRef?.kind === "herdr_agent" && agentTarget !== undefined;
-    const args = canSend
-      ? [
-          ...(session.agentRef?.herdrSession === undefined ? [] : ["--session", session.agentRef.herdrSession]),
-          "agent",
-          "send",
-          agentTarget,
-          message
-        ]
-      : [];
-    const result = canSend
-      ? this.commandRunner.run("herdr", args, { cwd: session.cwd })
-      : { status: 1, stdout: "", stderr: "worker is not a Herdr agent" };
+    const pane = this.resolveHerdrPane(session);
+    const result = pane.paneId === undefined
+      ? { status: 1, stdout: "", stderr: pane.reason ?? "worker pane could not be resolved" }
+      : this.submitHerdrPaneText(session, pane.paneId, message);
     const delivered = result.status === 0;
     const reason = delivered
-      ? "nudge sent to worker agent"
-      : (result.stderr || result.stdout || "worker nudge could not be delivered").trim();
+      ? "nudge submitted to worker agent"
+      : compactReason(result.stderr || result.stdout || "worker nudge could not be submitted");
     const nudgeEvidence = [
       delivered ? "worker.session.nudge:delivered" : "worker.session.nudge:failed",
+      delivered ? "worker.session.nudge.submit:pane_run" : "worker.session.nudge.submit:failed",
+      ...pane.evidence,
       `worker.session.recovery_attempts:${attempts}`,
       ...evidence
     ];
@@ -1346,12 +1463,85 @@ export class WorkerSessionSupervisor {
         delivered,
         reason,
         target: agentTarget,
+        pane_id: pane.paneId,
         herdr_session: updated.agentRef?.herdrSession,
         recovery_attempts: attempts,
         message
       }
     });
     return updated;
+  }
+
+  recoverPendingHerdrInputs(): readonly WorkerPromptSubmitResult[] {
+    const results: WorkerPromptSubmitResult[] = [];
+    for (const session of this.sessions.values()) {
+      if (!isActiveState(session.state) || session.agentRef?.kind !== "herdr_agent") continue;
+      const pane = this.resolveHerdrPane(session);
+      if (pane.paneId === undefined) continue;
+      const agentTarget = session.agentRef.target ?? session.agentRef.id;
+      const read = this.commandRunner.run("herdr", [
+        ...herdrSessionArgs(session),
+        "agent",
+        "read",
+        agentTarget,
+        "--source",
+        "visible",
+        "--lines",
+        "40",
+        "--format",
+        "text"
+      ], { cwd: session.cwd });
+      if (read.status !== 0) continue;
+      const pendingPrompt = pendingAgentPromptText(read.stdout, session.harnessId);
+      if (pendingPrompt === undefined) continue;
+      const submit = this.submitHerdrPaneText(session, pane.paneId, "");
+      const submitted = submit.status === 0;
+      const now = this.clock.now();
+      const submitEvidence = [
+        submitted ? "worker.session.pending_prompt:submitted" : "worker.session.pending_prompt:submit_failed",
+        "worker.session.pending_prompt:detected",
+        `worker.session.pending_prompt.characters:${pendingPrompt.length}`,
+        ...pane.evidence
+      ];
+      const updated: WorkerSessionRecord = {
+        ...session,
+        lastHeartbeatAt: submitted ? now : session.lastHeartbeatAt,
+        lastRecoveryAt: submitted ? now : session.lastRecoveryAt,
+        evidence: [...session.evidence, ...submitEvidence]
+      };
+      this.sessions.set(session.sessionId, updated);
+      const reason = submitted
+        ? "submitted visible pending worker prompt"
+        : compactReason(submit.stderr || submit.stdout || "pending prompt submit failed");
+      this.events.append({
+        type: "worker.prompt_submitted",
+        at: now,
+        workerSessionId: updated.sessionId,
+        loopId: updated.loopId,
+        beadId: updated.beadId,
+        state: updated.state,
+        evidence: submitEvidence,
+        data: {
+          harness_id: updated.harnessId,
+          session_name: updated.sessionName,
+          submitted,
+          reason,
+          target: agentTarget,
+          pane_id: pane.paneId,
+          herdr_session: updated.agentRef?.herdrSession,
+          pending_prompt_characters: pendingPrompt.length
+        }
+      });
+      results.push({
+        sessionId: updated.sessionId,
+        submitted,
+        reason,
+        paneId: pane.paneId,
+        pendingPrompt,
+        evidence: submitEvidence
+      });
+    }
+    return results;
   }
 
   resumeAfterOperator(match: WorkerSessionMatch, evidence: readonly string[] = []): readonly WorkerSessionRecord[] {

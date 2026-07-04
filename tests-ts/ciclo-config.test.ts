@@ -90,6 +90,14 @@ test("loads project config for secrets MCP and remote defaults", () => {
           enabled: true
         }
       ]
+    },
+    heartbeat: {
+      preemptive_work: {
+        harnesses: [
+          "codex",
+          { harness_id: "claude-code", model: "claude-fable-5", effort: "high" }
+        ]
+      }
     }
   }));
 
@@ -112,6 +120,10 @@ test("loads project config for secrets MCP and remote defaults", () => {
   assert.equal(config.remote?.kubernetes?.storageSize, "20Gi");
   assert.equal(config.prompts?.systemInjections?.[0]?.id, "project-goals");
   assert.equal(config.prompts?.systemInjections?.[1]?.scope, "brain");
+  assert.deepEqual(config.heartbeat?.preemptiveWork?.harnesses, [
+    { harnessId: "codex" },
+    { harnessId: "claude-code", model: "claude-fable-5", effort: "high" }
+  ]);
 
   const redacted = redactedCicloProjectConfig(config);
   assert.equal(redacted.mcp?.secretBindings?.[0]?.ref, "[redacted secret ref]");
@@ -428,6 +440,8 @@ test("checked-in example config parses and redacts secret references", () => {
   assert.equal(config.remote?.awsLambda?.microVmName, "ciclo-project-runner");
   assert.equal(config.remote?.cloudflare?.workerName, "ciclo-project-runner");
   assert.equal(config.prompts?.systemInjections?.[0]?.id, "project-goals");
+  assert.equal(config.heartbeat?.preemptiveWork?.harnesses?.[1]?.harnessId, "claude-code");
+  assert.equal(config.heartbeat?.preemptiveWork?.harnesses?.[1]?.model, "claude-fable-5");
 
   const redacted = JSON.stringify(redactedCicloProjectConfig(config));
   assert.doesNotMatch(redacted, /op:\/\/Ciclo\/API\/token/);

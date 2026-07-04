@@ -40,11 +40,15 @@ class FakeLauncher implements WorkerProcessLauncher {
 
 class FakeCommandRunner implements WorkerCommandRunner {
   readonly runs: { command: string; args: readonly string[]; cwd?: string }[] = [];
+  private index = 0;
 
-  constructor(private readonly result: WorkerCommandRunResult = { status: 0, stdout: "", stderr: "" }) {}
+  constructor(private readonly result: WorkerCommandRunResult | WorkerCommandRunResult[] = { status: 0, stdout: "", stderr: "" }) {}
 
   run(command: string, args: readonly string[], options: { cwd?: string } = {}): WorkerCommandRunResult {
     this.runs.push({ command, args, cwd: options.cwd });
+    if (Array.isArray(this.result)) {
+      return this.result[Math.min(this.index++, this.result.length - 1)]!;
+    }
     return this.result;
   }
 }
@@ -103,7 +107,24 @@ test("internal heartbeat marks stalled workers and asks OpenAI brain for follow-
   let now = "2026-07-02T00:00:00.000Z";
   const events = new CicloEventStore(() => now);
   const root = mkdtempSync(join(tmpdir(), "ciclo-heartbeat-stall-"));
-  const commandRunner = new FakeCommandRunner();
+  const commandRunner = new FakeCommandRunner([
+    {
+      status: 0,
+      stdout: JSON.stringify({ result: { agent: { pane_id: "wA:p2", agent_status: "idle" } } }),
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: "• Worker transcript\n\n›\n",
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: JSON.stringify({ result: { agent: { pane_id: "wA:p2", agent_status: "idle" } } }),
+      stderr: ""
+    },
+    { status: 0, stdout: "", stderr: "" }
+  ]);
   const memory = new CicloMemoryStore({ projectRoot: root, now: () => now, eventSink: events });
   const supervisor = new WorkerSessionSupervisor("/repo", new FakeLauncher(), { now: () => now }, events, undefined, commandRunner);
   const brain = new FakeBrain();
@@ -164,7 +185,8 @@ test("internal heartbeat marks stalled workers and asks OpenAI brain for follow-
   assert.ok(poll.events.some((event) => event.type === "worker.nudged" && event.data?.delivered === true));
   assert.ok(poll.events.some((event) => event.type === "memory.recorded" && event.data?.kind === "decision"));
   assert.equal(commandRunner.runs.at(-1)?.command, "herdr");
-  assert.ok(commandRunner.runs.at(-1)?.args.includes("send"));
+  assert.ok(commandRunner.runs.at(-1)?.args.includes("run"));
+  assert.ok(commandRunner.runs.at(-1)?.args.includes("wA:p2"));
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -247,6 +269,61 @@ test("internal heartbeat claims ready epic or feature work and launches an isola
   assert.ok(poll.events.some((event) => event.type === "work.started" && event.beadId === "ciclo-feature"));
   assert.ok(poll.events.some((event) => event.type === "worker.state_change" && event.beadId === "ciclo-feature"));
   assert.ok(poll.events.some((event) => event.type === "heartbeat.tick" && event.data?.idle_workers_launched === 1));
+});
+
+test("internal heartbeat default preemptive pool can route ready work to Claude Fable", async () => {
+  const now = "2026-07-02T01:30:00.000Z";
+  const events = new CicloEventStore(() => now);
+  const supervisor = new WorkerSessionSupervisor("/repo", new FakeLauncher(), { now: () => now }, events);
+  const brain = new FakeBrain();
+  const beads = new FakeBeadsClient([
+    {
+      id: "ciclo-feature",
+      title: "Build a feature with the default harness pool",
+      status: "open",
+      priority: 1,
+      issueType: "feature",
+      description: "",
+      acceptanceCriteria: "",
+      labels: [],
+      dependencies: [],
+      externalRefs: []
+    }
+  ]);
+  const heartbeat = new CicloInternalHeartbeat(
+    {
+      auth: {
+        session: {
+          id: "mcp-session",
+          projectRoot: "/repo",
+          ownerPrincipalId: "user-1"
+        }
+      },
+      projectConfig: {
+        heartbeat: {
+          preemptiveWork: {
+            dryRun: true
+          }
+        }
+      },
+      workerSupervisor: supervisor,
+      beadsClient: beads,
+      openAiBrain: brain,
+      eventStore: events
+    },
+    { now: () => now }
+  );
+
+  const result = await heartbeat.tick();
+  const launched = result.idleWorkersLaunched[0];
+
+  assert.equal(launched?.harnessId, "claude-code");
+  assert.equal(launched?.model, "claude-fable-5");
+  assert.ok((brain.inputs[0]?.context ?? []).includes("harness_pool=codex,claude-code"));
+  assert.ok((brain.inputs[0]?.context ?? []).includes("selected_harness=claude-code"));
+  assert.deepEqual(beads.claims, ["ciclo-feature"]);
+  assert.match(beads.notes[0]?.message ?? "", /harness=claude-code/u);
+  assert.ok(events.poll(0).events.some((event) => event.type === "bead.claimed" && event.data?.harness_id === "claude-code"));
 });
 
 test("internal heartbeat does not launch preemptive work when worker capacity is full", async () => {
