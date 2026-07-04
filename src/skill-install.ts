@@ -173,7 +173,7 @@ When operating as a worker, request secrets by reference:
 
 1. Call \`ciclo_list_secret_providers\`.
 2. Call \`ciclo_request_secret\` with \`provider_id\`, \`secret_ref\`, \`reason\`, and task scope (\`loop_id\`, \`bead_id\`, \`worker_session_id\`).
-3. Prefer provider references such as OpenBao paths/fields or 1Password \`op://\` references; do not ask the operator to paste values.
+3. Prefer provider references such as OpenBao paths/fields, 1Password CLI \`op://\` references, or 1Password Connect \`op-connect://vault-uuid/item-uuid/field\` references; do not ask the operator to paste values.
 4. Use the returned value only for the command that needs it, then avoid echoing it in validation output, Beads notes, feedback, tracker sync, or transcripts.
 
 When the generated Ciclo MCP server needs a secret as an environment variable, use \`mcp_secret_env\` on \`ciclo_launch_worker_session\` instead of \`mcp_env\` or prompt text. When the worker shell needs the credential, use \`worker_secret_env\` instead. Each binding should include \`env_name\`, \`provider_id\`, \`secret_ref\`, optional \`field\`, optional \`format\`, and \`reason\`. Ciclo resolves the secret through the configured provider only inside the runtime wrapper for the intended process and redacts it from launch responses, worker-session listings, audit records, and events. The caller must be authorized for \`secret.read\`.
@@ -341,7 +341,7 @@ ciclo config init --project "$(pwd)"
 ciclo config show --project "$(pwd)" --compact
 \`\`\`
 
-The file can define \`secrets.providers\`, \`mcp.clients\`, \`mcp.serverName\`, \`mcp.command\`, \`mcp.vars\`, \`mcp.additionalServers\`, \`mcp.secretBindings\`, \`mcp.workerSecretBindings\`, \`mcp.claudeChannel\`, \`prompts.systemInjections\`, and \`remote\` defaults. \`ciclo mcp install\`, MCP startup, spawned workers, prompt builders, and remote runner planning read it. Explicit tool payload fields override config defaults. Use \`examples/ciclo-config.json\` in the Ciclo repository as the reference shape. It includes OpenBao, 1Password, and plugin-backed providers, additional third-party MCP servers, worker MCP secret bindings, prompt guidance, WireGuard tunnel fields, and Kubernetes/AWS Lambda MicroVM/Cloudflare runner blocks.
+The file can define \`secrets.providers\`, \`mcp.clients\`, \`mcp.serverName\`, \`mcp.command\`, \`mcp.vars\`, \`mcp.additionalServers\`, \`mcp.secretBindings\`, \`mcp.workerSecretBindings\`, \`mcp.claudeChannel\`, \`prompts.systemInjections\`, and \`remote\` defaults. \`ciclo mcp install\`, MCP startup, spawned workers, prompt builders, and remote runner planning read it. Explicit tool payload fields override config defaults. Use \`examples/ciclo-config.json\` in the Ciclo repository as the reference shape. It includes OpenBao, 1Password CLI, 1Password Connect, and plugin-backed providers, additional third-party MCP servers, worker MCP secret bindings, prompt guidance, WireGuard tunnel fields, and Kubernetes/AWS Lambda MicroVM/Cloudflare runner blocks.
 
 Project-level additional MCP servers are configured under \`mcp.additionalServers\`:
 
@@ -495,7 +495,7 @@ Heartbeat while working:
 
 ## Secret Request Example
 
-Use this when a task has an approved secret reference. Do not ask the operator to paste the secret value. Prefer provider references such as OpenBao paths/fields or 1Password \`op://\` references.
+Use this when a task has an approved secret reference. Do not ask the operator to paste the secret value. Prefer provider references such as OpenBao paths/fields, 1Password CLI \`op://\` references, or 1Password Connect \`op-connect://vault-uuid/item-uuid/field\` references.
 
 \`\`\`json
 {
@@ -752,7 +752,7 @@ Only trust plugins after the operator accepts the package source and behavior. E
 - Use \`ciclo_report_feedback\` for findings and warnings.
 - Use \`ciclo_sync_remote_trackers\` only when Beads-native tracker sync is configured and authorized.
 - Use \`ciclo_list_secret_providers\` and \`ciclo_request_secret\` for configured secret references; ask the operator only when the provider, reference, or authorization is missing.
-- Prefer provider references such as OpenBao paths/fields or 1Password \`op://\` references; never paste secret values into Beads, tracker sync, feedback, progress notes, or transcripts.
+- Prefer provider references such as OpenBao paths/fields, 1Password CLI \`op://\` references, or 1Password Connect \`op-connect://vault-uuid/item-uuid/field\` references; never paste secret values into Beads, tracker sync, feedback, progress notes, or transcripts.
 - Use \`mcp_secret_env\` on \`ciclo_launch_worker_session\` when the generated Ciclo MCP server needs a secret environment variable; use \`worker_secret_env\` when the launched agent shell needs credentials; use optional \`format\` such as \`Bearer \${secret}\` only when the target variable needs a wrapper string; do not put secret values in \`mcp_env\`, prompts, or notes.
 - For remote work, use \`ciclo_attach_plan\`, \`ciclo_launch_remote_runner\`, and remote session registration/heartbeat/detach tools; remote observation must go through Herdr remote attach over SSH. Review \`image_resolution\`, \`repo_bootstrap\`, \`preflight\`, and WireGuard evidence before launch. Keep remote MCP setup enabled unless the remote image already installs Ciclo MCP; \`mcp_config\` includes generated \`.mcp.json\` and/or \`.codex/config.toml\` artifacts for the remote repo, including configured additional MCP servers.
 - Ask the operator before destructive commands, deploys, permission prompts, or scope expansion.

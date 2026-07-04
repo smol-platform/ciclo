@@ -14,6 +14,14 @@
         "command": "op"
       },
       {
+        "id": "team-1password-connect",
+        "kind": "onepassword-connect",
+        "name": "Team 1Password Connect",
+        "endpoint": "https://connect.example.invalid",
+        "tokenEnv": "OP_CONNECT_TOKEN",
+        "defaultVaultId": "replace-with-vault-uuid"
+      },
+      {
         "id": "team-keychain",
         "kind": "keychain",
         "name": "Team Keychain Plugin",
@@ -64,6 +72,12 @@
         "ref": "keychain://ciclo/example-api-token",
         "format": "Bearer ${secret}",
         "reason": "Example plugin-backed secret injected into the generated Ciclo MCP server config."
+      },
+      {
+        "name": "CONNECT_API_TOKEN",
+        "providerId": "team-1password-connect",
+        "ref": "op-connect://replace-with-vault-uuid/replace-with-item-uuid/api_token",
+        "reason": "Example 1Password Connect secret injected into the generated Ciclo MCP server config."
       }
     ],
     "workerSecretBindings": [

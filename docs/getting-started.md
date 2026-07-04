@@ -173,7 +173,7 @@ Use [examples/ciclo-config.json](/Users/ztaylor/repos/workspaces/ciclo/examples/
 
 The config supports:
 
-- `secrets.providers`: OpenBao and 1Password provider ids, display names, and CLI commands.
+- `secrets.providers`: OpenBao, 1Password CLI, 1Password Connect, and plugin-backed provider ids plus their non-secret configuration.
 - `mcp`: default clients, server name, Ciclo command, non-secret `vars`, secret provider bindings for Ciclo MCP server subprocesses, `workerSecretBindings` for spawned worker shells, and Claude channel mode for generated MCP configs.
 - `remote`: default runner kind, image resolver or static image, repository URL/path, repo bootstrap/devenv behavior, SSH user, WireGuard settings, provider-specific Kubernetes/AWS Lambda MicroVM/Cloudflare settings, and non-secret `vars`.
 - `prompts.systemInjections`: non-secret project goals or helper guidance that Ciclo appends to matching prompt surfaces after its built-in ground rules.
@@ -259,6 +259,7 @@ Built-in providers:
 
 - `openbao`: calls `bao kv get -field=<field> <secret_ref>` and requires `field`.
 - `onepassword`: calls `op read <secret_ref>`, such as `op://Ciclo/API/token`.
+- `onepassword-connect`: calls a configured 1Password Connect Server over HTTPS. Configure `endpoint` or `endpointEnv`, configure `tokenEnv` for the Connect access token, and use refs like `op-connect://vault-uuid/item-uuid/api_token`. The token value must live in the named environment variable, not in `.ciclo/config.json`.
 
 Example request:
 
@@ -271,6 +272,33 @@ Example request:
   "worker_session_id": "worker-1",
   "reason": "deploy validation needs the API token",
   "dry_run": false
+}
+```
+
+1Password Connect provider config:
+
+```json
+{
+  "secrets": {
+    "providers": [
+      {
+        "id": "team-1password-connect",
+        "kind": "onepassword-connect",
+        "endpoint": "https://connect.example.internal",
+        "tokenEnv": "OP_CONNECT_TOKEN",
+        "defaultVaultId": "vault-uuid"
+      }
+    ]
+  },
+  "mcp": {
+    "secretBindings": [
+      {
+        "name": "API_TOKEN",
+        "providerId": "team-1password-connect",
+        "ref": "op-connect://vault-uuid/item-uuid/api_token"
+      }
+    ]
+  }
 }
 ```
 

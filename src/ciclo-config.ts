@@ -13,6 +13,7 @@ import type {
 import {
   createDefaultSecretProviderRegistry,
   OnePasswordCliSecretProvider,
+  OnePasswordConnectSecretProvider,
   OpenBaoCliSecretProvider,
   SecretProviderRegistry,
   secretRefHash,
@@ -27,6 +28,10 @@ export interface CicloConfigSecretProvider {
   readonly kind: "openbao" | "onepassword" | string;
   readonly name?: string;
   readonly command?: string;
+  readonly endpoint?: string;
+  readonly endpointEnv?: string;
+  readonly tokenEnv?: string;
+  readonly defaultVaultId?: string;
   readonly pluginProviderId?: string;
 }
 
@@ -195,12 +200,20 @@ function secretProviderConfig(value: unknown, index: number): CicloConfigSecretP
   if (kind === undefined) throw new Error(`secrets.providers[${index}].kind is required`);
   const name = optionalString(record, "name");
   const command = optionalString(record, "command");
+  const endpoint = optionalString(record, "endpoint");
+  const endpointEnv = optionalStringAny(record, ["endpoint_env", "endpointEnv"]);
+  const tokenEnv = optionalStringAny(record, ["token_env", "tokenEnv"]);
+  const defaultVaultId = optionalStringAny(record, ["default_vault_id", "defaultVaultId"]);
   const pluginProviderId = optionalStringAny(record, ["plugin_provider_id", "pluginProviderId"]);
   return {
     id,
     kind,
     ...(name === undefined ? {} : { name }),
     ...(command === undefined ? {} : { command }),
+    ...(endpoint === undefined ? {} : { endpoint }),
+    ...(endpointEnv === undefined ? {} : { endpointEnv }),
+    ...(tokenEnv === undefined ? {} : { tokenEnv }),
+    ...(defaultVaultId === undefined ? {} : { defaultVaultId }),
     ...(pluginProviderId === undefined ? {} : { pluginProviderId })
   };
 }
@@ -600,6 +613,16 @@ function providerFromConfig(
 ): SecretProviderPlugin | undefined {
   if (provider.kind === "openbao") return new OpenBaoCliSecretProvider({ id: provider.id, name: provider.name, command: provider.command });
   if (provider.kind === "onepassword") return new OnePasswordCliSecretProvider({ id: provider.id, name: provider.name, command: provider.command });
+  if (provider.kind === "onepassword-connect") {
+    return new OnePasswordConnectSecretProvider({
+      id: provider.id,
+      name: provider.name,
+      endpoint: provider.endpoint,
+      endpointEnv: provider.endpointEnv,
+      tokenEnv: provider.tokenEnv,
+      defaultVaultId: provider.defaultVaultId
+    });
+  }
   if (provider.pluginProviderId !== undefined && provider.pluginProviderId !== provider.id) {
     return new ConfiguredPluginSecretProviderAlias(provider, registry);
   }
@@ -791,7 +814,8 @@ export const sampleCicloProjectConfig: CicloProjectConfig = {
   secrets: {
     providers: [
       { id: "openbao", kind: "openbao", command: "bao", name: "OpenBao CLI" },
-      { id: "onepassword", kind: "onepassword", command: "op", name: "1Password CLI" }
+      { id: "onepassword", kind: "onepassword", command: "op", name: "1Password CLI" },
+      { id: "onepassword-connect", kind: "onepassword-connect", endpointEnv: "OP_CONNECT_HOST", tokenEnv: "OP_CONNECT_TOKEN", name: "1Password Connect Server" }
     ]
   },
   mcp: {
@@ -806,7 +830,10 @@ export const sampleCicloProjectConfig: CicloProjectConfig = {
         env: {}
       }
     },
-    secretBindings: [{ name: "EXAMPLE_API_TOKEN", providerId: "onepassword", ref: "op://Ciclo/API/token", format: "Bearer ${secret}", reason: "example reference for spawned MCP tools" }],
+    secretBindings: [
+      { name: "EXAMPLE_API_TOKEN", providerId: "onepassword", ref: "op://Ciclo/API/token", format: "Bearer ${secret}", reason: "example reference for spawned MCP tools" },
+      { name: "EXAMPLE_CONNECT_TOKEN", providerId: "onepassword-connect", ref: "op-connect://vault-uuid/item-uuid/api_token", reason: "example 1Password Connect reference for spawned MCP tools" }
+    ],
     workerSecretBindings: [{ name: "EXAMPLE_GITHUB_TOKEN", providerId: "onepassword", ref: "op://Ciclo/GitHub/token", reason: "example reference for spawned worker shell tools" }],
     claudeChannel: false
   },

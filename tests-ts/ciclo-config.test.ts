@@ -23,7 +23,15 @@ test("loads project config for secrets MCP and remote defaults", () => {
   const config = parseCicloProjectConfigText(JSON.stringify({
     secrets: {
       providers: [
-        { id: "corp-bao", kind: "openbao", command: "bao-corp", name: "Corp OpenBao" }
+        { id: "corp-bao", kind: "openbao", command: "bao-corp", name: "Corp OpenBao" },
+        {
+          id: "corp-connect",
+          kind: "onepassword-connect",
+          name: "Corp Connect",
+          endpoint: "https://connect.example.test",
+          token_env: "CORP_OP_CONNECT_TOKEN",
+          default_vault_id: "vault-default"
+        }
       ]
     },
     mcp: {
@@ -86,6 +94,9 @@ test("loads project config for secrets MCP and remote defaults", () => {
   }));
 
   assert.equal(config.secrets?.providers?.[0]?.id, "corp-bao");
+  assert.equal(config.secrets?.providers?.[1]?.kind, "onepassword-connect");
+  assert.equal(config.secrets?.providers?.[1]?.tokenEnv, "CORP_OP_CONNECT_TOKEN");
+  assert.equal(config.secrets?.providers?.[1]?.defaultVaultId, "vault-default");
   assert.equal(config.mcp?.serverName, "ciclo_team");
   assert.equal(config.mcp?.secretBindings?.[0]?.ref, "secret/data/ciclo/api");
   assert.equal(config.mcp?.secretBindings?.[0]?.format, "Bearer ${secret}");
@@ -135,6 +146,27 @@ test("config registers CLI secret provider aliases without exposing refs", async
   const registry = createSecretProviderRegistryFromConfig(config);
 
   assert.ok(registry.list().some((provider) => provider.id === "corp-op"));
+});
+
+test("config registers 1Password Connect secret providers", async () => {
+  const config = parseCicloProjectConfigText(JSON.stringify({
+    secrets: {
+      providers: [
+        {
+          id: "corp-connect",
+          kind: "onepassword-connect",
+          endpoint: "https://connect.example.test",
+          tokenEnv: "CORP_OP_CONNECT_TOKEN",
+          defaultVaultId: "vault-default"
+        }
+      ]
+    }
+  }));
+  const registry = createSecretProviderRegistryFromConfig(config);
+  const provider = registry.list().find((entry) => entry.id === "corp-connect");
+
+  assert.equal(provider?.kind, "onepassword-connect");
+  assert.equal(provider?.supportsFields, true);
 });
 
 test("config can alias secret providers registered by plugins", async () => {
@@ -381,10 +413,12 @@ test("checked-in example config parses and redacts secret references", () => {
   assert.deepEqual(config.mcp?.clients, ["claude", "codex"]);
   assert.equal(config.mcp?.serverName, "ciclo");
   assert.equal(config.mcp?.additionalServers?.filesystem?.command, "npx");
-  assert.equal(config.mcp?.secretBindings?.length, 3);
+  assert.equal(config.mcp?.secretBindings?.length, 4);
   assert.equal(config.mcp?.secretBindings?.[2]?.providerId, "team-keychain");
   assert.equal(config.mcp?.secretBindings?.[2]?.ref, "keychain://ciclo/example-api-token");
   assert.equal(config.mcp?.secretBindings?.[2]?.format, "Bearer ${secret}");
+  assert.equal(config.mcp?.secretBindings?.[3]?.providerId, "team-1password-connect");
+  assert.match(config.mcp?.secretBindings?.[3]?.ref ?? "", /^op-connect:\/\//u);
   assert.equal(config.mcp?.workerSecretBindings?.[0]?.name, "GITHUB_TOKEN");
   assert.equal(config.remote?.runnerKind, "kubernetes");
   assert.equal(config.remote?.imageResolver?.strategy, "variant");
@@ -400,4 +434,5 @@ test("checked-in example config parses and redacts secret references", () => {
   assert.doesNotMatch(redacted, /op:\/\/Ciclo\/GitHub\/token/);
   assert.doesNotMatch(redacted, /secret\/data\/ciclo\/mcp/);
   assert.doesNotMatch(redacted, /keychain:\/\/ciclo\/example-api-token/);
+  assert.doesNotMatch(redacted, /op-connect:\/\/replace-with-vault-uuid/u);
 });

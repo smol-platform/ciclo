@@ -148,7 +148,7 @@ When operating as a worker, request secrets by reference:
 
 1. Call `ciclo_list_secret_providers`.
 2. Call `ciclo_request_secret` with `provider_id`, `secret_ref`, `reason`, and task scope (`loop_id`, `bead_id`, `worker_session_id`).
-3. Prefer provider references such as OpenBao paths/fields or 1Password `op://` references; do not ask the operator to paste values.
+3. Prefer provider references such as OpenBao paths/fields, 1Password CLI `op://` references, or 1Password Connect `op-connect://vault-uuid/item-uuid/field` references; do not ask the operator to paste values.
 4. Use the returned value only for the command that needs it, then avoid echoing it in validation output, Beads notes, feedback, tracker sync, or transcripts.
 
 When the generated Ciclo MCP server needs a secret as an environment variable, use `mcp_secret_env` on `ciclo_launch_worker_session` instead of `mcp_env` or prompt text. When the worker shell needs the credential, use `worker_secret_env` instead. Each binding should include `env_name`, `provider_id`, `secret_ref`, optional `field`, optional `format`, and `reason`. Ciclo resolves the secret through the configured provider only inside the runtime wrapper for the intended process and redacts it from launch responses, worker-session listings, audit records, and events. The caller must be authorized for `secret.read`.

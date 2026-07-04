@@ -101,7 +101,7 @@ ciclo config path --project /path/to/project
 
 The config stores secret provider references, MCP defaults, remote runner defaults, and optional prompt guidance. It should contain provider ids, secret references, non-secret `vars`, and non-secret guidance text, not raw secret values. `ciclo mcp install`, MCP runtime startup, spawned worker MCP setup, prompt builders, and remote runner planning all read this file; explicit CLI or MCP tool arguments override config values.
 
-Use [examples/ciclo-config.json](/Users/ztaylor/repos/workspaces/ciclo/examples/ciclo-config.json) as the checked-in reference shape. It shows OpenBao, 1Password, and plugin-backed provider aliases, MCP secret bindings for spawned workers, Claude/Codex client defaults, prompt guidance, remote runner defaults, WireGuard tunnel fields, and provider-specific Kubernetes, AWS Lambda MicroVM, and Cloudflare runner settings. `ciclo config show --compact` redacts secret references before display.
+Use [examples/ciclo-config.json](/Users/ztaylor/repos/workspaces/ciclo/examples/ciclo-config.json) as the checked-in reference shape. It shows OpenBao, 1Password CLI, 1Password Connect, and plugin-backed provider aliases, MCP secret bindings for spawned workers, Claude/Codex client defaults, prompt guidance, remote runner defaults, WireGuard tunnel fields, and provider-specific Kubernetes, AWS Lambda MicroVM, and Cloudflare runner settings. `ciclo config show --compact` redacts secret references before display.
 
 Use `prompts.systemInjections` for shared project goals or helper instructions that Ciclo should append after its built-in ground rules:
 
@@ -219,7 +219,7 @@ ciclo_request_secret
 ciclo://secret-providers
 ```
 
-Built-in providers are `openbao` and `onepassword`. OpenBao uses `bao kv get -field=<field> <secret_ref>` and requires an explicit field. 1Password uses `op read <secret_ref>`, for example an `op://vault/item/field` reference. Ciclo returns the secret value only to the requesting MCP caller; audit records and events store provider id, kind, field, and a stable secret-reference hash.
+Built-in providers are `openbao`, `onepassword`, and `onepassword-connect`. OpenBao uses `bao kv get -field=<field> <secret_ref>` and requires an explicit field. 1Password CLI uses `op read <secret_ref>`, for example an `op://vault/item/field` reference. 1Password Connect uses the Connect Server API with `Authorization: Bearer <token>` from `tokenEnv`, reads `GET /v1/vaults/{vaultUUID}/items/{itemUUID}`, and requires an explicit field by request field or ref path, for example `op-connect://vault-uuid/item-uuid/api_token`. Ciclo returns the secret value only to the requesting MCP caller; audit records and events store provider id, kind, field, and a stable secret-reference hash.
 
 Plan a remote runner environment through MCP:
 
