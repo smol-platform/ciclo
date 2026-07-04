@@ -10,6 +10,7 @@ on:
       - tsconfig.json
       - src/**
       - tests-ts/**
+      - nix/**
       - .github/workflows/images.yml
   push:
     branches:
@@ -32,8 +33,16 @@ env:
 
 jobs:
   build:
-    name: Build Ciclo runner image
+    name: Build Dockerfile runner image (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - base
+          - codex
+          - claude
+          - full
 
     steps:
       - name: Check out repository
@@ -51,12 +60,11 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ matrix.variant }}-latest,enable={{is_default_branch}}
+            type=raw,value=${{ matrix.variant }}-${{ github.sha }}
+            type=raw,value=latest,enable=${{ matrix.variant == 'base' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=semver,pattern=${{ matrix.variant }}-{{version}}
+            type=semver,pattern=${{ matrix.variant }}-{{major}}.{{minor}}
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -72,8 +80,26 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            RUNNER_VARIANT=${{ matrix.variant }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  nix-spec:
+    name: Validate Nix runner image spec
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Parse Nix dockerTools image expression
+        run: nix-instantiate --parse nix/runner-images.nix >/dev/null

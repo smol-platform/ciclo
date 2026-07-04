@@ -47,9 +47,18 @@ test("plugin manifest validation accepts remote runner package manifests", () =>
   });
   assert.deepEqual(secretManifest.runnerKinds, []);
   assert.deepEqual(secretManifest.secretProviderKinds, ["keychain"]);
+  const imageManifest = parsePluginManifest({
+    schema: "ciclo.plugin.v1",
+    name: "@example/ciclo-image-builder",
+    version: "1.0.0",
+    entrypoint: "./dist/index.js",
+    capabilities: ["image-resolver"],
+    imageResolverStrategies: ["acme-builder"]
+  });
+  assert.deepEqual(imageManifest.imageResolverStrategies, ["acme-builder"]);
   assert.throws(
     () => parsePluginManifest({ schema: "ciclo.plugin.v1", name: "bad", version: "1", entrypoint: "../bad.js", capabilities: [], runnerKinds: [] }),
-    /remote-runner or secret-provider capability/
+    /remote-runner, image-resolver, or secret-provider capability/
   );
 });
 

@@ -1125,7 +1125,14 @@ test("MCP remote runner tools plan WireGuard Herdr runner environments", async (
             loop_id: "loop-remote",
             bead_id: "ciclo-remote.1",
             harness_id: "codex",
-            image: "ghcr.io/acme/ciclo-runner:latest",
+            image: "",
+            image_resolver: {
+              strategy: "variant",
+              registry: "ghcr.io",
+              repository: "smol-platform/ciclo",
+              tag: "latest"
+            },
+            repo_url: "https://github.com/smol-platform/ciclo.git",
             repo_path: "/workspace/project",
             prompt: "Use Ciclo MCP and report progress.",
             herdr_session: "ciclo",
@@ -1133,6 +1140,15 @@ test("MCP remote runner tools plan WireGuard Herdr runner environments", async (
             wireguard: {
               runner_address: "10.66.0.8/24",
               ciclo_endpoint: "198.51.100.10:51820"
+            },
+            preflight: {
+              claude: true,
+              build: true,
+              report_path: "/tmp/ciclo-preflight-test.jsonl"
+            },
+            preflight_only: true,
+            repo_bootstrap: {
+              use_devenv: true
             },
             kubernetes: {
               namespace: "ciclo-runners",
@@ -1152,6 +1168,12 @@ test("MCP remote runner tools plan WireGuard Herdr runner environments", async (
   assert.equal(launched.provider_name, "kubernetes-job");
   assert.equal(launched.execution_model, "kubernetes_job");
   assert.equal(launched.herdr_remote_target, "ciclo@10.66.0.8:/workspace/project");
+  assert.equal((launched.image_resolution as { image?: string }).image, "ghcr.io/smol-platform/ciclo:codex-latest");
+  assert.equal((launched.repo_bootstrap as { useDevenv?: boolean }).useDevenv, true);
+  assert.equal((launched.preflight as { reportPath?: string }).reportPath, "/tmp/ciclo-preflight-test.jsonl");
+  assert.ok(((launched.artifacts as readonly { name?: string; content?: string }[]) ?? []).some((artifact) =>
+    artifact.name === "runner-k8s-1.preflight-configmap.yaml" && /claude-noninteractive/.test(artifact.content ?? "")
+  ));
   assert.deepEqual((launched.mcp_config as { clients?: readonly string[] }).clients, ["claude", "codex"]);
   assert.equal((launched.mcp_config as { serverName?: string }).serverName, "ciclo_remote");
   assert.ok(((launched.mcp_config as { artifacts?: readonly { name?: string }[] }).artifacts ?? []).some((artifact) => artifact.name === ".mcp.json"));

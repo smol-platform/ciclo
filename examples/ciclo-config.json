@@ -78,11 +78,20 @@
   },
   "remote": {
     "runnerKind": "kubernetes",
-    "image": "ghcr.io/example/ciclo-runner:latest",
+    "imageResolver": {
+      "strategy": "variant",
+      "registry": "ghcr.io",
+      "repository": "smol-platform/ciclo",
+      "tag": "latest"
+    },
     "repoUrl": "https://github.com/example/project.git",
     "repoPath": "/workspace/project",
     "herdrSession": "project",
     "sshUser": "ciclo",
+    "repoBootstrap": {
+      "enabled": true,
+      "useDevenv": true
+    },
     "vars": {
       "CICLO_REMOTE_MODE": "interactive"
     },
@@ -94,6 +103,7 @@
       "cicloEndpoint": "vpn.example.invalid:51820",
       "runnerPrivateKeySecretRef": "ciclo/wireguard/runner_private_key",
       "cicloPublicKeySecretRef": "ciclo/wireguard/ciclo_public_key",
+      "existingConfigSecretName": "project-wireguard-runner",
       "persistentKeepaliveSeconds": 25
     },
     "kubernetes": {

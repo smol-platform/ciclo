@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import {
   createRemoteRunnerPluginApi,
   type CicloRemoteRunnerPluginApi,
+  type RemoteRunnerImageResolverRegistry,
   type RemoteRunnerPluginRegistry
 } from "./remote-runner.js";
 import {
@@ -26,6 +27,7 @@ export interface CicloPluginManifest {
   readonly entrypoint: string;
   readonly capabilities: readonly string[];
   readonly runnerKinds: readonly string[];
+  readonly imageResolverStrategies: readonly string[];
   readonly secretProviderKinds: readonly string[];
   readonly permissions?: {
     readonly commands?: readonly string[];
@@ -78,6 +80,7 @@ export interface CicloPluginActivationResult {
 
 export interface CicloPluginApi {
   readonly remoteRunners: CicloRemoteRunnerPluginApi["remoteRunners"];
+  readonly imageResolvers: CicloRemoteRunnerPluginApi["imageResolvers"];
   readonly secretProviders: CicloSecretProviderPluginApi["secretProviders"];
 }
 
@@ -119,7 +122,7 @@ function stringList(value: unknown, path: string): readonly string[] {
 }
 
 function unsupportedCapabilities(capabilities: readonly string[]): readonly string[] {
-  const supported = new Set(["remote-runner", "secret-provider"]);
+  const supported = new Set(["remote-runner", "image-resolver", "secret-provider"]);
   return capabilities.filter((capability) => !supported.has(capability));
 }
 
@@ -154,6 +157,7 @@ export function parsePluginManifest(raw: unknown): CicloPluginManifest {
     entrypoint: stringValue(record, "entrypoint", "plugin manifest"),
     capabilities: stringList(record.capabilities, "plugin manifest.capabilities"),
     runnerKinds: optionalStringList(record, "runnerKinds", "plugin manifest.runnerKinds") ?? [],
+    imageResolverStrategies: optionalStringList(record, "imageResolverStrategies", "plugin manifest.imageResolverStrategies") ?? [],
     secretProviderKinds: optionalStringList(record, "secretProviderKinds", "plugin manifest.secretProviderKinds") ?? [],
     permissions: permissionsRecord === undefined
       ? undefined
@@ -167,14 +171,17 @@ export function parsePluginManifest(raw: unknown): CicloPluginManifest {
   if (unsupported.length > 0) {
     throw new Error(`plugin manifest includes unsupported capabilities: ${unsupported.join(", ")}`);
   }
-  if (!manifest.capabilities.includes("remote-runner") && !manifest.capabilities.includes("secret-provider")) {
-    throw new Error("plugin manifest must include remote-runner or secret-provider capability");
+  if (!manifest.capabilities.includes("remote-runner") && !manifest.capabilities.includes("image-resolver") && !manifest.capabilities.includes("secret-provider")) {
+    throw new Error("plugin manifest must include remote-runner, image-resolver, or secret-provider capability");
   }
   if (manifest.capabilities.includes("remote-runner") && manifest.runnerKinds.length === 0) {
     throw new Error("plugin manifest remote-runner capability requires runnerKinds");
   }
   if (manifest.capabilities.includes("secret-provider") && manifest.secretProviderKinds.length === 0) {
     throw new Error("plugin manifest secret-provider capability requires secretProviderKinds");
+  }
+  if (manifest.capabilities.includes("image-resolver") && manifest.imageResolverStrategies.length === 0) {
+    throw new Error("plugin manifest image-resolver capability requires imageResolverStrategies");
   }
   if (manifest.entrypoint.startsWith("/") || manifest.entrypoint.includes("..")) {
     throw new Error("plugin manifest entrypoint must be a package-relative path");
@@ -273,6 +280,7 @@ export function installPlugin(
       `plugin.enabled:${entry.enabled}`,
       `plugin.trusted:${entry.trusted}`,
       ...manifest.runnerKinds.map((kind) => `plugin.runner_kind:${kind}`),
+      ...manifest.imageResolverStrategies.map((strategy) => `plugin.image_resolver_strategy:${strategy}`),
       ...manifest.secretProviderKinds.map((kind) => `plugin.secret_provider_kind:${kind}`)
     ]
   };
@@ -294,6 +302,7 @@ export function setPluginEnabled(
 async function activateEntry(
   entry: CicloPluginConfigEntry,
   registry: RemoteRunnerPluginRegistry,
+  imageResolverRegistry?: RemoteRunnerImageResolverRegistry,
   secretProviderRegistry?: SecretProviderRegistry
 ): Promise<void> {
   if (!entry.trusted) throw new Error(`plugin is not trusted: ${entry.package}`);
@@ -304,10 +313,11 @@ async function activateEntry(
   const module = await import(pathToFileURL(modulePath).href) as PluginModule;
   const activate = module.activate ?? module.default?.activate;
   if (activate === undefined) throw new Error(`plugin does not export activate(api): ${entry.package}`);
-  const remoteApi = createRemoteRunnerPluginApi(registry);
+  const remoteApi = createRemoteRunnerPluginApi(registry, imageResolverRegistry);
   const secretApi = createSecretProviderPluginApi(secretProviderRegistry ?? new SecretProviderRegistry());
   await activate({
     remoteRunners: remoteApi.remoteRunners,
+    imageResolvers: remoteApi.imageResolvers,
     secretProviders: secretApi.secretProviders
   });
 }
@@ -315,7 +325,8 @@ async function activateEntry(
 export async function activateConfiguredPlugins(
   registry: RemoteRunnerPluginRegistry,
   paths: CicloPluginPaths = defaultPluginPaths(),
-  secretProviderRegistry?: SecretProviderRegistry
+  secretProviderRegistry?: SecretProviderRegistry,
+  imageResolverRegistry?: RemoteRunnerImageResolverRegistry
 ): Promise<CicloPluginActivationResult> {
   const config = readPluginConfig(paths);
   const activated: string[] = [];
@@ -329,7 +340,7 @@ export async function activateConfiguredPlugins(
       continue;
     }
     try {
-      await activateEntry(entry, registry, secretProviderRegistry);
+      await activateEntry(entry, registry, imageResolverRegistry, secretProviderRegistry);
       activated.push(entry.package);
       evidence.push(`plugin.activated:${entry.package}`);
     } catch (error) {

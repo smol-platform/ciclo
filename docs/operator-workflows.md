@@ -185,9 +185,12 @@ Supported runner kinds:
 WireGuard runner setup:
 
 1. Ciclo owns the hub-side endpoint and public key.
-2. The runner receives only secret references for its private key and Ciclo's public key.
-3. The runner brings up `wg-ciclo`, then Herdr starts a named session derived from the repository name, for example `ciclo` in this repo.
-4. Ciclo attaches through the tunnel using a Herdr remote target such as `ciclo@10.44.0.2:/workspace/ciclo`.
+2. The runner uses either an existing Kubernetes Secret containing `runner.conf` or launch-time resolved key material. Do not run live Kubernetes workers with unresolved `${secret:...}` placeholders.
+3. The runner clones or refreshes `repo_url` into `repo_path`.
+4. The runner runs `devenv shell -- true` when the project has `devenv.nix`; this loads project dependencies as the last-mile remote environment check.
+5. The runner executes the Ciclo preflight script and reports whether Claude Code access and Ciclo-like build tools are usable in that environment. Use `preflight_only: true` when validating an image or cluster without starting WireGuard or Herdr.
+6. The runner brings up `wg-ciclo`, then Herdr starts a named session derived from the repository name, for example `ciclo` in this repo.
+7. Ciclo attaches through the tunnel using a Herdr remote target such as `ciclo@10.44.0.2:/workspace/ciclo`.
 
 Operator attach commands:
 

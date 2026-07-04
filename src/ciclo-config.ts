@@ -2,7 +2,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import type { CicloMcpAdditionalServerConfig, CicloMcpInstallClient, CicloMcpInstallOptions, CicloMcpSecretEnvBinding } from "./mcp-install.js";
-import type { RemoteRunnerLaunchRequest, WireGuardTunnelRequest } from "./remote-runner.js";
+import type {
+  RemoteRunnerImageResolverRequest,
+  RemoteRunnerLaunchRequest,
+  RemoteRunnerRepoBootstrapRequest,
+  WireGuardTunnelRequest
+} from "./remote-runner.js";
 import {
   createDefaultSecretProviderRegistry,
   OnePasswordCliSecretProvider,
@@ -46,11 +51,14 @@ export interface CicloConfigMcp {
 export interface CicloConfigRemote {
   readonly runnerKind?: string;
   readonly image?: string;
+  readonly imageResolver?: RemoteRunnerImageResolverRequest;
   readonly repoUrl?: string;
   readonly repoPath?: string;
   readonly herdrSession?: string;
   readonly sshUser?: string;
   readonly wireGuard?: WireGuardTunnelRequest;
+  readonly preflightOnly?: boolean;
+  readonly repoBootstrap?: RemoteRunnerRepoBootstrapRequest;
   readonly vars?: Record<string, string>;
   readonly kubernetes?: {
     readonly namespace?: string;
@@ -268,6 +276,9 @@ function parseWireGuard(record: Record<string, unknown>): WireGuardTunnelRequest
   const cicloEndpoint = optionalStringAny(wireguard, ["ciclo_endpoint", "cicloEndpoint"]);
   const cicloPublicKeySecretRef = optionalStringAny(wireguard, ["ciclo_public_key_ref", "cicloPublicKeySecretRef"]);
   const runnerPrivateKeySecretRef = optionalStringAny(wireguard, ["runner_private_key_ref", "runnerPrivateKeySecretRef"]);
+  const existingConfigSecretName = optionalStringAny(wireguard, ["existing_config_secret_name", "existingConfigSecretName"]);
+  const runnerPrivateKeyValue = optionalStringAny(wireguard, ["runner_private_key_value", "runnerPrivateKeyValue"]);
+  const cicloPublicKeyValue = optionalStringAny(wireguard, ["ciclo_public_key_value", "cicloPublicKeyValue"]);
   const persistentKeepaliveSeconds = optionalNumberAny(wireguard, ["persistent_keepalive_seconds", "persistentKeepaliveSeconds"]);
   return {
     ...(interfaceName === undefined ? {} : { interfaceName }),
@@ -277,7 +288,51 @@ function parseWireGuard(record: Record<string, unknown>): WireGuardTunnelRequest
     ...(cicloEndpoint === undefined ? {} : { cicloEndpoint }),
     ...(cicloPublicKeySecretRef === undefined ? {} : { cicloPublicKeySecretRef }),
     ...(runnerPrivateKeySecretRef === undefined ? {} : { runnerPrivateKeySecretRef }),
+    ...(existingConfigSecretName === undefined ? {} : { existingConfigSecretName }),
+    ...(runnerPrivateKeyValue === undefined ? {} : { runnerPrivateKeyValue }),
+    ...(cicloPublicKeyValue === undefined ? {} : { cicloPublicKeyValue }),
     ...(persistentKeepaliveSeconds === undefined ? {} : { persistentKeepaliveSeconds })
+  };
+}
+
+function parseRemoteImageResolver(record: Record<string, unknown>): RemoteRunnerImageResolverRequest | undefined {
+  const value = record.imageResolver ?? record.image_resolver;
+  if (value === undefined) return undefined;
+  const resolver = objectValue(value, "remote.imageResolver");
+  const harnessPackagesRecord = objectValue(resolver.harness_packages ?? resolver.harnessPackages, "remote.imageResolver.harnessPackages");
+  const harnessPackages = Object.fromEntries(
+    Object.entries(harnessPackagesRecord).flatMap(([key, item]) =>
+      Array.isArray(item)
+        ? [[key, item.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)]]
+        : []
+    )
+  ) as RemoteRunnerImageResolverRequest["harnessPackages"];
+  const basePackages = stringList(resolver.basePackages, "remote.imageResolver.basePackages");
+  const basePackagesSnake = stringList(resolver.base_packages, "remote.imageResolver.base_packages");
+  const extraPackages = stringList(resolver.extraPackages, "remote.imageResolver.extraPackages");
+  const extraPackagesSnake = stringList(resolver.extra_packages, "remote.imageResolver.extra_packages");
+  return {
+    ...(optionalString(resolver, "strategy") === undefined ? {} : { strategy: optionalString(resolver, "strategy") as RemoteRunnerImageResolverRequest["strategy"] }),
+    ...(optionalString(resolver, "image") === undefined ? {} : { image: optionalString(resolver, "image") }),
+    ...(optionalString(resolver, "registry") === undefined ? {} : { registry: optionalString(resolver, "registry") }),
+    ...(optionalString(resolver, "repository") === undefined ? {} : { repository: optionalString(resolver, "repository") }),
+    ...(optionalString(resolver, "tag") === undefined ? {} : { tag: optionalString(resolver, "tag") }),
+    ...(optionalString(resolver, "variant") === undefined ? {} : { variant: optionalString(resolver, "variant") }),
+    ...((basePackages ?? basePackagesSnake) === undefined ? {} : { basePackages: basePackages ?? basePackagesSnake }),
+    ...(Object.keys(harnessPackages ?? {}).length === 0 ? {} : { harnessPackages }),
+    ...((extraPackages ?? extraPackagesSnake) === undefined ? {} : { extraPackages: extraPackages ?? extraPackagesSnake })
+  };
+}
+
+function parseRepoBootstrap(record: Record<string, unknown>): RemoteRunnerRepoBootstrapRequest | undefined {
+  const value = record.repoBootstrap ?? record.repo_bootstrap;
+  if (value === undefined) return undefined;
+  const bootstrap = objectValue(value, "remote.repoBootstrap");
+  const enabled = optionalBoolean(bootstrap, "enabled");
+  const useDevenv = optionalBooleanAny(bootstrap, ["use_devenv", "useDevenv"]);
+  return {
+    ...(enabled === undefined ? {} : { enabled }),
+    ...(useDevenv === undefined ? {} : { useDevenv })
   };
 }
 
@@ -289,20 +344,26 @@ function parseRemote(root: Record<string, unknown>): CicloConfigRemote | undefin
   const cloudflare = objectValue(record.cloudflare, "remote.cloudflare");
   const runnerKind = optionalStringAny(record, ["runner_kind", "runnerKind"]);
   const image = optionalString(record, "image");
+  const imageResolver = parseRemoteImageResolver(record);
   const repoUrl = optionalStringAny(record, ["repo_url", "repoUrl"]);
   const repoPath = optionalStringAny(record, ["repo_path", "repoPath"]);
   const herdrSession = optionalStringAny(record, ["herdr_session", "herdrSession"]);
   const sshUser = optionalStringAny(record, ["ssh_user", "sshUser"]);
   const wireGuard = parseWireGuard(record);
+  const preflightOnly = optionalBooleanAny(record, ["preflight_only", "preflightOnly"]);
+  const repoBootstrap = parseRepoBootstrap(record);
   const vars = stringRecord(record, "vars");
   return {
     ...(runnerKind === undefined ? {} : { runnerKind }),
     ...(image === undefined ? {} : { image }),
+    ...(imageResolver === undefined ? {} : { imageResolver }),
     ...(repoUrl === undefined ? {} : { repoUrl }),
     ...(repoPath === undefined ? {} : { repoPath }),
     ...(herdrSession === undefined ? {} : { herdrSession }),
     ...(sshUser === undefined ? {} : { sshUser }),
     ...(wireGuard === undefined ? {} : { wireGuard }),
+    ...(preflightOnly === undefined ? {} : { preflightOnly }),
+    ...(repoBootstrap === undefined ? {} : { repoBootstrap }),
     ...(vars === undefined ? {} : { vars }),
     kubernetes: {
       ...(optionalString(kubernetes, "namespace") === undefined ? {} : { namespace: optionalString(kubernetes, "namespace") }),
@@ -611,6 +672,7 @@ export function mergeRemoteRunnerLaunchWithConfig(input: RemoteRunnerLaunchReque
     ...input,
     runnerKind: input.runnerKind || remote?.runnerKind || "",
     image: input.image || remote?.image || "",
+    imageResolver: input.imageResolver ?? remote?.imageResolver,
     repoUrl: input.repoUrl ?? remote?.repoUrl,
     repoPath: input.repoPath || remote?.repoPath || "",
     herdrSession: input.herdrSession ?? remote?.herdrSession,
@@ -624,6 +686,8 @@ export function mergeRemoteRunnerLaunchWithConfig(input: RemoteRunnerLaunchReque
     mcpVars: mergeVars(mcp?.vars, input.mcpVars),
     mcpAdditionalServers: mergeAdditionalServers(mcp?.additionalServers, input.mcpAdditionalServers),
     mcpClaudeChannel: input.mcpClaudeChannel ?? mcp?.claudeChannel,
+    preflightOnly: input.preflightOnly ?? remote?.preflightOnly,
+    repoBootstrap: { ...(remote?.repoBootstrap ?? {}), ...(input.repoBootstrap ?? {}) },
     kubernetes: { ...(remote?.kubernetes ?? {}), ...(input.kubernetes ?? {}) },
     awsLambda: { ...(remote?.awsLambda ?? {}), ...(input.awsLambda ?? {}) },
     cloudflare: { ...(remote?.cloudflare ?? {}), ...(input.cloudflare ?? {}) }

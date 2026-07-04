@@ -162,8 +162,15 @@ test("config merges into MCP install worker and remote requests", () => {
     remote: {
       runnerKind: "cloudflare",
       image: "ghcr.io/acme/ciclo-runner:latest",
+      imageResolver: {
+        strategy: "variant",
+        repository: "smol-platform/ciclo",
+        tag: "latest"
+      },
       repoPath: "/workspace/repo",
       sshUser: "ciclo",
+      preflightOnly: true,
+      repoBootstrap: { useDevenv: true },
       vars: { CICLO_REMOTE_MODE: "config" },
       cloudflare: { accountId: "acct-1", workerName: "ciclo-worker" }
     }
@@ -202,6 +209,9 @@ test("config merges into MCP install worker and remote requests", () => {
   }, config);
   assert.equal(remote.runnerKind, "cloudflare");
   assert.equal(remote.image, "ghcr.io/acme/ciclo-runner:latest");
+  assert.equal(remote.imageResolver?.strategy, "variant");
+  assert.equal(remote.preflightOnly, true);
+  assert.equal(remote.repoBootstrap?.useDevenv, true);
   assert.equal(remote.repoPath, "/workspace/repo");
   assert.equal(remote.environment?.CICLO_REMOTE_MODE, "config");
   assert.equal(remote.mcpAdditionalServers?.filesystem?.command, "npx");
@@ -301,7 +311,10 @@ test("checked-in example config parses and redacts secret references", () => {
   assert.equal(config.mcp?.secretBindings?.[2]?.format, "Bearer ${secret}");
   assert.equal(config.mcp?.workerSecretBindings?.[0]?.name, "GITHUB_TOKEN");
   assert.equal(config.remote?.runnerKind, "kubernetes");
+  assert.equal(config.remote?.imageResolver?.strategy, "variant");
+  assert.equal(config.remote?.repoBootstrap?.useDevenv, true);
   assert.equal(config.remote?.wireGuard?.interfaceName, "wg-ciclo");
+  assert.equal(config.remote?.wireGuard?.existingConfigSecretName, "project-wireguard-runner");
   assert.equal(config.remote?.awsLambda?.microVmName, "ciclo-project-runner");
   assert.equal(config.remote?.cloudflare?.workerName, "ciclo-project-runner");
 

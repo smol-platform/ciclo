@@ -181,7 +181,11 @@ Ciclo reuses the active Herdr session when detected. Local Claude/Codex workers 
 ## Remote Pattern
 
 - Use \`ciclo_attach_plan\` to show how the operator can attach to the overall Herdr session or a specific agent pane.
-- Use \`ciclo_launch_remote_runner\` for Kubernetes, AWS Lambda MicroVM, Cloudflare, or plugin-provided runner kinds; dry-run first and review WireGuard, Herdr target, repo path, generated remote MCP config, and provider commands.
+- Use \`ciclo_launch_remote_runner\` for Kubernetes, AWS Lambda MicroVM, Cloudflare, or plugin-provided runner kinds; dry-run first and review image resolution, repo bootstrap, WireGuard, Herdr target, repo path, generated remote MCP config, preflight report path, and provider commands.
+- Prefer \`image_resolver.strategy: "variant"\` for official Nix dockerTools images (\`base-latest\`, \`codex-latest\`, \`claude-latest\`, \`full-latest\`) and \`image_resolver.strategy: "nixery"\` only when a private Nixery registry should compose package-path images dynamically.
+- Use \`repo_bootstrap.use_devenv: true\` so Kubernetes runners clone/fetch the repository and run \`devenv shell -- true\` as the final project dependency check before preflight.
+- Treat remote preflight failures as launch blockers when required checks fail. The default preflight checks Claude Code access with a tiny non-interactive prompt and checks Ciclo-like build tools such as Git, Node.js, npm, Ciclo, Herdr, SSH, WireGuard, Beads, \`just\`, and \`devenv\`; only set \`preflight.claude: false\` when the operator explicitly wants to skip Claude access validation.
+- Use \`preflight_only: true\` when validating image/devenv/Claude readiness without starting WireGuard or Herdr. For live Kubernetes launches, use \`wireguard.existing_config_secret_name\` or resolved key material; do not accept unresolved \`\${secret:...}\` placeholders in \`runner.conf\`.
 - Keep remote MCP setup enabled unless the remote image already installs Ciclo MCP. The response \`mcp_config\` includes \`.mcp.json\` and/or \`.codex/config.toml\` artifacts for the remote repo plus a remote \`ciclo mcp install\` command for merge-based setup. Project \`mcp.additionalServers\` and per-launch \`mcp_additional_servers\` are rendered into those remote artifacts so the spawned Claude/Codex session sees the same extra MCP servers as a local worktree worker.
 - Use \`ciclo_register_remote_session\`, \`ciclo_heartbeat_remote_session\`, and \`ciclo_detach_remote_session\` for already-running remote Ciclo/Herdr/harness sessions.
 - Remote observation must go through Herdr remote attach over SSH. Do not supervise remote work by inventing direct SSH process polling.
@@ -516,14 +520,19 @@ Use \`ciclo_launch_remote_runner\` for planning remote runnable environments. Pr
   "loop_id": "review-loop",
   "bead_id": "project-remote-1",
   "harness_id": "codex",
-  "image": "ghcr.io/smol-platform/ciclo:latest",
+  "image_resolver": {
+    "strategy": "variant",
+    "repository": "smol-platform/ciclo",
+    "tag": "latest"
+  },
+  "repo_url": "https://github.com/smol-platform/project.git",
   "repo_path": "/workspace/project",
   "prompt": "Use Ciclo MCP and report progress.",
   "dry_run": true
 }
 \`\`\`
 
-Review the returned provider commands, WireGuard config, Herdr target, remote \`mcp_config\`, and \`attach\` plan before proceeding. \`mcp_config\` contains generated \`.mcp.json\` and/or \`.codex/config.toml\` artifacts for the remote \`repo_path\`; use its install command inside the runner when the remote checkout needs to merge with existing MCP client config. Project \`mcp.additionalServers\` and per-launch \`mcp_additional_servers\` are included in those remote artifacts, so the remote worker receives the same extra third-party MCP servers as a local launched worktree.
+Review the returned provider commands, image resolution, repo bootstrap, WireGuard config, Herdr target, remote \`mcp_config\`, \`preflight\`, and \`attach\` plan before proceeding. \`mcp_config\` contains generated \`.mcp.json\` and/or \`.codex/config.toml\` artifacts for the remote \`repo_path\`; use its install command inside the runner when the remote checkout needs to merge with existing MCP client config. Project \`mcp.additionalServers\` and per-launch \`mcp_additional_servers\` are included in those remote artifacts, so the remote worker receives the same extra third-party MCP servers as a local launched worktree. Kubernetes runners clone/fetch the repo, run project \`devenv\` when present, and mount/run the preflight script before WireGuard setup, so pod logs show missing Claude access or build-tool gaps early.
 
 ## Remote Session Example
 
@@ -742,7 +751,7 @@ Only trust plugins after the operator accepts the package source and behavior. E
 - Use \`ciclo_list_secret_providers\` and \`ciclo_request_secret\` for configured secret references; ask the operator only when the provider, reference, or authorization is missing.
 - Prefer provider references such as OpenBao paths/fields or 1Password \`op://\` references; never paste secret values into Beads, tracker sync, feedback, progress notes, or transcripts.
 - Use \`mcp_secret_env\` on \`ciclo_launch_worker_session\` when the generated Ciclo MCP server needs a secret environment variable; use \`worker_secret_env\` when the launched agent shell needs credentials; use optional \`format\` such as \`Bearer \${secret}\` only when the target variable needs a wrapper string; do not put secret values in \`mcp_env\`, prompts, or notes.
-- For remote work, use \`ciclo_attach_plan\`, \`ciclo_launch_remote_runner\`, and remote session registration/heartbeat/detach tools; remote observation must go through Herdr remote attach over SSH. Keep remote MCP setup enabled unless the remote image already installs Ciclo MCP; \`mcp_config\` includes generated \`.mcp.json\` and/or \`.codex/config.toml\` artifacts for the remote repo, including configured additional MCP servers.
+- For remote work, use \`ciclo_attach_plan\`, \`ciclo_launch_remote_runner\`, and remote session registration/heartbeat/detach tools; remote observation must go through Herdr remote attach over SSH. Review \`image_resolution\`, \`repo_bootstrap\`, \`preflight\`, and WireGuard evidence before launch. Keep remote MCP setup enabled unless the remote image already installs Ciclo MCP; \`mcp_config\` includes generated \`.mcp.json\` and/or \`.codex/config.toml\` artifacts for the remote repo, including configured additional MCP servers.
 - Ask the operator before destructive commands, deploys, permission prompts, or scope expansion.
 `;
 

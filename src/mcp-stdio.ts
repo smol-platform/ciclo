@@ -47,8 +47,12 @@ import {
 import {
   buildCicloAttachPlan,
   createDefaultRemoteRunnerPluginRegistry,
+  createDefaultRemoteRunnerImageResolverRegistry,
   RemoteRunnerRegistry,
   type RemoteRunnerKind,
+  type RemoteRunnerImageResolverRequest,
+  type RemoteRunnerPreflightRequest,
+  type RemoteRunnerRepoBootstrapRequest,
   type WireGuardTunnelRequest
 } from "./remote-runner.js";
 import type { RemoteHeartbeatClient, RemoteSessionRegistry } from "./remote-session-registry.js";
@@ -284,7 +288,64 @@ function wireGuardParam(params: unknown): WireGuardTunnelRequest | undefined {
     cicloEndpoint: stringParam(record, "ciclo_endpoint") || undefined,
     cicloPublicKeySecretRef: stringParam(record, "ciclo_public_key_secret_ref") || undefined,
     runnerPrivateKeySecretRef: stringParam(record, "runner_private_key_secret_ref") || undefined,
+    existingConfigSecretName: stringParam(record, "existing_config_secret_name") || undefined,
+    runnerPrivateKeyValue: stringParam(record, "runner_private_key_value") || undefined,
+    cicloPublicKeyValue: stringParam(record, "ciclo_public_key_value") || undefined,
     persistentKeepaliveSeconds: numberParam(record, "persistent_keepalive_seconds", 25)
+  };
+}
+
+function remoteRunnerImageResolverParam(params: unknown): RemoteRunnerImageResolverRequest | undefined {
+  const value = asRecord(params).image_resolver;
+  if (value === undefined) return undefined;
+  const record = asRecord(value);
+  const harnessPackagesValue = asRecord(record.harness_packages);
+  const harnessPackages = Object.fromEntries(
+    Object.entries(harnessPackagesValue).flatMap(([key, item]) =>
+      Array.isArray(item) ? [[key, item.filter((entry): entry is string => typeof entry === "string")]] : []
+    )
+  ) as RemoteRunnerImageResolverRequest["harnessPackages"];
+  const strategy = stringParam(record, "strategy");
+  const basePackages = stringListParam(record, "base_packages");
+  const extraPackages = stringListParam(record, "extra_packages");
+  return {
+    ...(strategy.length === 0 ? {} : { strategy: strategy as RemoteRunnerImageResolverRequest["strategy"] }),
+    image: stringParam(record, "image") || undefined,
+    registry: stringParam(record, "registry") || undefined,
+    repository: stringParam(record, "repository") || undefined,
+    tag: stringParam(record, "tag") || undefined,
+    variant: stringParam(record, "variant") || undefined,
+    ...(basePackages.length === 0 ? {} : { basePackages }),
+    ...(Object.keys(harnessPackages ?? {}).length === 0 ? {} : { harnessPackages }),
+    ...(extraPackages.length === 0 ? {} : { extraPackages })
+  };
+}
+
+function remoteRunnerPreflightParam(params: unknown): RemoteRunnerPreflightRequest | undefined {
+  const value = asRecord(params).preflight;
+  if (value === undefined) return undefined;
+  const record = asRecord(value);
+  const enabled = optionalBooleanParam(record, "enabled");
+  const claude = optionalBooleanParam(record, "claude");
+  const build = optionalBooleanParam(record, "build");
+  const reportPath = stringParam(record, "report_path") || undefined;
+  return {
+    ...(enabled === undefined ? {} : { enabled }),
+    ...(claude === undefined ? {} : { claude }),
+    ...(build === undefined ? {} : { build }),
+    ...(reportPath === undefined ? {} : { reportPath })
+  };
+}
+
+function remoteRunnerRepoBootstrapParam(params: unknown): RemoteRunnerRepoBootstrapRequest | undefined {
+  const value = asRecord(params).repo_bootstrap;
+  if (value === undefined) return undefined;
+  const record = asRecord(value);
+  const enabled = optionalBooleanParam(record, "enabled");
+  const useDevenv = optionalBooleanParam(record, "use_devenv");
+  return {
+    ...(enabled === undefined ? {} : { enabled }),
+    ...(useDevenv === undefined ? {} : { useDevenv })
   };
 }
 
@@ -1335,13 +1396,14 @@ function appendRuntimeEvent(runtime: CicloMcpRuntimeContext, input: CicloEventIn
 export async function createLocalMcpRuntimeContextWithPlugins(root = process.cwd()): Promise<CicloMcpRuntimeContext> {
   const loadedConfig = loadCicloProjectConfig(root);
   const pluginRegistry = createDefaultRemoteRunnerPluginRegistry();
+  const imageResolverRegistry = createDefaultRemoteRunnerImageResolverRegistry();
   const secretProviderRegistry = createSecretProviderRegistryFromConfig(loadedConfig.config);
-  await activateConfiguredPlugins(pluginRegistry, defaultPluginPaths(root), secretProviderRegistry);
+  await activateConfiguredPlugins(pluginRegistry, defaultPluginPaths(root), secretProviderRegistry, imageResolverRegistry);
   return {
     ...createLocalMcpRuntimeContext(root),
     projectConfig: loadedConfig.found ? loadedConfig.config : undefined,
     projectConfigEvidence: loadedConfig.evidence,
-    remoteRunnerRegistry: new RemoteRunnerRegistry(pluginRegistry),
+    remoteRunnerRegistry: new RemoteRunnerRegistry(pluginRegistry, imageResolverRegistry),
     secretProviderRegistry
   };
 }
@@ -1646,6 +1708,7 @@ async function callTool(
       beadId: stringParam(params, "bead_id") || undefined,
       harnessId: normalizeHarnessId(stringParam(params, "harness_id")),
       image: stringParam(params, "image"),
+      imageResolver: remoteRunnerImageResolverParam(params),
       repoUrl: stringParam(params, "repo_url") || undefined,
       repoPath: stringParam(params, "repo_path"),
       prompt: stringParam(params, "prompt"),
@@ -1660,6 +1723,9 @@ async function callTool(
       mcpVars: mcpEnvParam(params),
       mcpAdditionalServers: mcpAdditionalServersParam(params),
       mcpClaudeChannel: optionalBooleanParam(params, "mcp_claude_channel"),
+      preflightOnly: optionalBooleanParam(params, "preflight_only"),
+      preflight: remoteRunnerPreflightParam(params),
+      repoBootstrap: remoteRunnerRepoBootstrapParam(params),
       kubernetes: {
         namespace: stringParam(kubernetes, "namespace") || undefined,
         serviceAccount: stringParam(kubernetes, "service_account") || undefined,
@@ -1723,8 +1789,11 @@ async function callTool(
       state: plan?.state,
       herdr_remote_target: plan?.herdrRemoteTarget,
       attach: plan?.attach,
+      image_resolution: plan?.imageResolution,
+      repo_bootstrap: plan?.repoBootstrap,
       mcp_config: plan?.mcpConfig,
       wireguard: plan?.wireGuard,
+      preflight: plan?.preflight,
       commands: plan?.commands ?? [],
       artifacts: plan?.artifacts ?? [],
       warnings: plan?.warnings ?? [],

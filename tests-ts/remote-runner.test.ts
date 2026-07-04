@@ -70,19 +70,88 @@ test("Kubernetes remote runner plan includes WireGuard tunnel Herdr attach and j
   assert.match(plan.wireGuard.runnerConfig, /Endpoint = 198\.51\.100\.10:51820/);
   const jobArtifact = plan.artifacts.find((artifact) => artifact.name === "ciclo-remote-1.job.yaml");
   const wireGuardSecretArtifact = plan.artifacts.find((artifact) => artifact.name === "ciclo-remote-1.wireguard-secret.yaml");
+  const preflightConfigMapArtifact = plan.artifacts.find((artifact) => artifact.name === "ciclo-remote-1.preflight-configmap.yaml");
+  const preflightScriptArtifact = plan.artifacts.find((artifact) => artifact.name === "runner-1.preflight.sh");
   assert.match(jobArtifact?.content ?? "", /kind: Job/);
   assert.match(jobArtifact?.content ?? "", /command: \["\/bin\/bash", "-lc"\]/);
   assert.doesNotMatch(jobArtifact?.content ?? "", /command: \["\/bin\/sh", "-lc"\]/);
+  assert.match(jobArtifact?.content ?? "", /git clone "\$CICLO_REPO_URL" "\$CICLO_REPO_PATH"/);
+  assert.match(jobArtifact?.content ?? "", /devenv shell -- true/);
+  assert.match(jobArtifact?.content ?? "", /mountPath: \/ciclo\/preflight/);
+  assert.match(jobArtifact?.content ?? "", /bash \/ciclo\/preflight\/ciclo-remote-preflight\.sh \|\| true/);
   assert.match(jobArtifact?.content ?? "", /mountPath: \/ciclo\/wg/);
   assert.match(jobArtifact?.content ?? "", /secretName: ciclo-remote-1-wireguard/);
+  assert.match(preflightConfigMapArtifact?.content ?? "", /kind: ConfigMap/);
+  assert.match(preflightConfigMapArtifact?.content ?? "", /claude-noninteractive/);
+  assert.match(preflightScriptArtifact?.content ?? "", /--max-budget-usd/);
   assert.match(wireGuardSecretArtifact?.content ?? "", /kind: Secret/);
   assert.match(wireGuardSecretArtifact?.content ?? "", /runner\.conf: \|/);
+  assert.ok(plan.commands.some((command) => command.includes("preflight-configmap.yaml")));
   assert.ok(plan.commands.some((command) => command.includes("kubectl -n ciclo-runners apply")));
   assert.ok(plan.evidence.includes("remote.runner.wireguard:planned"));
+  assert.ok(plan.evidence.includes("remote.runner.image.strategy:static"));
+  assert.ok(plan.evidence.includes("remote.runner.repo_bootstrap:planned"));
+  assert.ok(plan.evidence.includes("remote.runner.preflight.claude:planned"));
+  assert.equal(plan.preflight?.reportPath, "/tmp/ciclo-remote-preflight.jsonl");
+  assert.equal(plan.repoBootstrap.useDevenv, true);
   assert.equal(plan.mcpConfig?.projectRoot, "/workspace/project");
   assert.deepEqual(plan.mcpConfig?.clients, ["codex"]);
   assert.ok(plan.mcpConfig?.artifacts.some((artifact) => artifact.name === ".codex/config.toml"));
   assert.ok(plan.evidence.includes("remote.runner.mcp_config:planned"));
+});
+
+test("Kubernetes remote runner can run preflight only with an existing WireGuard secret", () => {
+  const plan = buildRemoteRunnerLaunchPlan({
+    ...baseRequest,
+    repoUrl: undefined,
+    preflightOnly: true,
+    wireGuard: {
+      ...baseRequest.wireGuard,
+      existingConfigSecretName: "runner-real-wireguard"
+    },
+    kubernetes: {
+      namespace: "ciclo-runners",
+      serviceAccount: "default",
+      jobName: "ciclo-preflight-only"
+    }
+  });
+
+  const jobArtifact = plan.artifacts.find((artifact) => artifact.name === "ciclo-preflight-only.job.yaml");
+  assert.match(jobArtifact?.content ?? "", /CICLO_PREFLIGHT_ONLY/);
+  assert.match(jobArtifact?.content ?? "", /if \[ "\$\{CICLO_PREFLIGHT_ONLY:-false\}" = "true" \]; then exit 0; fi/);
+  assert.match(jobArtifact?.content ?? "", /secretName: runner-real-wireguard/);
+  assert.ok(!plan.artifacts.some((artifact) => artifact.name === "ciclo-preflight-only.wireguard-secret.yaml"));
+  assert.ok(plan.evidence.includes("remote.runner.preflight_only:planned"));
+  assert.ok(plan.evidence.includes("remote.runner.wireguard.secret:existing"));
+});
+
+test("remote runner image resolver supports variant and Nixery strategies", () => {
+  const variantPlan = buildRemoteRunnerLaunchPlan({
+    ...baseRequest,
+    image: "",
+    imageResolver: {
+      strategy: "variant",
+      registry: "ghcr.io",
+      repository: "smol-platform/ciclo",
+      tag: "latest"
+    }
+  });
+  assert.equal(variantPlan.image, "ghcr.io/smol-platform/ciclo:codex-latest");
+  assert.equal(variantPlan.imageResolution.strategy, "variant");
+
+  const nixeryPlan = buildRemoteRunnerLaunchPlan({
+    ...baseRequest,
+    harnessId: "claude-code",
+    image: "",
+    imageResolver: {
+      strategy: "nixery",
+      registry: "nixery.internal.example",
+      extraPackages: ["ripgrep"]
+    }
+  });
+  assert.equal(nixeryPlan.imageResolution.strategy, "nixery");
+  assert.match(nixeryPlan.image, /nixery\.internal\.example\/shell\/git\/nodejs_24\/openssh\/wireguard-tools\/herdr\/claude-code/);
+  assert.ok(nixeryPlan.imageResolution.packages?.includes("ripgrep"));
 });
 
 test("remote runner plan can generate Claude .mcp.json for the remote repo path", () => {

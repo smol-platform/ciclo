@@ -7,6 +7,10 @@ export {
 
 export {
   type RemoteRunnerArtifact,
+  type RemoteRunnerImageResolution,
+  type RemoteRunnerImageResolverPlugin,
+  type RemoteRunnerImageResolverRequest,
+  type RemoteRunnerImageStrategy,
   type RemoteRunnerKind,
   type RemoteRunnerLaunchRequest,
   type RemoteRunnerProviderPlan,

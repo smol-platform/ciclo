@@ -175,7 +175,7 @@ The config supports:
 
 - `secrets.providers`: OpenBao and 1Password provider ids, display names, and CLI commands.
 - `mcp`: default clients, server name, Ciclo command, non-secret `vars`, secret provider bindings for Ciclo MCP server subprocesses, `workerSecretBindings` for spawned worker shells, and Claude channel mode for generated MCP configs.
-- `remote`: default runner kind, image, repository path, SSH user, WireGuard settings, provider-specific Kubernetes/AWS Lambda MicroVM/Cloudflare settings, and non-secret `vars`.
+- `remote`: default runner kind, image resolver or static image, repository URL/path, repo bootstrap/devenv behavior, SSH user, WireGuard settings, provider-specific Kubernetes/AWS Lambda MicroVM/Cloudflare settings, and non-secret `vars`.
 
 Precedence is simple: inline CLI flags and MCP tool payload fields win for the current operation; `.ciclo/config.json` fills any omitted values; Ciclo's built-in defaults apply last. That means the shared config can define the normal Claude/Codex MCP setup, secret provider aliases, and remote runner defaults while a single launch can still override the model, worktree, remote runner kind, or provider-specific field.
 
@@ -280,6 +280,8 @@ Set `configure_mcp: false` only when the remote image or bootstrap process alrea
 
 Ciclo publishes a base remote runner image to `ghcr.io/smol-platform/ciclo`. It includes the Ciclo CLI, Ciclo MCP servers, Herdr, SSH, Git, and WireGuard tools. Layer harness CLIs and auth bootstrap on top of it when your remote environment needs Claude Code, Codex, or cloud-specific tooling preinstalled.
 
+Remote plans also include image resolution, repo bootstrap, and a preflight script. Use `image_resolver.strategy: "variant"` to select official Nix `dockerTools` images such as `ghcr.io/smol-platform/ciclo:claude-latest`, `codex-latest`, or `full-latest`; use `image_resolver.strategy: "nixery"` for a private Nixery registry that composes package-path images for customer-specific environments. Kubernetes runners clone `repo_url` into `repo_path` when needed, run `devenv shell -- true` when `devenv.nix` exists, then mount and run preflight before WireGuard setup. Pass `preflight_only: true` to stop after those checks. Pass `preflight: { "claude": false }` only when a runner should skip the Claude access probe.
+
 ```bash
 docker build -t ciclo:dev .
 docker run ciclo:dev --version
@@ -294,15 +296,25 @@ Example Kubernetes runner payload:
   "loop_id": "review-loop",
   "bead_id": "ciclo-remote.1",
   "harness_id": "codex",
-  "image": "ghcr.io/smol-platform/ciclo:latest",
+  "image_resolver": {
+    "strategy": "variant",
+    "repository": "smol-platform/ciclo",
+    "tag": "latest"
+  },
+  "repo_url": "https://github.com/smol-platform/ciclo.git",
   "repo_path": "/workspace/ciclo",
   "prompt": "Use Ciclo MCP and report progress.",
   "herdr_session": "ciclo",
   "ssh_user": "ciclo",
   "wireguard": {
     "runner_address": "10.44.0.2/24",
-    "ciclo_endpoint": "198.51.100.10:51820"
+    "ciclo_endpoint": "198.51.100.10:51820",
+    "existing_config_secret_name": "ciclo-wireguard-runner"
   },
+  "repo_bootstrap": {
+    "use_devenv": true
+  },
+  "preflight_only": true,
   "kubernetes": {
     "namespace": "ciclo-runners",
     "job_name": "runner-k8s-1"

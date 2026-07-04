@@ -212,7 +212,9 @@ ciclo_attach_plan
 ciclo://remote-runners
 ```
 
-Supported runner kinds are `kubernetes`, `aws-lambda`, and `cloudflare`. Each kind is implemented by a remote runner provider plugin so new runnable environments can be added without changing the core planner. Each plan includes provider artifacts or commands, generated remote MCP client config artifacts, a simple WireGuard runner config, the Herdr remote target reachable over that tunnel, and a `ciclo attach` plan for monitoring the overall Ciclo session.
+Supported runner kinds are `kubernetes`, `aws-lambda`, and `cloudflare`. Each kind is implemented by a remote runner provider plugin so new runnable environments can be added without changing the core planner. Each plan includes provider artifacts or commands, generated remote MCP client config artifacts, image resolution evidence, repo bootstrap commands, a runtime preflight that checks Claude Code access and Ciclo-like build tools, a WireGuard runner config or existing Secret reference, the Herdr remote target reachable over that tunnel, and a `ciclo attach` plan for monitoring the overall Ciclo session.
+
+Ciclo image resolution supports `static`, `variant`, and `nixery` strategies. Official image variants are built with Nix `dockerTools` as `base-latest`, `codex-latest`, `claude-latest`, and `full-latest`; CI smoke-tests each variant with `ciclo --version`. Use `preflight_only: true` to validate image, repo bootstrap, Claude access, and project dependencies before starting WireGuard or Herdr. Kubernetes launches clone `repo_url` into `repo_path` when needed and run `devenv shell -- true` when the project has `devenv.nix`, so project dependencies are loaded as the last mile in the remote environment.
 
 The AWS provider targets Lambda MicroVMs, not legacy Lambda function invocation. It emits `aws lambda-microvms` image creation plus `run-microvm`, `suspend-microvm`, `resume-microvm`, and `terminate-microvm` lifecycle commands.
 
@@ -231,7 +233,7 @@ During plugin development, install from a local package directory:
 ciclo plugin install @acme/ciclo-runner-fly --path ../ciclo-runner-fly --trust
 ```
 
-External plugin packages include `ciclo.plugin.json` and export `activate(api)`. The manifest is validated before code loads, and enabled plugins must be trusted before activation. Plugin config is stored in `.ciclo/plugins.json`; npm-installed plugin packages are placed under `.ciclo/plugins/`. Plugins can declare `remote-runner` with `runnerKinds`, `secret-provider` with `secretProviderKinds`, or both.
+External plugin packages include `ciclo.plugin.json` and export `activate(api)`. The manifest is validated before code loads, and enabled plugins must be trusted before activation. Plugin config is stored in `.ciclo/plugins.json`; npm-installed plugin packages are placed under `.ciclo/plugins/`. Plugins can declare `remote-runner` with `runnerKinds`, `image-resolver` with `imageResolverStrategies`, `secret-provider` with `secretProviderKinds`, or a combination.
 
 Minimal plugin entrypoint:
 
