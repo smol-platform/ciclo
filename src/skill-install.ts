@@ -117,7 +117,7 @@ Use \`id\` in \`ciclo_request_secret\`; \`pluginProviderId\` is the provider id 
 - Worker sessions: \`ciclo_launch_worker_session\`, \`ciclo_heartbeat_worker_session\`, \`ciclo_list_worker_sessions\`, \`ciclo_stop_worker_session\`.
 - Worker launch options: use \`configure_mcp: true\`, \`mcp_clients\`, \`extra_args\`, \`isolation: "worktree"\`, model/effort/sandbox/approval settings, and dry-run first.
 - Claude Code model aliases: \`fable 5\`, \`Fable 5\`, and \`claude fable 5\` normalize to \`claude-fable-5\`.
-- Monitoring: \`ciclo_poll_events\`, \`ciclo_board\`, \`ciclo://events\`, \`ciclo://board\`; use \`expected_pr_after_ms\` for PR-producing work.
+- Monitoring: \`ciclo_poll_events\`, \`ciclo_board\`, \`ciclo://events\`, \`ciclo://board\`; tell terminal operators to use \`ciclo events --follow\`; use \`expected_pr_after_ms\` for PR-producing work.
 - Operator routing: \`ciclo_ask_operator\`, \`ciclo_answer_question\`, \`ciclo_report_feedback\`.
 - Secrets: \`ciclo_list_secret_providers\`, \`ciclo_request_secret\`, \`ciclo://secret-providers\`.
 - Remote runners: \`ciclo_launch_remote_runner\`, \`ciclo_list_remote_runners\`, \`ciclo_attach_plan\`, \`ciclo://remote-runners\`.
@@ -728,7 +728,7 @@ Only trust plugins after the operator accepts the package source and behavior. E
 - Worker sessions: \`ciclo_launch_worker_session\`, \`ciclo_heartbeat_worker_session\`, \`ciclo_list_worker_sessions\`, \`ciclo_stop_worker_session\`.
 - Worker launch options: \`configure_mcp: true\`, \`mcp_clients\`, \`mcp_server_name\`, \`mcp_command\`, \`mcp_env\`, \`mcp_secret_env\`, \`mcp_claude_channel\`, \`extra_args\`, \`isolation: "worktree"\`, model/effort/sandbox/approval settings.
 - Claude Code model aliases: \`fable 5\`, \`Fable 5\`, and \`claude fable 5\` normalize to \`claude-fable-5\`.
-- Monitoring: \`ciclo_poll_events\`, \`ciclo_board\`, \`ciclo://events\`, \`ciclo://board\`.
+- Monitoring: \`ciclo_poll_events\`, \`ciclo_board\`, \`ciclo://events\`, \`ciclo://board\`; tell terminal operators to use \`ciclo events --follow\`.
 - Operator routing: \`ciclo_ask_operator\`, \`ciclo_answer_question\`, \`ciclo_report_feedback\`.
 - Secrets: \`ciclo_list_secret_providers\`, \`ciclo_request_secret\`, \`ciclo://secret-providers\`.
 - Remote runners: \`ciclo_launch_remote_runner\`, \`ciclo_list_remote_runners\`, \`ciclo_attach_plan\`, \`ciclo://remote-runners\`.

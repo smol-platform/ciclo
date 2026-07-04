@@ -11,12 +11,14 @@ import {
   parseAttachOptions,
   parseBenchmarkOptions,
   parseBenchmarkScenarioDir,
+  parseEventsOptions,
   parseLaunchOptions,
   parseMcpHttpOptions,
   parseMcpInstallOptions,
   parseSkillInstallOptions,
   type CliIo
 } from "../src/cli.js";
+import { cicloEventLogPath, CicloEventStore } from "../src/ciclo-events.js";
 import { encodeRuntimeSecretEnvBindings } from "../src/secret-env-runtime.js";
 import { CICLO_VERSION } from "../src/version.js";
 
@@ -39,6 +41,7 @@ test("CLI prints top-level help and version", async () => {
   assert.match(help.stdout.join("\n"), /Usage: ciclo <command>/);
   assert.match(help.stdout.join("\n"), /attach/);
   assert.match(help.stdout.join("\n"), /launch/);
+  assert.match(help.stdout.join("\n"), /events/);
   assert.match(help.stdout.join("\n"), /mcp http/);
   assert.match(help.stdout.join("\n"), /mcp install/);
   assert.match(help.stdout.join("\n"), /skill install/);
@@ -197,6 +200,64 @@ test("CLI config commands initialize and mcp install reads project defaults", as
     assert.match(install.stdout[0] ?? "", /SERVICE_MODE/);
     assert.match(install.stdout[0] ?? "", /\[redacted secret\]/);
     assert.deepEqual(installed.targets?.map((target) => target.client), ["codex"]);
+  } finally {
+    process.chdir(before);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("CLI events command reads and follows the project event log", async () => {
+  assert.deepEqual(parseEventsOptions([
+    "--project",
+    "/tmp/project",
+    "--cursor",
+    "4",
+    "--limit",
+    "12",
+    "--follow",
+    "--once",
+    "--interval-ms",
+    "25"
+  ]), {
+    projectRoot: "/tmp/project",
+    cursor: 4,
+    limit: 12,
+    follow: true,
+    once: true,
+    intervalMs: 25,
+    json: false
+  });
+  assert.throws(() => parseEventsOptions(["--cursor", "wat"]), /--cursor must be/);
+
+  const before = process.cwd();
+  const tempDir = mkdtempSync(join(tmpdir(), "ciclo-events-cli-"));
+  try {
+    process.chdir(tempDir);
+    const eventStore = new CicloEventStore({ persistPath: cicloEventLogPath(tempDir), now: () => "2026-07-04T14:00:00.000Z" });
+    eventStore.append({
+      type: "brain.decision",
+      loopId: "review-loop",
+      beadId: "ciclo-1",
+      workerSessionId: "worker-1",
+      evidence: ["brain:fixture"],
+      data: { purpose: "monitoring", provider: "openai" }
+    });
+
+    const human = captureIo();
+    assert.equal(await main(["node", "ciclo", "events", "--project", tempDir], human.io), 0);
+    assert.match(human.stdout.join("\n"), /#1 2026-07-04T14:00:00.000Z brain\.decision/);
+    assert.match(human.stdout.join("\n"), /loop=review-loop/);
+    assert.match(human.stdout.join("\n"), /data=\{"purpose":"monitoring","provider":"openai"\}/);
+
+    const json = captureIo();
+    assert.equal(await main(["node", "ciclo", "events", "--project", tempDir, "--follow", "--once", "--compact"], json.io), 0);
+    const payload = JSON.parse(json.stdout[0] ?? "{}") as {
+      next_cursor?: number;
+      events?: readonly { type?: string; data?: { provider?: string } }[];
+    };
+    assert.equal(payload.next_cursor, 1);
+    assert.equal(payload.events?.[0]?.type, "brain.decision");
+    assert.equal(payload.events?.[0]?.data?.provider, "openai");
   } finally {
     process.chdir(before);
     rmSync(tempDir, { recursive: true, force: true });
@@ -439,6 +500,12 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
     assert.ok(terminalPlan.harnessArgs?.includes("--sandbox"));
     assert.ok(terminalPlan.harnessArgs?.includes("danger-full-access"));
     assert.equal(terminalPlan.herdr, undefined);
+
+    const events = readFileSync(cicloEventLogPath(tempDir), "utf8");
+    assert.match(events, /"type":"cli.command"/);
+    assert.match(events, /"command":"launch"/);
+    assert.match(events, /"phase":"dry_run"/);
+    assert.match(events, /"launch_mode":"herdr"/);
   } finally {
     process.chdir(before);
     rmSync(tempDir, { recursive: true, force: true });

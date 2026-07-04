@@ -131,6 +131,14 @@ ciclo://events
 ciclo://board
 ```
 
+To follow what Ciclo is doing from your terminal, run:
+
+```bash
+ciclo events --follow
+```
+
+`ciclo events --follow` tails the persisted project event stream in `.ciclo/events.jsonl`, so an operator can watch Ciclo commands, heartbeat notes, OpenAI brain decisions, worker state changes, PR/validation updates, questions, and blockers as they happen. Use `--cursor <n>` to resume from a prior cursor and `--json` or `--compact` when another tool is consuming the stream.
+
 To join a Ciclo-enabled project from your terminal instead of asking an existing Claude/Codex session to spawn a worker, run:
 
 ```bash

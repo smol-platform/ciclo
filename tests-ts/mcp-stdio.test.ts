@@ -1683,6 +1683,108 @@ test("MCP close work launches a bounded review worker after successful task clos
   assert.ok(workers[0]?.evidence.some((item) => item === "worker.session.launch:planned"));
 });
 
+test("MCP runtime events trace read, work, attach, auth, and review-skip flows", async () => {
+  const eventStore = new CicloEventStore();
+  const client = fakeMutationClient(readyTask);
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    beadsClient: client,
+    loop: activeLoop,
+    policy: supervisedPolicy,
+    promptSendConfigured: true,
+    mutationIdempotencyStore: new Set<string>(),
+    eventStore,
+    deviceFlow: new DeviceAuthorizationFlow({
+      verificationUri: "https://ciclo.local/device",
+      nowMs: () => 0,
+      codeBytes: () => Buffer.from("0123456789abcdef0123456789abcdef", "hex")
+    })
+  };
+
+  await handleMcpRequest({ jsonrpc: "2.0", id: 2301, method: "tools/call", params: { name: "ciclo_status", arguments: {} } }, service, runtime);
+  await handleMcpRequest({ jsonrpc: "2.0", id: 2302, method: "tools/call", params: { name: "ciclo_list_ready_work", arguments: { limit: 5 } } }, service, runtime);
+  await handleMcpRequest({
+    jsonrpc: "2.0",
+    id: 2303,
+    method: "tools/call",
+    params: {
+      name: "ciclo_start_work",
+      arguments: { loop_id: "review-demo", bead_id: readyTask.id, harness_id: "codex", dry_run: true }
+    }
+  }, service, runtime);
+  await handleMcpRequest({
+    jsonrpc: "2.0",
+    id: 2304,
+    method: "tools/call",
+    params: {
+      name: "ciclo_update_work",
+      arguments: {
+        loop_id: "review-demo",
+        bead_id: readyTask.id,
+        harness_id: "codex",
+        kind: "progress",
+        message: "Trace coverage progress update."
+      }
+    }
+  }, service, runtime);
+  await handleMcpRequest({
+    jsonrpc: "2.0",
+    id: 2305,
+    method: "tools/call",
+    params: {
+      name: "ciclo_close_work",
+      arguments: {
+        loop_id: "review-demo",
+        bead_id: readyTask.id,
+        harness_id: "codex",
+        final_summary: "Trace coverage complete.",
+        acceptance_evidence: ["trace coverage event stream checked"],
+        validation_evidence: [{ command: "node --test", passed: true, summary: "passed" }],
+        launch_review: false
+      }
+    }
+  }, service, runtime);
+  await handleMcpRequest({ jsonrpc: "2.0", id: 2306, method: "tools/call", params: { name: "ciclo_attach_plan", arguments: { herdr_session: "ciclo" } } }, service, runtime);
+  await handleMcpRequest({ jsonrpc: "2.0", id: 2307, method: "tools/call", params: { name: "ciclo_list_secret_providers", arguments: {} } }, service, runtime);
+  const deviceStart = structuredContent(
+    await handleMcpRequest({
+      jsonrpc: "2.0",
+      id: 2308,
+      method: "tools/call",
+      params: {
+        name: "ciclo_auth_device_start",
+        arguments: { client_id: "trace-test", client_kind: "cli", requested_scopes: ["read_status"] }
+      }
+    }, service, runtime)
+  );
+  await handleMcpRequest({
+    jsonrpc: "2.0",
+    id: 2309,
+    method: "tools/call",
+    params: { name: "ciclo_auth_device_poll", arguments: { device_code: deviceStart.device_code } }
+  }, service, runtime);
+
+  const events = eventStore.poll(0).events;
+  const types = events.map((event) => event.type);
+  assert.ok(types.includes("status.checked"));
+  assert.ok(types.includes("work.ready_listed"));
+  assert.ok(types.includes("work.started"));
+  assert.ok(types.includes("work.updated"));
+  assert.ok(types.includes("bead.closed"));
+  assert.ok(types.includes("review_session.skipped"));
+  assert.ok(types.includes("attach.plan_created"));
+  assert.ok(types.includes("secret_providers.listed"));
+  assert.ok(types.includes("auth.device_started"));
+  assert.ok(types.includes("auth.device_polled"));
+  assert.ok(!types.includes("feedback.reported"));
+  const progress = events.find((event) => event.type === "work.updated");
+  assert.equal(progress?.beadId, readyTask.id);
+  assert.equal(progress?.data?.kind, "progress");
+  const deviceEvent = events.find((event) => event.type === "auth.device_started");
+  assert.equal(deviceEvent?.data?.client_id, "trace-test");
+  assert.deepEqual(deviceEvent?.data?.requested_scopes, ["read_status"]);
+});
+
 test("MCP work mutations enforce loop dry-run policy before Beads ownership changes", async () => {
   const client = fakeMutationClient(readyTask);
   const runtime: CicloMcpRuntimeContext = {

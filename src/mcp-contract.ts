@@ -172,7 +172,7 @@ export const cicloMcpTools: readonly McpToolContract[] = [
   },
   {
     name: "ciclo_poll_events",
-    description: "Poll Ciclo runtime events after a cursor: worker state changes, Beads mutations, blockers, validation, questions, feedback, and tracker sync.",
+    description: "Poll Ciclo runtime events after a cursor: status and board checks, ready-work reads, work starts and updates, worker state changes, Beads mutations, review sessions, blockers, validation, questions, feedback, attach plans, auth/device flow, secrets, remote runners, and tracker sync.",
     inputSchema: objectSchema("Event poll request.", {
       cursor: { type: "number", description: "Last seen event cursor. Use 0 for the first poll." },
       limit: { type: "number", description: "Maximum events to return." }

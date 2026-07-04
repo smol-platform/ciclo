@@ -153,9 +153,12 @@ ciclo launch claude --model claude-fable-5
 ciclo launch codex --prompt "Review the repo" -- --full-auto
 ciclo launch claude --dry-run --compact
 ciclo launch codex --terminal
+ciclo events --follow
 ```
 
 `ciclo launch` reads `.ciclo/config.json`, writes the generated `.mcp.json` or `.codex/config.toml`, then starts the selected harness as the first pane in a named Herdr session. Secret-backed MCP entries are written as `ciclo secret exec` runtime wrappers that carry provider references, not resolved secret values; the wrapper resolves the secret immediately before starting the intended child process. The default Herdr session and pane name are the project directory name, so `ciclo launch codex` in this repository starts session `ciclo` with pane `ciclo` and then attaches to it. Use `--session`, `--pane-name`, or `--no-attach` to control the Herdr wrapper, and use `--terminal` when you explicitly want the harness process in the current terminal instead. Use `--project`, `--server-name`, `--mcp-command`, `--harness-command`, `--model`, `--effort`, `--permission-mode`, `--approval-policy`, `--sandbox`, `--prompt`, and `--extra-arg` to override one launch.
+
+Use `ciclo events --follow` from a terminal to follow the same persisted project event stream that Ciclo MCP writes to `.ciclo/events.jsonl`. The stream includes worker state changes, heartbeat monologue entries, OpenAI brain decisions, operator questions, validation/PR events, and other redacted runtime events. Use `--cursor <n>` to resume after a known cursor, `--limit <n>` to bound each poll, and `--json` or `--compact` for machine-readable output.
 
 Use Ciclo as the operator interface for managed worker sessions. MCP clients can call:
 

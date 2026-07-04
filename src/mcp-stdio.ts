@@ -15,7 +15,7 @@ import {
 import { BeadsRemoteTrackerSync, type BeadsRemoteTrackerSyncInput } from "./beads-tracker-sync.js";
 import { selectAndClaimBeadsWork, type BeadsWorkClaimClient } from "./beads-work-queue.js";
 import { runtimeDecision, type HarnessId, type LoopConfig } from "./ciclo-core.js";
-import { CicloEventStore, type CicloEventInput } from "./ciclo-events.js";
+import { cicloEventLogPath, CicloEventStore, type CicloEventInput } from "./ciclo-events.js";
 import {
   authorizeClientRequest,
   clientAccessView,
@@ -1421,7 +1421,7 @@ export function createLocalMcpReadService(root = process.cwd()): CicloMcpReadSer
 export function createLocalMcpRuntimeContext(root = process.cwd()): CicloMcpRuntimeContext {
   const loadedConfig = loadCicloProjectConfig(root);
   const tokenRegistry = new TokenRegistry();
-  const eventStore = new CicloEventStore();
+  const eventStore = new CicloEventStore({ persistPath: cicloEventLogPath(root) });
   const runtime: CicloMcpRuntimeContext = {
     auth: {
       ...defaultClientAuthContext(root),
@@ -1494,11 +1494,35 @@ async function callTool(
   authorization: AuthorizationResult
 ): Promise<unknown> {
   if (name === "ciclo_status") {
-    return textContent(await liveStatus(service, runtime, staleAfterMs(params)));
+    const status = await liveStatus(service, runtime, staleAfterMs(params));
+    const statusRecord = asRecord(status);
+    const statusLoops = Array.isArray(statusRecord.loops) ? statusRecord.loops : [];
+    const statusRemotes = Array.isArray(statusRecord.remotes) ? statusRecord.remotes : [];
+    const accessRecord = asRecord(statusRecord.access);
+    const heartbeatRecord = asRecord(statusRecord.heartbeat);
+    appendRuntimeEvent(runtime, {
+      type: "status.checked",
+      evidence: ["mcp.status:checked"],
+      data: {
+        loops: statusLoops.length,
+        remote_sessions: statusRemotes.length,
+        access_mode: accessRecord.mode,
+        heartbeat_running: heartbeatRecord.running === true
+      }
+    });
+    return textContent(status);
   }
 
   if (name === "ciclo_loop_status") {
-    return textContent(await liveLoopStatus(stringParam(params, "loop_id", "review-demo"), service, runtime));
+    const loopId = stringParam(params, "loop_id", "review-demo");
+    const loop = await liveLoopStatus(loopId, service, runtime);
+    appendRuntimeEvent(runtime, {
+      type: "loop.checked",
+      loopId,
+      evidence: loop.evidence,
+      data: { state: loop.loop.state, kind: loop.loop.kind }
+    });
+    return textContent(loop);
   }
 
   if (name === "ciclo_decide") {
@@ -1569,11 +1593,37 @@ async function callTool(
   }
 
   if (name === "ciclo_board") {
-    return textContent(await liveBoard(service, runtime, staleAfterMs(params), expectedPrAfterMs(params)));
+    const board = await liveBoard(service, runtime, staleAfterMs(params), expectedPrAfterMs(params));
+    const boardRecord = asRecord(board);
+    const boardRowsValue = Array.isArray(boardRecord.rows) ? boardRecord.rows : [];
+    const boardEvidence = Array.isArray(boardRecord.evidence) ? boardRecord.evidence.filter((item): item is string => typeof item === "string") : [];
+    const boardRollup = asRecord(boardRecord.rollup);
+    const boardWorkers = asRecord(boardRollup.workers);
+    appendRuntimeEvent(runtime, {
+      type: "board.checked",
+      evidence: ["mcp.board:checked", ...boardEvidence],
+      data: {
+        rows: boardRowsValue.length,
+        workers_total: boardWorkers.total,
+        ready_beads: boardRollup.ready_beads,
+        pending_questions: boardRollup.pending_questions
+      }
+    });
+    return textContent(board);
   }
 
   if (name === "ciclo_list_ready_work") {
-    return textContent(await service.readyWork(numberParam(params, "limit", 20)));
+    const ready = await service.readyWork(numberParam(params, "limit", 20));
+    appendRuntimeEvent(runtime, {
+      type: "work.ready_listed",
+      evidence: ready.evidence,
+      data: {
+        selected: ready.selected?.id,
+        work_count: ready.work.length,
+        skipped_count: ready.skipped.length
+      }
+    });
+    return textContent(ready);
   }
 
   if (name === "ciclo_ask_operator") {
@@ -1898,12 +1948,23 @@ async function callTool(
   }
 
   if (name === "ciclo_list_remote_runners") {
-    return textContent({ remote_runners: runtime.remoteRunnerRegistry?.list() ?? [] });
+    const remoteRunners = runtime.remoteRunnerRegistry?.list() ?? [];
+    appendRuntimeEvent(runtime, {
+      type: "remote_runner.listed",
+      evidence: ["remote_runner.listed"],
+      data: { count: remoteRunners.length }
+    });
+    return textContent({ remote_runners: remoteRunners });
   }
 
   if (name === "ciclo_list_secret_providers") {
     const registry = runtime.secretProviderRegistry ?? createDefaultSecretProviderRegistry();
     const providers = registry.list();
+    appendRuntimeEvent(runtime, {
+      type: "secret_providers.listed",
+      evidence: ["secret.providers:list", `secret.providers.count:${providers.length}`],
+      data: { count: providers.length, provider_ids: providers.map((provider) => provider.id) }
+    });
     return textContent({
       secret_providers: providers,
       evidence: [
@@ -1961,11 +2022,22 @@ async function callTool(
   }
 
   if (name === "ciclo_attach_plan") {
-    return textContent(buildCicloAttachPlan({
+    const plan = buildCicloAttachPlan({
       remoteTarget: stringParam(params, "herdr_target") || undefined,
       session: stringParam(params, "herdr_session") || undefined,
       target: stringParam(params, "agent_target") || undefined
-    }));
+    });
+    appendRuntimeEvent(runtime, {
+      type: "attach.plan_created",
+      evidence: plan.evidence,
+      data: {
+        command: plan.command,
+        remote: plan.remoteTarget !== undefined,
+        session: plan.session,
+        target: plan.target
+      }
+    });
+    return textContent(plan);
   }
 
   if (name === "ciclo_launch_worker_session") {
@@ -2087,8 +2159,14 @@ async function callTool(
 
   if (name === "ciclo_list_worker_sessions") {
     const supervisor = runtime.workerSupervisor ?? new WorkerSessionSupervisor(runtime.auth.session.projectRoot);
-    supervisor.refreshStalled(staleAfterMs(params));
-    return textContent({ worker_sessions: supervisor.list().map(publicWorkerSession) });
+    const stalled = supervisor.refreshStalled(staleAfterMs(params));
+    const workerSessions = supervisor.list().map(publicWorkerSession);
+    appendRuntimeEvent(runtime, {
+      type: "worker.listed",
+      evidence: ["worker.sessions:list", `worker.sessions.count:${workerSessions.length}`],
+      data: { count: workerSessions.length, stalled: stalled.length }
+    });
+    return textContent({ worker_sessions: workerSessions });
   }
 
   if (name === "ciclo_stop_worker_session") {
@@ -2142,6 +2220,18 @@ async function callTool(
       reason: policy.reason,
       evidence: policy.evidence
     });
+    appendRuntimeEvent(runtime, {
+      type: "work.started",
+      loopId: loop.id,
+      beadId: stringParam(params, "bead_id") || undefined,
+      evidence: payload.evidence,
+      data: {
+        dispatched: payload.dispatched,
+        policy_decision: policy.decision,
+        dry_run: booleanParam(params, "dry_run", false),
+        harness_id: stringParam(params, "harness_id", "unknown")
+      }
+    });
     return textContent(payload);
   }
 
@@ -2185,7 +2275,7 @@ async function callTool(
           ? (booleanParam(params, "validation_passed") ? "validation.passed" : "validation.failed")
           : kind === "blocker"
             ? "blocker.raised"
-            : "feedback.reported",
+            : "work.updated",
         loopId: loop.id,
         beadId: stringParam(params, "bead_id"),
         evidence: result.evidence,
@@ -2286,6 +2376,20 @@ async function callTool(
           evidence: reviewSession.evidence
         });
       }
+      appendRuntimeEvent(runtime, {
+        type: reviewSession.launched ? "review_session.launched" : "review_session.skipped",
+        loopId: loop.id,
+        beadId,
+        evidence: reviewSession.evidence,
+        data: {
+          launched: reviewSession.launched,
+          reason: reviewSession.reason,
+          session_id: reviewSession.sessionId,
+          harness_id: reviewSession.harnessId,
+          state: reviewSession.state,
+          dry_run: reviewSession.dryRun
+        }
+      });
     }
     return textContent(reviewSession === undefined ? result : { ...result, review_session: reviewSession });
   }
@@ -2358,11 +2462,25 @@ async function callTool(
     if (runtime.deviceFlow === undefined) {
       throw new Error("device authorization flow is not configured");
     }
+    const deviceClientId = stringParam(params, "client_id", "mcp-client");
+    const deviceClientKind = clientKind(stringParam(params, "client_kind", "cli"));
+    const requestedScopes = stringListParam(params, "requested_scopes");
     const start = runtime.deviceFlow.start({
       sessionId: runtime.auth.session.id,
-      clientId: stringParam(params, "client_id", "mcp-client"),
-      clientKind: clientKind(stringParam(params, "client_kind", "cli")),
-      scopes: stringListParam(params, "requested_scopes")
+      clientId: deviceClientId,
+      clientKind: deviceClientKind,
+      scopes: requestedScopes
+    });
+    appendRuntimeEvent(runtime, {
+      type: "auth.device_started",
+      evidence: ["auth.device:start", `auth.device.client_kind:${deviceClientKind}`],
+      data: {
+        client_id: deviceClientId,
+        client_kind: deviceClientKind,
+        requested_scopes: requestedScopes,
+        expires_at: start.expiresAt,
+        interval_seconds: start.intervalSeconds
+      }
     });
     return textContent({
       device_code: start.deviceCode,
@@ -2382,6 +2500,15 @@ async function callTool(
     if (result.token !== undefined) {
       runtime.auth.tokenRegistry?.store(result.token);
     }
+    appendRuntimeEvent(runtime, {
+      type: "auth.device_polled",
+      evidence: result.evidence,
+      data: {
+        status: authDeviceStatus(result.outcome),
+        interval_seconds: result.intervalSeconds,
+        token_issued: result.token !== undefined
+      }
+    });
     return textContent({
       status: authDeviceStatus(result.outcome),
       token_set: result.token,

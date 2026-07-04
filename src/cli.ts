@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { basename, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { buildStandaloneStatus } from "./app.js";
@@ -15,6 +16,7 @@ import {
   redactedCicloProjectConfig,
   writeSampleCicloConfig
 } from "./ciclo-config.js";
+import { cicloEventLogPath, CicloEventStore, type CicloEvent } from "./ciclo-events.js";
 import { runtimeDecision } from "./ciclo-core.js";
 import { runMcpHttpServer, type McpHttpConfig } from "./mcp-http.js";
 import { installCicloMcp, type CicloMcpInstallClient, type CicloMcpInstallOptions, type CicloMcpInstallResult } from "./mcp-install.js";
@@ -65,6 +67,16 @@ export interface CliAttachOptions {
   readonly herdrSession?: string;
   readonly agentTarget?: string;
   readonly dryRun: boolean;
+}
+
+export interface CliEventsOptions {
+  readonly projectRoot?: string;
+  readonly cursor: number;
+  readonly limit: number;
+  readonly follow: boolean;
+  readonly once: boolean;
+  readonly intervalMs: number;
+  readonly json: boolean;
 }
 
 export interface CliMcpInstallOptions {
@@ -145,6 +157,7 @@ function usage(): string {
     "  status                         Print Ciclo status JSON.",
     "  runtime                        Print runtime/product-boundary JSON.",
     "  benchmark [scenario-dir]       Run benchmark scenarios.",
+    "  events [--follow]              Show Ciclo command and decision events.",
     "  attach [options]               Attach to Ciclo's Herdr session.",
     "  launch [claude|codex]          Install MCP config and start a Herdr harness session.",
     "  secret exec [options] -- <cmd> Resolve secret env for one child process.",
@@ -181,6 +194,7 @@ function usage(): string {
     "Examples:",
     "  ciclo status",
     `  ciclo benchmark ${DEFAULT_BENCHMARK_DIR}`,
+    "  ciclo events --follow",
     "  ciclo attach --session ciclo",
     "  ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo",
     "  ciclo launch codex",
@@ -216,6 +230,28 @@ function commandHelp(command: string): string {
       "Run benchmark scenario fixtures and print the scored report JSON.",
       "Use --real or --judge pi to score with the local Pi CLI.",
       `Default scenario directory: ${DEFAULT_BENCHMARK_DIR}`
+    ].join("\n");
+  }
+  if (command === "events") {
+    return [
+      "Usage: ciclo events [options]",
+      "",
+      "Read Ciclo's project event stream from .ciclo/events.jsonl.",
+      "",
+      "Options:",
+      "  --project <dir>                Project root. Default: cwd.",
+      "  --cursor <n>                   Only show events after this cursor. Default: 0.",
+      "  --limit <count>                Maximum events per poll. Default: 100.",
+      "  --follow                       Keep polling until interrupted.",
+      "  --interval-ms <ms>             Follow polling interval. Default: 1000.",
+      "  --once                         With --follow, poll once and exit.",
+      "  --json                         Emit the poll payload as JSON.",
+      "  --compact                      Emit compact JSON with --json.",
+      "",
+      "Examples:",
+      "  ciclo events",
+      "  ciclo events --follow",
+      "  ciclo events --follow --cursor 42"
     ].join("\n");
   }
   if (command === "attach") {
@@ -416,6 +452,14 @@ function parsePositiveInteger(value: string, flag: string): number {
   return parsed;
 }
 
+function parseNonNegativeInteger(value: string, flag: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${flag} must be a non-negative integer`);
+  }
+  return parsed;
+}
+
 export function parseBenchmarkScenarioDir(args: readonly string[]): string | undefined {
   return parseBenchmarkOptions(args).runner.scenarioDir;
 }
@@ -494,6 +538,63 @@ export function parseBenchmarkOptions(args: readonly string[]): CliBenchmarkOpti
       scenarioLimit,
       scoreThreshold
     }
+  };
+}
+
+export function parseEventsOptions(args: readonly string[]): CliEventsOptions {
+  let projectRoot: string | undefined;
+  let cursor = 0;
+  let limit = 100;
+  let follow = false;
+  let once = false;
+  let intervalMs = 1000;
+  let json = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--project") {
+      projectRoot = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--cursor") {
+      cursor = parseNonNegativeInteger(requireValue(args, index, arg), arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--limit") {
+      limit = parsePositiveInteger(requireValue(args, index, arg), arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--follow" || arg === "-f") {
+      follow = true;
+      continue;
+    }
+    if (arg === "--once") {
+      once = true;
+      continue;
+    }
+    if (arg === "--interval-ms") {
+      intervalMs = parsePositiveInteger(requireValue(args, index, arg), arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--json" || arg === "--compact") {
+      json = true;
+      continue;
+    }
+    throw new Error(`unknown events option: ${arg}`);
+  }
+
+  return {
+    ...(projectRoot === undefined ? {} : { projectRoot }),
+    cursor,
+    limit,
+    follow,
+    once,
+    intervalMs,
+    json
   };
 }
 
@@ -840,6 +941,51 @@ function mcpHttpConfig(options: CliMcpHttpOptions): Partial<McpHttpConfig> {
   };
 }
 
+function formatEvent(event: CicloEvent): string {
+  const parts = [`#${event.cursor}`, event.at, event.type];
+  if (event.loopId !== undefined) parts.push(`loop=${event.loopId}`);
+  if (event.beadId !== undefined) parts.push(`bead=${event.beadId}`);
+  if (event.workerSessionId !== undefined) parts.push(`worker=${event.workerSessionId}`);
+  if (event.state !== undefined) parts.push(`state=${event.state}`);
+  if (event.evidence.length > 0) parts.push(`evidence=${event.evidence.join(",")}`);
+  if (event.data !== undefined && Object.keys(event.data).length > 0) parts.push(`data=${JSON.stringify(event.data)}`);
+  return parts.join(" ");
+}
+
+function pollProjectEvents(options: CliEventsOptions): ReturnType<CicloEventStore["poll"]> {
+  const root = resolve(options.projectRoot ?? process.cwd());
+  const eventStore = new CicloEventStore({ persistPath: cicloEventLogPath(root) });
+  return eventStore.poll(options.cursor, options.limit);
+}
+
+async function runEvents(args: readonly string[], io: CliIo): Promise<number> {
+  const options = parseEventsOptions(args);
+  const mode = parseJsonMode(args);
+  let cursor = options.cursor;
+
+  const emitPoll = (): number => {
+    const poll = pollProjectEvents({ ...options, cursor });
+    cursor = poll.nextCursor;
+    if (options.json) {
+      printJson({ cursor: poll.cursor, next_cursor: poll.nextCursor, events: poll.events }, mode, io);
+      return poll.events.length;
+    }
+    for (const event of poll.events) {
+      io.stdout(formatEvent(event));
+    }
+    return poll.events.length;
+  };
+
+  emitPoll();
+  if (!options.follow || options.once) return 0;
+
+  io.stderr(`following Ciclo events from ${cicloEventLogPath(resolve(options.projectRoot ?? process.cwd()))}`);
+  while (true) {
+    await sleep(options.intervalMs);
+    emitPoll();
+  }
+}
+
 async function startMcpHttp(args: readonly string[], io: CliIo): Promise<number> {
   const options = parseMcpHttpOptions(args);
   const root = projectRootFromEnv();
@@ -965,6 +1111,26 @@ function launchArgs(options: CliLaunchOptions, projectRoot: string, install: Cic
   return args;
 }
 
+function appendCliCommandEvent(projectRoot: string, input: {
+  readonly command: string;
+  readonly phase: string;
+  readonly exitCode?: number;
+  readonly evidence?: readonly string[];
+  readonly data?: Record<string, unknown>;
+}): void {
+  const eventStore = new CicloEventStore({ persistPath: cicloEventLogPath(projectRoot) });
+  eventStore.append({
+    type: "cli.command",
+    evidence: input.evidence ?? [`cli.command:${input.command}`, `cli.command.phase:${input.phase}`],
+    data: {
+      command: input.command,
+      phase: input.phase,
+      ...(input.exitCode === undefined ? {} : { exit_code: input.exitCode }),
+      ...(input.data ?? {})
+    }
+  });
+}
+
 async function buildLaunchPlan(options: CliLaunchOptions): Promise<CicloLaunchPlan> {
   const projectRoot = resolve(options.projectRoot ?? process.cwd());
   const install = await configuredMcpInstall({
@@ -1020,6 +1186,17 @@ async function buildLaunchPlan(options: CliLaunchOptions): Promise<CicloLaunchPl
 async function runLaunch(args: readonly string[], io: CliIo): Promise<number> {
   const options = parseLaunchOptions(args);
   const plan = await buildLaunchPlan(options);
+  appendCliCommandEvent(plan.projectRoot, {
+    command: "launch",
+    phase: options.dryRun ? "dry_run" : "start",
+    evidence: plan.evidence,
+    data: {
+      client: plan.client,
+      launch_mode: plan.launchMode,
+      harness_command: plan.harnessCommand,
+      herdr_session: plan.herdr?.sessionName
+    }
+  });
   if (options.dryRun) {
     printJson(plan, parseJsonMode(args), io);
     return 0;
@@ -1028,10 +1205,30 @@ async function runLaunch(args: readonly string[], io: CliIo): Promise<number> {
     cwd: plan.projectRoot,
     stdio: "inherit"
   });
+  appendCliCommandEvent(plan.projectRoot, {
+    command: "launch",
+    phase: "launcher_exit",
+    exitCode: result.status ?? 1,
+    data: {
+      client: plan.client,
+      launch_mode: plan.launchMode,
+      harness_command: plan.harnessCommand
+    }
+  });
   if (result.status !== 0 || plan.launchMode !== "herdr" || plan.herdr?.attachCommand === undefined) return result.status ?? 1;
   const attach = spawnSync(plan.herdr.attachCommand, [...(plan.herdr.attachArgs ?? [])], {
     cwd: plan.projectRoot,
     stdio: "inherit"
+  });
+  appendCliCommandEvent(plan.projectRoot, {
+    command: "launch",
+    phase: "attach_exit",
+    exitCode: attach.status ?? 1,
+    data: {
+      client: plan.client,
+      launch_mode: plan.launchMode,
+      herdr_session: plan.herdr.sessionName
+    }
   });
   return attach.status ?? 1;
 }
@@ -1313,6 +1510,10 @@ export async function main(argv: readonly string[] = process.argv, io: CliIo = d
       const options = parseBenchmarkOptions(args);
       printJson(await runBenchmarkSuite(options.runner), parseJsonMode(args), io);
       return 0;
+    }
+
+    if (command === "events") {
+      return await runEvents(args, io);
     }
 
     if (command === "attach") {
