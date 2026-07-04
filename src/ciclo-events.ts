@@ -17,6 +17,7 @@ export type CicloEventType =
   | "remote_session.stale"
   | "remote_session.lost"
   | "heartbeat.tick"
+  | "heartbeat.monologue"
   | "brain.decision"
   | "secret.requested"
   | "tracker.synced";

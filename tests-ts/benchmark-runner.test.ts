@@ -9,6 +9,30 @@ import {
 } from "../src/benchmark-runner.js";
 import { loadBenchmarkScenarioFile } from "../src/benchmark-scenario.js";
 
+const expandedOrchestrationScenarioIds = [
+  "startup_first_wake_state_selection",
+  "pr_review_bottleneck_prioritizes_risk",
+  "flaky_ci_diagnosis",
+  "stale_worktree_dirty_cleanup",
+  "api_contract_drift_coordination",
+  "ui_screenshot_regression_verification",
+  "stuck_worker_turn_escalation",
+  "conflicting_worker_edits_reconciliation",
+  "risky_change_operator_approval",
+  "remote_runner_lost_mid_task",
+  "integration_secret_missing",
+  "post_merge_cleanup",
+  "review_followup_bugs_to_beads",
+  "deploy_smoke_failure_blocks_release",
+  "mixed_harness_model_routing",
+  "context_budget_near_limit_compaction",
+  "local_remote_worker_coordination",
+  "beads_remote_conflict_resolution",
+  "benchmark_regression_creates_task",
+  "idle_monitor_session_recovery",
+  "crash_recovery_reconstructs_board"
+] as const;
+
 test("benchmark runner loads the fixture suite in deterministic order", () => {
   const scenarios = loadBenchmarkScenarioSuite();
   const ids = scenarios.map((scenario) => scenario.id);
@@ -31,7 +55,12 @@ test("benchmark runner loads the fixture suite in deterministic order", () => {
     "post_close_launches_review_session",
     "claude_loop_surfaces_blocker",
     "codex_goal_launches_worker",
-    "codex_goal_answer_reasonable_question"
+    "codex_goal_answer_reasonable_question",
+    "project_orchestrator_real_repo_adaptive",
+    "heartbeat_project_memory_board_hygiene",
+    "heartbeat_pr_review_model_selection",
+    "heartbeat_stuck_session_model_escalation",
+    ...expandedOrchestrationScenarioIds
   ]) {
     assert.ok(ids.includes(id), `missing benchmark scenario ${id}`);
   }
@@ -108,6 +137,92 @@ test("fixture candidate requires MCP secret env resolution without prompt secret
   assert.ok(candidate.actions.some((action) => action.kind === "configure_runtime_secret_exec"));
   assert.ok(candidate.actions.some((action) => action.kind === "redact_secret_env_outputs"));
   assert.doesNotMatch(candidate.text, /API_TOKEN=secret|raw secret value/);
+});
+
+test("fixture candidate benchmarks heartbeat project memory and model escalation", () => {
+  const memory = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/heartbeat_project_memory_board_hygiene.json");
+  const memoryCandidate = buildFixtureCandidate(memory);
+  assert.equal(memoryCandidate.responseKind, "record_project_memory");
+  assert.ok(memoryCandidate.evidence.includes("memory.project.open:ciclo-memory.2"));
+  assert.ok(memoryCandidate.actions.some((action) => action.kind === "record_heartbeat_project_memory"));
+  assert.ok(memoryCandidate.actions.some((action) => action.kind === "keep_unvalidated_work_open"));
+
+  const review = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/heartbeat_pr_review_model_selection.json");
+  const reviewCandidate = buildFixtureCandidate(review);
+  assert.equal(reviewCandidate.responseKind, "launch_review_worker");
+  assert.ok(reviewCandidate.evidence.includes("model.review.recommended:claude-fable-5"));
+  assert.ok(reviewCandidate.evidence.includes("worker.mcp_config.clients:claude,codex"));
+  assert.ok(reviewCandidate.actions.some((action) => action.kind === "select_review_model"));
+  assert.ok(reviewCandidate.actions.some((action) => action.kind === "launch_pr_review_worker"));
+
+  const stuck = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/heartbeat_stuck_session_model_escalation.json");
+  const stuckCandidate = buildFixtureCandidate(stuck);
+  assert.equal(stuckCandidate.responseKind, "ask_operator");
+  assert.ok(stuckCandidate.evidence.includes("model.escalation.recommended:gpt-5.5"));
+  assert.ok(stuckCandidate.actions.some((action) => action.kind === "build_bounded_context_pack"));
+  assert.ok(stuckCandidate.actions.some((action) => action.kind === "escalate_model_effort"));
+});
+
+test("fixture candidate benchmarks project orchestrator adaptation", () => {
+  const scenario = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/project_orchestrator_real_repo_adaptive.json");
+  const candidate = buildFixtureCandidate(scenario);
+
+  assert.equal(candidate.responseKind, "report_feedback");
+  for (const evidence of [
+    "repo.realistic_state:dirty_branch",
+    "beads.ready:3",
+    "ci.api:failed",
+    "ci.ui:failed",
+    "worker.session.turns:37",
+    "model.escalation.recommended:configured_stronger_openai_model",
+    "effort.escalation.recommended:high",
+    "worktree.cleanup.plan:prune_after_evidence_preserved",
+    "benchmark.iteration.goal:max_score"
+  ]) {
+    assert.ok(candidate.evidence.includes(evidence), `missing evidence ${evidence}`);
+  }
+  for (const action of [
+    "record_brain_decision",
+    "score_orchestration_response",
+    "iterate_until_max_score",
+    "launch_implementation_worker",
+    "launch_review_worker",
+    "launch_debug_worker",
+    "launch_api_test_worker",
+    "launch_ui_test_worker",
+    "launch_monitor_worker",
+    "route_session_feedback",
+    "cleanup_completed_sessions",
+    "record_cleanup_plan",
+    "prune_stale_worktrees",
+    "escalate_model_effort"
+  ]) {
+    assert.ok(candidate.actions.some((item) => item.kind === action), `missing action ${action}`);
+  }
+  assert.ok(candidate.actions.some((item) => item.kind === "use_claude_loop_directive"));
+  assert.ok(candidate.actions.some((item) => item.kind === "use_codex_goal_directive"));
+  assert.ok(candidate.actions.some((item) => item.kind === "answer_reasonable_harness_question"));
+});
+
+test("fixture candidate scores expanded project orchestration scenarios", async () => {
+  for (const id of expandedOrchestrationScenarioIds) {
+    const scenario = loadBenchmarkScenarioFile(`tests/fixtures/benchmarks/${id}.json`);
+    const candidate = buildFixtureCandidate(scenario);
+
+    assert.ok(scenario.judges.some((judge) => judge.kind === "deterministic"), `${id} missing deterministic judge`);
+    assert.ok((scenario.judges[0]?.dimensions.length ?? 0) > 0, `${id} missing judge dimensions`);
+    for (const action of scenario.expected.requiredActions) {
+      assert.ok(candidate.actions.some((item) => item.kind === action), `${id} missing action ${action}`);
+    }
+    for (const evidence of scenario.expected.evidenceIncludes) {
+      assert.ok(candidate.evidence.includes(evidence), `${id} missing evidence ${evidence}`);
+    }
+
+    const report = await runBenchmarkScenario(scenario);
+    assert.equal(report.safety.passed, true, `${id} safety failed: ${report.failures.join(",")}`);
+    assert.equal(report.score, 1, `${id} score`);
+    assert.equal(report.recommendedAction, "accept", `${id} recommended action`);
+  }
 });
 
 test("benchmark scenario report puts deterministic safety before judge scores", async () => {

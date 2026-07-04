@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import type { CicloMcpAdditionalServerConfig, CicloMcpInstallClient, CicloMcpInstallOptions, CicloMcpSecretEnvBinding } from "./mcp-install.js";
+import { normalizePromptInjection, type CicloPromptInjection } from "./prompt-injection.js";
 import type {
   RemoteRunnerImageResolverRequest,
   RemoteRunnerLaunchRequest,
@@ -90,12 +91,17 @@ export interface CicloConfigRemote {
   };
 }
 
+export interface CicloConfigPrompts {
+  readonly systemInjections?: readonly CicloPromptInjection[];
+}
+
 export interface CicloProjectConfig {
   readonly secrets?: {
     readonly providers?: readonly CicloConfigSecretProvider[];
   };
   readonly mcp?: CicloConfigMcp;
   readonly remote?: CicloConfigRemote;
+  readonly prompts?: CicloConfigPrompts;
 }
 
 export interface CicloProjectConfigLoadResult {
@@ -443,6 +449,25 @@ function parseRemote(root: Record<string, unknown>): CicloConfigRemote | undefin
   };
 }
 
+function parsePrompts(root: Record<string, unknown>): CicloConfigPrompts | undefined {
+  if (root.prompts === undefined) return undefined;
+  const record = objectValue(root.prompts, "prompts");
+  const systemInjectionsValue = record.system_injections ?? record.systemInjections;
+  if (systemInjectionsValue === undefined) return {};
+  if (!Array.isArray(systemInjectionsValue)) throw new Error("prompts.system_injections must be an array");
+  return {
+    systemInjections: systemInjectionsValue.map((entry, index) => {
+      const injection = objectValue(entry, `prompts.system_injections[${index}]`);
+      return normalizePromptInjection({
+        id: optionalString(injection, "id"),
+        scope: optionalString(injection, "scope"),
+        text: optionalString(injection, "text"),
+        enabled: optionalBoolean(injection, "enabled")
+      }, index);
+    })
+  };
+}
+
 export function parseCicloProjectConfigText(text: string): CicloProjectConfig {
   const trimmed = text.trim();
   if (trimmed.length === 0) return {};
@@ -450,7 +475,13 @@ export function parseCicloProjectConfigText(text: string): CicloProjectConfig {
   const secrets = parseSecrets(root);
   const mcp = parseMcp(root);
   const remote = parseRemote(root);
-  return { ...(secrets === undefined ? {} : { secrets }), ...(mcp === undefined ? {} : { mcp }), ...(remote === undefined ? {} : { remote }) };
+  const prompts = parsePrompts(root);
+  return {
+    ...(secrets === undefined ? {} : { secrets }),
+    ...(mcp === undefined ? {} : { mcp }),
+    ...(remote === undefined ? {} : { remote }),
+    ...(prompts === undefined ? {} : { prompts })
+  };
 }
 
 export function cicloConfigPath(projectRoot = process.cwd(), explicitPath?: string): string {
@@ -471,7 +502,8 @@ export function loadCicloProjectConfig(projectRoot = process.cwd(), explicitPath
       `ciclo.config.path:${path}`,
       `ciclo.config.secret_providers:${config.secrets?.providers?.length ?? 0}`,
       `ciclo.config.mcp:${config.mcp === undefined ? "absent" : "present"}`,
-      `ciclo.config.remote:${config.remote === undefined ? "absent" : "present"}`
+      `ciclo.config.remote:${config.remote === undefined ? "absent" : "present"}`,
+      `ciclo.config.prompt_injections:${config.prompts?.systemInjections?.length ?? 0}`
     ]
   };
 }
@@ -717,6 +749,7 @@ export function mergeWorkerLaunchWithConfig(input: WorkerSessionLaunchRequest, c
     mcpAdditionalServers: mergeAdditionalServers(mcp?.additionalServers, input.mcpAdditionalServers),
     mcpSecretEnv: input.mcpSecretEnv ?? configMcpSecretEnvBindings(config),
     workerSecretEnv: input.workerSecretEnv ?? configWorkerSecretEnvBindings(config),
+    promptInjections: input.promptInjections ?? config.prompts?.systemInjections,
     mcpClaudeChannel: input.mcpClaudeChannel ?? mcp?.claudeChannel
   };
 }
@@ -743,6 +776,7 @@ export function mergeRemoteRunnerLaunchWithConfig(input: RemoteRunnerLaunchReque
     mcpAdditionalServers: mergeAdditionalServers(mcp?.additionalServers, input.mcpAdditionalServers),
     mcpSecretEnv: input.mcpSecretEnv ?? configMcpSecretEnvBindings(config),
     workerSecretEnv: input.workerSecretEnv ?? configWorkerSecretEnvBindings(config),
+    promptInjections: input.promptInjections ?? config.prompts?.systemInjections,
     mcpClaudeChannel: input.mcpClaudeChannel ?? mcp?.claudeChannel,
     preflightOnly: input.preflightOnly ?? remote?.preflightOnly,
     repoBootstrap: { ...(remote?.repoBootstrap ?? {}), ...(input.repoBootstrap ?? {}) },
@@ -775,6 +809,20 @@ export const sampleCicloProjectConfig: CicloProjectConfig = {
     secretBindings: [{ name: "EXAMPLE_API_TOKEN", providerId: "onepassword", ref: "op://Ciclo/API/token", format: "Bearer ${secret}", reason: "example reference for spawned MCP tools" }],
     workerSecretBindings: [{ name: "EXAMPLE_GITHUB_TOKEN", providerId: "onepassword", ref: "op://Ciclo/GitHub/token", reason: "example reference for spawned worker shell tools" }],
     claudeChannel: false
+  },
+  prompts: {
+    systemInjections: [
+      {
+        id: "project-goals",
+        scope: "all",
+        text: "Prefer small, demoable changes. Keep project memory current in Beads and surface blockers promptly."
+      },
+      {
+        id: "brain-monitoring-help",
+        scope: "brain",
+        text: "When sessions stall, compare model fit, context size, validation state, PR status, and whether operator feedback is needed."
+      }
+    ]
   },
   remote: {
     runnerKind: "kubernetes",

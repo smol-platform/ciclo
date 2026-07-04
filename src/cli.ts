@@ -40,6 +40,9 @@ import { installCicloSkills, type CicloSkillInstallClient } from "./skill-instal
 import { CICLO_VERSION } from "./version.js";
 
 const DEFAULT_BENCHMARK_DIR = "tests/fixtures/benchmarks";
+const DEFAULT_CLAUDE_PERMISSION_MODE = "bypassPermissions";
+const DEFAULT_CODEX_APPROVAL_POLICY = "never";
+const DEFAULT_CODEX_SANDBOX = "danger-full-access";
 
 export interface CliIo {
   readonly stdout: (line: string) => void;
@@ -247,9 +250,9 @@ function commandHelp(command: string): string {
       "  --claude-channel               Enable Claude Code channel capability for launched Claude sessions.",
       "  --model <model>                Pass model to the harness.",
       "  --effort <effort>              Pass effort to Claude Code.",
-      "  --permission-mode <mode>       Pass an explicit Claude Code permission mode.",
-      "  --approval-policy <policy>     Pass approval policy to Codex. Default: on-request.",
-      "  --sandbox <mode>               Pass sandbox mode to Codex. Default: workspace-write.",
+      "  --permission-mode <mode>       Pass Claude Code permission mode. Default: bypassPermissions.",
+      "  --approval-policy <policy>     Pass approval policy to Codex. Default: never.",
+      "  --sandbox <mode>               Pass sandbox mode to Codex. Default: danger-full-access.",
       "  --prompt <text>                Optional initial prompt.",
       "  --extra-arg <arg>              Extra harness arg; may be repeated.",
       "  --dry-run                      Print install and launch plan without writing files or starting Herdr/the harness.",
@@ -927,9 +930,19 @@ function herdrAttachArgs(sessionName: string): readonly string[] {
 }
 
 function appendClaudePermissionMode(args: string[], value: string | undefined): void {
-  const mode = value?.trim();
+  const mode = value?.trim() || DEFAULT_CLAUDE_PERMISSION_MODE;
   if (mode === undefined || mode.length === 0 || mode === "default") return;
   args.push("--permission-mode", mode);
+}
+
+function effectiveCliPermissionEvidence(options: CliLaunchOptions): readonly string[] {
+  if (options.client === "claude") {
+    return [`ciclo.launch.permission_mode:${options.permissionMode?.trim() || DEFAULT_CLAUDE_PERMISSION_MODE}`];
+  }
+  return [
+    `ciclo.launch.approval_policy:${options.approvalPolicy ?? DEFAULT_CODEX_APPROVAL_POLICY}`,
+    `ciclo.launch.sandbox:${options.sandbox ?? DEFAULT_CODEX_SANDBOX}`
+  ];
 }
 
 function launchArgs(options: CliLaunchOptions, projectRoot: string, install: CicloMcpInstallResult): readonly string[] {
@@ -945,8 +958,8 @@ function launchArgs(options: CliLaunchOptions, projectRoot: string, install: Cic
   }
   if (options.model !== undefined) args.push("--model", options.model);
   args.push("--cd", projectRoot);
-  args.push("--ask-for-approval", options.approvalPolicy ?? "on-request");
-  args.push("--sandbox", options.sandbox ?? "workspace-write");
+  args.push("--ask-for-approval", options.approvalPolicy ?? DEFAULT_CODEX_APPROVAL_POLICY);
+  args.push("--sandbox", options.sandbox ?? DEFAULT_CODEX_SANDBOX);
   args.push(...options.extraArgs);
   if (options.prompt !== undefined) args.push(options.prompt);
   return args;
@@ -997,6 +1010,7 @@ async function buildLaunchPlan(options: CliLaunchOptions): Promise<CicloLaunchPl
         `ciclo.launch.herdr_session:${sessionName}`,
         `ciclo.launch.herdr_pane:${paneName}`
       ] : []),
+      ...effectiveCliPermissionEvidence(options),
       `ciclo.launch.mcp_targets:${install.targets.map((target) => target.client).join(",")}`,
       options.dryRun ? "ciclo.launch.dry_run:true" : "ciclo.launch.dry_run:false"
     ]

@@ -140,12 +140,12 @@ export const cicloMcpTools: readonly McpToolContract[] = [
   },
   {
     name: "ciclo_decide",
-    description: "Ask Ciclo's OpenAI/Pi brain for a live control-plane decision: remote-session monitoring, context insertion, answerable questions, or user-session interfacing.",
-    inputSchema: objectSchema("OpenAI-backed brain decision request.", {
+    description: "Ask Ciclo's model-backed OpenAI brain through Pi for a live control-plane decision: remote-session monitoring, context insertion, answerable questions, or user-session interfacing.",
+    inputSchema: objectSchema("Model-backed OpenAI brain decision request.", {
       purpose: {
         type: "string",
         enum: ["remote_session_monitoring", "context_insertion", "answer_question", "user_session_interface"],
-        description: "Decision purpose. These routes must use the OpenAI/Pi brain and fail closed if unavailable."
+        description: "Decision purpose. These routes must use Ciclo's model-backed OpenAI brain and fail closed if unavailable."
       },
       prompt: stringSchema("Decision prompt for the Ciclo brain."),
       context: arrayOfStrings("Bounded context facts for the decision."),
@@ -156,10 +156,12 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       remote_session_id: remoteSessionId,
       worker_session_id: stringSchema("Ciclo worker session id.")
     }, ["purpose", "prompt"]),
-    outputSchema: objectSchema("OpenAI-backed brain decision.", {
+    outputSchema: objectSchema("Model-backed OpenAI brain decision.", {
       decision: stringSchema("Brain decision text."),
       provider: stringSchema("Model provider."),
       adapter: stringSchema("Brain adapter."),
+      intelligence: stringSchema("Brain intelligence mode; live Ciclo decisions are model-backed."),
+      model_family: stringSchema("Brain model provider family."),
       model: stringSchema("Model id."),
       thinking: stringSchema("Thinking effort."),
       evidence: arrayOfStrings("Decision evidence.")
@@ -580,9 +582,9 @@ export const cicloMcpTools: readonly McpToolContract[] = [
       cwd: stringSchema("Worker cwd."),
       session_name: stringSchema("Human-readable worker session name."),
       dry_run: booleanSchema("Plan the launch without starting the process."),
-      permission_mode: stringSchema("Claude permission mode."),
-      sandbox: stringSchema("Codex sandbox mode."),
-      approval_policy: stringSchema("Codex approval policy."),
+      permission_mode: stringSchema("Claude permission mode. Defaults to bypassPermissions for launched workers; pass default to omit the flag."),
+      sandbox: stringSchema("Codex sandbox mode. Defaults to danger-full-access for launched workers."),
+      approval_policy: stringSchema("Codex approval policy. Defaults to never for launched workers."),
       isolation: { type: "string", enum: ["none", "worktree"], description: "Optional launch isolation mode. worktree creates an isolated worktree for the worker." },
       create_worktree: booleanSchema("Create a git worktree and launch the worker from it."),
       worktree_path: stringSchema("Optional worktree path. Relative paths are resolved from cwd."),
@@ -820,6 +822,16 @@ export const cicloMcpResources: readonly McpResourceContract[] = [
     permission: permission("read_status", "status.read", true),
     cachePolicy: "short_poll",
     audit: audit("mcp.resource.events", ["principal_id"])
+  },
+  {
+    uriTemplate: "ciclo://heartbeat",
+    description: "Ciclo internal heartbeat status, Claude-channel communication state, and recent monologue.",
+    outputSchema: objectSchema("Internal heartbeat status.", {
+      heartbeat: { type: "object" }
+    }),
+    permission: permission("read_status", "status.read", true),
+    cachePolicy: "short_poll",
+    audit: audit("mcp.resource.heartbeat", ["principal_id"])
   },
   {
     uriTemplate: "ciclo://board",

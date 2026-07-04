@@ -99,9 +99,27 @@ ciclo config show --project /path/to/project --compact
 ciclo config path --project /path/to/project
 ```
 
-The config stores secret provider references, MCP defaults, and remote runner defaults. It should contain provider ids, secret references, and non-secret `vars`, not raw secret values. `ciclo mcp install`, MCP runtime startup, spawned worker MCP setup, and remote runner planning all read this file; explicit CLI or MCP tool arguments override config values.
+The config stores secret provider references, MCP defaults, remote runner defaults, and optional prompt guidance. It should contain provider ids, secret references, non-secret `vars`, and non-secret guidance text, not raw secret values. `ciclo mcp install`, MCP runtime startup, spawned worker MCP setup, prompt builders, and remote runner planning all read this file; explicit CLI or MCP tool arguments override config values.
 
-Use [examples/ciclo-config.json](/Users/ztaylor/repos/workspaces/ciclo/examples/ciclo-config.json) as the checked-in reference shape. It shows OpenBao, 1Password, and plugin-backed provider aliases, MCP secret bindings for spawned workers, Claude/Codex client defaults, remote runner defaults, WireGuard tunnel fields, and provider-specific Kubernetes, AWS Lambda MicroVM, and Cloudflare runner settings. `ciclo config show --compact` redacts secret references before display.
+Use [examples/ciclo-config.json](/Users/ztaylor/repos/workspaces/ciclo/examples/ciclo-config.json) as the checked-in reference shape. It shows OpenBao, 1Password, and plugin-backed provider aliases, MCP secret bindings for spawned workers, Claude/Codex client defaults, prompt guidance, remote runner defaults, WireGuard tunnel fields, and provider-specific Kubernetes, AWS Lambda MicroVM, and Cloudflare runner settings. `ciclo config show --compact` redacts secret references before display.
+
+Use `prompts.systemInjections` for shared project goals or helper instructions that Ciclo should append after its built-in ground rules:
+
+```json
+{
+  "prompts": {
+    "systemInjections": [
+      {
+        "id": "project-goals",
+        "scope": "all",
+        "text": "Prefer small, demoable changes. Keep Beads memory current and surface blockers promptly."
+      }
+    ]
+  }
+}
+```
+
+`scope` can be `all`, `brain`, `worker`, `review`, or `beads`. Ciclo applies matching entries to OpenAI brain decisions, launched worker prompts, post-close review sessions, and Beads-derived harness prompts. Prompt injections are append-only and cannot replace Ciclo's core safety rules; config parsing rejects secret references and secret-like values such as `${secret://...}`, `op://...`, or token/password assignments.
 
 Remote runner plans also include `mcp_config`: generated `.mcp.json` and/or `.codex/config.toml` artifacts for the remote `repoPath`, plus a `ciclo mcp install` command to run inside the runner when the remote checkout already has client config that should be merged.
 
@@ -156,7 +174,7 @@ ciclo://board
 
 Use `dry_run: true` on `ciclo_launch_worker_session` to inspect the exact Claude Code or Codex launch plan before starting a process. Pass `isolation: "worktree"` to create a worker worktree, defaulting bead work to a `ciclo/<bead-id>` branch. When Ciclo is running inside Herdr, local worktree-isolated workers use fresh `herdr worktree create` workspaces and start the worker inside the returned Herdr workspace id; outside Herdr, Ciclo falls back to `git worktree add`. Ciclo never passes the old `cli:worktree:create` placement sentinel to `herdr agent start`. Existing Herdr worktree paths fail instead of reopening stale workspace state. Pass `configure_mcp: true` to install Ciclo MCP client config into the worker cwd or worktree before the harness starts; Ciclo defaults to the matching client (`claude` for Claude Code, `codex` for Codex) and accepts `mcp_clients`, `mcp_server_name`, `mcp_command`, and `mcp_claude_channel` overrides. Once launched, workers should report liveness and optional token/cost deltas with `ciclo_heartbeat_worker_session`, and report progress, blockers, questions, secret requests, and closeout evidence back through Ciclo MCP tools. `ciclo_poll_events` returns cursor-based runtime events, and `ciclo_board` joins Beads work, workers, worktrees, pending questions, rollup metrics, and validation/PR state for operator monitoring. Pass `expected_pr_after_ms` to `ciclo_board` to raise an `expected_pr_missing` blocker when a worker branch has not opened a PR by the deadline.
 
-When `.ciclo/config.json` contains `mcp`, spawned workers inherit its `clients`, `serverName`, `command`, `vars`, `secretBindings`, `workerSecretBindings`, and `claudeChannel` defaults. Non-secret `mcp.vars` are written to the generated Ciclo MCP server config and are also passed to the launched worker shell; use launch-time `worker_env` for one-off worker-only values. Inline `ciclo_launch_worker_session` fields still win for one-off launches.
+When `.ciclo/config.json` contains `mcp`, spawned workers inherit its `clients`, `serverName`, `command`, `vars`, `secretBindings`, `workerSecretBindings`, and `claudeChannel` defaults. When it contains `prompts.systemInjections`, Ciclo appends matching guidance to worker, review, Beads, remote runner, and OpenAI brain prompts. Non-secret `mcp.vars` are written to the generated Ciclo MCP server config and are also passed to the launched worker shell; use launch-time `worker_env` for one-off worker-only values. Inline `ciclo_launch_worker_session` fields still win for one-off launches.
 
 Use `mcp.secretBindings` when the generated Ciclo MCP server config needs secret-backed environment variables. Each binding names the env var and references a configured provider; the provider may be built in, such as OpenBao or 1Password, or plugin-backed through `secrets.providers[].pluginProviderId`:
 

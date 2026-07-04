@@ -39,6 +39,27 @@ test("task review prompt is bounded to verification and Ciclo feedback", () => {
   assert.match(prompt, /npm test: passed - passed/);
 });
 
+test("task review prompt appends configured review guidance", () => {
+  const prompt = buildTaskReviewPrompt({
+    loopId: "finish-board",
+    beadId: "ciclo-demo.1",
+    finalSummary: "Implemented event polling.",
+    acceptanceEvidence: ["poll cursor returns worker state changes"],
+    validationEvidence: [],
+    cwd: "/repo",
+    promptInjections: [
+      {
+        id: "review-depth",
+        scope: "review",
+        text: "Check generated files and validation output before passing the task."
+      }
+    ]
+  });
+
+  assert.match(prompt, /Configured Ciclo guidance:/);
+  assert.match(prompt, /\[review-depth\] Check generated files/);
+});
+
 test("task review launch records a dry-run worker session", () => {
   const supervisor = new WorkerSessionSupervisor("/repo", new FakeWorkerLauncher());
   const result = launchTaskReviewSession({
@@ -50,7 +71,14 @@ test("task review launch records a dry-run worker session", () => {
     validationEvidence: [{ command: "npm test", passed: true, summary: "passed" }],
     cwd: "/repo",
     harnessId: "codex",
-    dryRun: true
+    dryRun: true,
+    promptInjections: [
+      {
+        id: "review-depth",
+        scope: "review",
+        text: "Check generated files and validation output before passing the task."
+      }
+    ]
   });
 
   assert.equal(result.launched, true);
@@ -59,6 +87,7 @@ test("task review launch records a dry-run worker session", () => {
   assert.ok(result.sessionId);
   assert.equal(supervisor.list().length, 1);
   assert.ok(supervisor.list()[0]?.evidence.some((item) => item === "worker.session.launch:planned"));
+  assert.ok(result.evidence.includes("prompt.injection.review:review-depth"));
 });
 
 test("task review launch normalizes Fable 5 for Claude review sessions", () => {

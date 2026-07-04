@@ -4,6 +4,7 @@ import type {
   HarnessPlugin,
   HarnessPromptRequest
 } from "./harness-registry.js";
+import { applyPromptInjections, type CicloPromptInjection } from "./prompt-injection.js";
 
 export interface BeadsPromptBuildInput {
   readonly task: BeadsTaskSnapshot;
@@ -15,6 +16,7 @@ export interface BeadsPromptBuildInput {
   readonly validationCommands?: readonly string[];
   readonly context?: readonly string[];
   readonly defaultSpecId?: string;
+  readonly promptInjections?: readonly CicloPromptInjection[];
 }
 
 export interface BeadsPromptBuildResult {
@@ -78,16 +80,17 @@ export function buildBeadsHarnessPrompt(input: BeadsPromptBuildInput): BeadsProm
     acceptanceCriteria: acceptanceCriteria(input.task),
     validationCommands: validationCommands(input)
   };
-  const prompt = input.plugin.buildPrompt(request);
+  const injectedPrompt = applyPromptInjections(input.plugin.buildPrompt(request), input.promptInjections, "beads");
   return {
     request,
-    prompt,
+    prompt: injectedPrompt.prompt,
     evidence: [
       `beads.prompt.task:${input.task.id}`,
       `beads.prompt.spec:${specId}`,
       `beads.prompt.harness:${input.plugin.id}`,
       `beads.prompt.acceptance:${request.acceptanceCriteria.length}`,
-      `beads.prompt.validation:${request.validationCommands.join(",")}`
+      `beads.prompt.validation:${request.validationCommands.join(",")}`,
+      ...injectedPrompt.evidence
     ]
   };
 }

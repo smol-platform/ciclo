@@ -67,6 +67,21 @@ test("loads project config for secrets MCP and remote defaults", () => {
         replicas: 1,
         storage_size: "20Gi"
       }
+    },
+    prompts: {
+      system_injections: [
+        {
+          id: "project-goals",
+          scope: "all",
+          text: "Prefer small changes and keep Beads current."
+        },
+        {
+          id: "brain-help",
+          scope: "brain",
+          text: "Escalate stuck workers after comparing validation and model fit.",
+          enabled: true
+        }
+      ]
     }
   }));
 
@@ -84,6 +99,8 @@ test("loads project config for secrets MCP and remote defaults", () => {
   assert.equal(config.remote?.kubernetes?.mode, "statefulset");
   assert.equal(config.remote?.kubernetes?.statefulSetName, "ciclo-acme");
   assert.equal(config.remote?.kubernetes?.storageSize, "20Gi");
+  assert.equal(config.prompts?.systemInjections?.[0]?.id, "project-goals");
+  assert.equal(config.prompts?.systemInjections?.[1]?.scope, "brain");
 
   const redacted = redactedCicloProjectConfig(config);
   assert.equal(redacted.mcp?.secretBindings?.[0]?.ref, "[redacted secret ref]");
@@ -100,6 +117,7 @@ test("sample config initializes and can be loaded back", () => {
     assert.equal(loaded.found, true);
     assert.deepEqual(loaded.config.mcp?.clients, ["claude", "codex"]);
     assert.equal(loaded.config.remote?.runnerKind, "kubernetes");
+    assert.equal(loaded.config.prompts?.systemInjections?.[0]?.id, "project-goals");
 
     const raw = readFileSync(join(root, ".ciclo", "config.json"), "utf8");
     assert.match(raw, /secretBindings/);
@@ -200,6 +218,15 @@ test("config merges into MCP install worker and remote requests", () => {
       egress: { enabled: true, cidrs: ["203.0.113.0/24"], domains: ["github.com"] },
       vars: { CICLO_REMOTE_MODE: "config" },
       cloudflare: { accountId: "acct-1", workerName: "ciclo-worker" }
+    },
+    prompts: {
+      systemInjections: [
+        {
+          id: "worker-goal",
+          scope: "worker",
+          text: "Use repository-local validation before reporting done."
+        }
+      ]
     }
   }));
 
@@ -226,6 +253,7 @@ test("config merges into MCP install worker and remote requests", () => {
   assert.deepEqual(worker.mcpSecretEnv?.map((binding) => binding.name), ["GITHUB_TOKEN", "GITHUB_AUTHORIZATION"]);
   assert.deepEqual(worker.workerSecretEnv?.map((binding) => binding.name), ["GRAFANA_URL"]);
   assert.equal(worker.workerSecretEnv?.[0]?.secretRefHash, secretRefHash("op://Engineering/Grafana/url"));
+  assert.equal(worker.promptInjections?.[0]?.id, "worker-goal");
 
   const remote = mergeRemoteRunnerLaunchWithConfig({
     runnerKind: "",
@@ -246,6 +274,24 @@ test("config merges into MCP install worker and remote requests", () => {
   assert.equal(remote.environment?.CICLO_REMOTE_MODE, "config");
   assert.equal(remote.mcpAdditionalServers?.filesystem?.command, "npx");
   assert.equal(remote.cloudflare?.workerName, "ciclo-worker");
+  assert.equal(remote.promptInjections?.[0]?.text, "Use repository-local validation before reporting done.");
+});
+
+test("config rejects secret-like prompt injections", () => {
+  assert.throws(
+    () => parseCicloProjectConfigText(JSON.stringify({
+      prompts: {
+        systemInjections: [
+          {
+            id: "bad-secret",
+            scope: "all",
+            text: "Use token=ghp_should_not_be_in_prompts for GitHub."
+          }
+        ]
+      }
+    })),
+    /appears to contain a secret/u
+  );
 });
 
 test("config MCP secret env bindings resolve through a registry without leaking refs", async () => {
@@ -347,6 +393,7 @@ test("checked-in example config parses and redacts secret references", () => {
   assert.equal(config.remote?.wireGuard?.existingConfigSecretName, "project-wireguard-runner");
   assert.equal(config.remote?.awsLambda?.microVmName, "ciclo-project-runner");
   assert.equal(config.remote?.cloudflare?.workerName, "ciclo-project-runner");
+  assert.equal(config.prompts?.systemInjections?.[0]?.id, "project-goals");
 
   const redacted = JSON.stringify(redactedCicloProjectConfig(config));
   assert.doesNotMatch(redacted, /op:\/\/Ciclo\/API\/token/);

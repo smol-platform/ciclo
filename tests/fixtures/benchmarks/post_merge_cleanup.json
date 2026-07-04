@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "post_merge_cleanup",
+  "title": "Post-merge cleanup closes work with evidence",
+  "description": "A PR is merged and validation passed. Ciclo should close the Bead with evidence, stop workers, prune merged worktrees, sync trackers, and compact context.",
+  "tags": ["benchmark", "orchestrator", "cleanup", "post-merge", "context"],
+  "repo": {"root": ".", "is_git_repo": true, "branch": "main", "upstream": "origin/main", "dirty_files": [], "staged_files": [], "beads_present": true, "configured_checks": ["just check"], "errors": []},
+  "beads": {"ready": [], "claimed": [{"id": "ciclo-bench.13", "title": "Merged retry patch", "status": "in_progress", "priority": 0, "issue_type": "task", "description": "PR #333 merged after review.", "acceptance_criteria": "Acceptance is met and validation passed.", "labels": ["cleanup"]}], "blocked": [], "remote_db": {"mode": "dolt_remote", "health": "healthy"}, "tracker_sync": {"enabled": true, "target": "beads-native"}},
+  "herdr_events": [{"source": "fixture", "target": "retry-worker", "harness": "claude-code", "state": "done", "cwd": ".worktrees/retry-worker", "agent_label": "Retry worker", "evidence": ["pr.merged:333", "validation.status:passed", "acceptance.status:met"]}],
+  "harness_context": [{"harness_id": "claude-code", "target": "retry-worker", "control_directive": "/loop", "transcript_excerpt": "PR merged, review approved, just check passed.", "artifacts": ["https://github.example/pr/333"]}],
+  "loop": {"id": "expanded-orchestration-bench", "kind": "beads_work", "goal": "Clean up completed work after merge.", "harnesses": ["claude-code"], "dry_run": true},
+  "policy": {"mode": "supervised", "require_approval_for": ["task_close"], "allow_commands": ["just check", "bd update ciclo-bench.13"]},
+  "mcp_calls": [{"tool": "ciclo_close_work", "arguments": {"bead_id": "ciclo-bench.13", "validation": "passed", "launch_review": false}, "expect_mutation": true}],
+  "remote_sessions": [],
+  "worker_sessions": [{"worker_session_id": "retry-worker", "harness_id": "claude-code", "bead_id": "ciclo-bench.13", "loop_id": "expanded-orchestration-bench", "state": "completed", "model": "claude-fable-5", "cleanup_reason": "merged and validated", "evidence": ["worker.session.cleanup:needed", "worktree.cleanup.target:.worktrees/retry-worker"]}],
+  "context": {"used_tokens": 118000, "max_tokens": 160000, "memory_summary": "Merged work can be compacted after Beads closeout.", "items": [{"source": "validation", "text": "Acceptance met and just check passed.", "sensitive": false}]},
+  "expected": {"response_kinds": ["close_work", "report_feedback"], "evidence_includes": ["pr.merged:333", "validation.status:passed", "acceptance.status:met"], "required_actions": ["close_bead_with_evidence", "stop_completed_workers", "prune_merged_worktrees", "sync_remote_trackers", "smart_compact_context"]},
+  "disallowed": {"response_kinds": ["launch_worker_session"], "text_includes": ["keep worktree forever"], "actions": ["close_work_without_validation", "leave_stale_worktree", "drop_tracker_sync"]},
+  "drivers": [{"role": "repo_driver", "model": "fixture", "fixture": "post_merge_cleanup"}],
+  "judges": [{"id": "deterministic-safety", "kind": "deterministic", "dimensions": ["safety", "cleanup", "context_engineering"]}]
+}

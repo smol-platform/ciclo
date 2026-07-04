@@ -13,6 +13,30 @@ const fixtureText = readFileSync(
   "utf8"
 );
 
+const expandedOrchestrationScenarioIds = [
+  "startup_first_wake_state_selection",
+  "pr_review_bottleneck_prioritizes_risk",
+  "flaky_ci_diagnosis",
+  "stale_worktree_dirty_cleanup",
+  "api_contract_drift_coordination",
+  "ui_screenshot_regression_verification",
+  "stuck_worker_turn_escalation",
+  "conflicting_worker_edits_reconciliation",
+  "risky_change_operator_approval",
+  "remote_runner_lost_mid_task",
+  "integration_secret_missing",
+  "post_merge_cleanup",
+  "review_followup_bugs_to_beads",
+  "deploy_smoke_failure_blocks_release",
+  "mixed_harness_model_routing",
+  "context_budget_near_limit_compaction",
+  "local_remote_worker_coordination",
+  "beads_remote_conflict_resolution",
+  "benchmark_regression_creates_task",
+  "idle_monitor_session_recovery",
+  "crash_recovery_reconstructs_board"
+] as const;
+
 test("loads benchmark scenario fixture with repo Herdr harness loop policy and traits", () => {
   const scenario = loadBenchmarkScenarioText(fixtureText);
 
@@ -224,6 +248,90 @@ test("loads the required worker-session benchmark scenarios", () => {
   const answerable = loadBenchmarkScenarioFile(`${fixtureDir}/codex_goal_answer_reasonable_question.json`);
   assert.equal(answerable.harnessContext[0]?.question?.answerable, true);
   assert.equal(answerable.harnessContext[0]?.question?.route, "answer_directly");
+});
+
+test("loads required heartbeat project-memory benchmark scenarios", () => {
+  const fixtureDir = "tests/fixtures/benchmarks";
+  const ids = new Set(
+    readdirSync(fixtureDir)
+      .filter((file) => file.endsWith(".json"))
+      .map((file) => loadBenchmarkScenarioFile(`${fixtureDir}/${file}`).id)
+  );
+
+  for (const id of [
+    "heartbeat_project_memory_board_hygiene",
+    "heartbeat_pr_review_model_selection",
+    "heartbeat_stuck_session_model_escalation"
+  ]) {
+    assert.ok(ids.has(id), `missing heartbeat benchmark scenario ${id}`);
+  }
+
+  const memory = loadBenchmarkScenarioFile(`${fixtureDir}/heartbeat_project_memory_board_hygiene.json`);
+  assert.ok(memory.expected.requiredActions.includes("record_heartbeat_project_memory"));
+  assert.ok(memory.expected.requiredActions.includes("keep_unvalidated_work_open"));
+
+  const review = loadBenchmarkScenarioFile(`${fixtureDir}/heartbeat_pr_review_model_selection.json`);
+  assert.equal(review.workerSessions[1]?.harnessId, "claude-code");
+  assert.equal(review.workerSessions[1]?.model, "claude-fable-5");
+  assert.ok(review.expected.requiredActions.includes("launch_pr_review_worker"));
+
+  const stuck = loadBenchmarkScenarioFile(`${fixtureDir}/heartbeat_stuck_session_model_escalation.json`);
+  assert.equal(stuck.workerSessions[0]?.model, "gpt-5-mini");
+  assert.ok(stuck.expected.evidenceIncludes.includes("model.escalation.recommended:gpt-5.5"));
+  assert.ok(stuck.expected.requiredActions.includes("escalate_model_effort"));
+});
+
+test("loads project orchestrator benchmark scenario", () => {
+  const scenario = loadBenchmarkScenarioFile("tests/fixtures/benchmarks/project_orchestrator_real_repo_adaptive.json");
+
+  assert.equal(scenario.id, "project_orchestrator_real_repo_adaptive");
+  assert.equal(scenario.loop.kind, "beads_work");
+  assert.equal(scenario.beads.ready.length, 3);
+  assert.equal(scenario.beads.claimed.length, 2);
+  assert.ok(scenario.repo.errors.includes("ci.api:failed"));
+  assert.ok(scenario.repo.errors.includes("ci.ui:failed"));
+  assert.ok(scenario.workerSessions.some((session) => session.evidence.includes("worker.session.no_progress_turns:8")));
+  assert.ok(scenario.workerSessions.some((session) => session.evidence.includes("worktree.stale:2")));
+  assert.ok(scenario.expected.requiredActions.includes("launch_implementation_worker"));
+  assert.ok(scenario.expected.requiredActions.includes("launch_review_worker"));
+  assert.ok(scenario.expected.requiredActions.includes("launch_debug_worker"));
+  assert.ok(scenario.expected.requiredActions.includes("launch_api_test_worker"));
+  assert.ok(scenario.expected.requiredActions.includes("launch_ui_test_worker"));
+  assert.ok(scenario.expected.requiredActions.includes("launch_monitor_worker"));
+  assert.ok(scenario.expected.requiredActions.includes("cleanup_completed_sessions"));
+  assert.ok(scenario.expected.requiredActions.includes("prune_stale_worktrees"));
+  assert.ok(scenario.expected.requiredActions.includes("escalate_model_effort"));
+  assert.ok(scenario.expected.requiredActions.includes("iterate_until_max_score"));
+});
+
+test("loads expanded project orchestration benchmark scenarios", () => {
+  const fixtureDir = "tests/fixtures/benchmarks";
+  const ids = new Set(
+    readdirSync(fixtureDir)
+      .filter((file) => file.endsWith(".json"))
+      .map((file) => loadBenchmarkScenarioFile(`${fixtureDir}/${file}`).id)
+  );
+
+  for (const id of expandedOrchestrationScenarioIds) {
+    assert.ok(ids.has(id), `missing expanded orchestration benchmark scenario ${id}`);
+    const scenario = loadBenchmarkScenarioFile(`${fixtureDir}/${id}.json`);
+    assert.equal(scenario.loop.id, "expanded-orchestration-bench");
+    assert.ok(scenario.expected.requiredActions.length >= 4, `${id} should define enough required actions`);
+    assert.ok(scenario.expected.evidenceIncludes.length >= 2, `${id} should define scoring evidence`);
+    assert.ok((scenario.judges[0]?.dimensions.length ?? 0) >= 3, `${id} should define judge dimensions`);
+  }
+
+  const deploy = loadBenchmarkScenarioFile(`${fixtureDir}/deploy_smoke_failure_blocks_release.json`);
+  assert.ok(deploy.expected.requiredActions.includes("block_deploy"));
+  assert.ok(deploy.expected.requiredActions.includes("require_smoke_pass_before_deploy"));
+
+  const localRemote = loadBenchmarkScenarioFile(`${fixtureDir}/local_remote_worker_coordination.json`);
+  assert.ok(localRemote.herdrEvents.some((event) => event.state === "working"));
+  assert.ok(localRemote.expected.requiredActions.includes("avoid_duplicate_test_worker"));
+
+  const crash = loadBenchmarkScenarioFile(`${fixtureDir}/crash_recovery_reconstructs_board.json`);
+  assert.ok(crash.remoteSessions.some((session) => session.state === "working"));
+  assert.ok(crash.expected.requiredActions.includes("reconstruct_board_state"));
 });
 
 test("loads the required remote-runner benchmark scenarios", () => {

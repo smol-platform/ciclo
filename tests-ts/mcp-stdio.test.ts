@@ -13,6 +13,7 @@ import type { BeadsTaskSnapshot } from "../src/beads-adapter.js";
 import { BeadsRemoteTrackerSync } from "../src/beads-tracker-sync.js";
 import { CicloEventStore } from "../src/ciclo-events.js";
 import type { LoopConfig } from "../src/ciclo-core.js";
+import { CicloInternalHeartbeat } from "../src/internal-heartbeat.js";
 import type { PolicyConfig } from "../src/loop-config.js";
 import { OperatorRoutingStore } from "../src/operator-routing.js";
 import { defaultPluginPaths, installPlugin } from "../src/plugin-manager.js";
@@ -22,7 +23,7 @@ import type {
   OpenAiBrainDecisionInput,
   OpenAiBrainStatus
 } from "../src/openai-brain.js";
-import { openAiBrainPolicy } from "../src/openai-brain.js";
+import { openAiBrainIntelligence, openAiBrainModelFamily, openAiBrainPolicy } from "../src/openai-brain.js";
 import { RemoteRunnerRegistry } from "../src/remote-runner.js";
 import { SecretProviderRegistry, secretRefHash } from "../src/secret-provider.js";
 import type { RepoBoardProvider, RepoBoardStatus } from "../src/repo-board.js";
@@ -175,6 +176,8 @@ class FakeOpenAiBrain implements OpenAiBrain {
     return {
       provider: "openai",
       adapter: "pi-sdk",
+      intelligence: openAiBrainIntelligence,
+      modelFamily: openAiBrainModelFamily,
       model: openAiBrainPolicy.model,
       thinking: openAiBrainPolicy.thinking,
       purpose: input.purpose,
@@ -339,7 +342,18 @@ test("MCP brain decision tool routes control-plane decisions through OpenAI brai
   const runtime: CicloMcpRuntimeContext = {
     ...singleRuntime,
     eventStore,
-    openAiBrain: brain
+    openAiBrain: brain,
+    projectConfig: {
+      prompts: {
+        systemInjections: [
+          {
+            id: "brain-help",
+            scope: "brain",
+            text: "Use project-specific status hints before answering."
+          }
+        ]
+      }
+    }
   };
 
   const decision = structuredContent(
@@ -367,9 +381,12 @@ test("MCP brain decision tool routes control-plane decisions through OpenAI brai
   );
 
   assert.equal(decision.provider, "openai");
+  assert.equal(decision.intelligence, "model_backed");
+  assert.equal(decision.model_family, "openai");
   assert.equal(decision.decision, "Insert a small context pack, then ask the worker to continue.");
   assert.equal(brain.inputs[0]?.purpose, "context_insertion");
   assert.equal(brain.inputs[0]?.prompt, "Worker is missing repository context.");
+  assert.equal(brain.inputs[0]?.promptInjections?.[0]?.id, "brain-help");
   const events = eventStore.poll(0);
   assert.ok(events.events.some((event) => event.type === "brain.decision"));
 });
@@ -1277,6 +1294,56 @@ test("local MCP resources expose pending questions and feedback queues", async (
     )
   );
   assert.equal(((feedback.feedback as readonly { feedbackId: string }[])[0])?.feedbackId, "f-1");
+});
+
+test("local MCP exposes internal heartbeat monologue and Claude channel status", async () => {
+  let now = "2026-07-04T12:00:00.000Z";
+  const eventStore = new CicloEventStore(() => now);
+  const workerSupervisor = new WorkerSessionSupervisor("/repo", new FakeWorkerLauncher(), { now: () => now }, eventStore);
+  const runtime: CicloMcpRuntimeContext = {
+    ...singleRuntime,
+    claudeChannel: { enabled: true },
+    eventStore,
+    workerSupervisor
+  };
+  const internalHeartbeat = new CicloInternalHeartbeat(runtime, { now: () => now });
+  const heartbeatRuntime: CicloMcpRuntimeContext = {
+    ...runtime,
+    internalHeartbeat
+  };
+  workerSupervisor.launch({
+    harnessId: "claude-code",
+    loopId: "loop-heartbeat",
+    beadId: "ciclo-heartbeat",
+    prompt: "Use the shared Ciclo MCP."
+  });
+
+  now = "2026-07-04T12:01:00.000Z";
+  await internalHeartbeat.tick();
+
+  const resource = resourcePayload(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 89, method: "resources/read", params: { uri: "ciclo://heartbeat" } },
+      service,
+      heartbeatRuntime
+    )
+  );
+  const heartbeat = resource.heartbeat as {
+    claudeChannel?: { communicationReady?: boolean; connectedWorkers?: number };
+    monologue?: readonly { message?: string }[];
+  };
+  assert.equal(heartbeat.claudeChannel?.communicationReady, true);
+  assert.equal(heartbeat.claudeChannel?.connectedWorkers, 1);
+  assert.ok(heartbeat.monologue?.some((entry) => entry.message?.includes("Claude channel communication is enabled")));
+
+  const status = structuredContent(
+    await handleMcpRequest(
+      { jsonrpc: "2.0", id: 90, method: "tools/call", params: { name: "ciclo_status", arguments: {} } },
+      service,
+      heartbeatRuntime
+    )
+  );
+  assert.equal(((status.heartbeat as { claudeChannel?: { connectedWorkers?: number } }).claudeChannel ?? {}).connectedWorkers, 1);
 });
 
 test("local MCP stdio server processes newline JSON-RPC on stdio", async () => {

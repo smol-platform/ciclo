@@ -145,6 +145,24 @@ test("Kubernetes remote runner plan includes WireGuard tunnel Herdr attach and S
   assert.ok(plan.evidence.includes("remote.runner.mcp_config:planned"));
 });
 
+test("remote runner plan appends configured worker guidance to prompt", () => {
+  const plan = buildRemoteRunnerLaunchPlan({
+    ...baseRequest,
+    promptInjections: [
+      {
+        id: "remote-worker-help",
+        scope: "worker",
+        text: "Verify remote build readiness before claiming progress."
+      }
+    ]
+  });
+
+  assert.match(plan.prompt, /Configured Ciclo guidance:/);
+  assert.match(plan.prompt, /\[remote-worker-help\] Verify remote build readiness/);
+  assert.ok(plan.evidence.includes("prompt.injections.worker:1"));
+  assert.ok(plan.evidence.includes("prompt.injection.worker:remote-worker-help"));
+});
+
 test("Kubernetes remote runner emits WireGuard Secret only when key material is provided", () => {
   const plan = buildRemoteRunnerLaunchPlan({
     ...baseRequest,

@@ -1,4 +1,5 @@
 import type { ValidationEvidence } from "./beads-progress.js";
+import { applyPromptInjections, promptInjectionEvidence, type CicloPromptInjection } from "./prompt-injection.js";
 import type { WorkerHarnessId, WorkerSessionRecord, WorkerSessionSupervisor } from "./worker-session-supervisor.js";
 
 export interface TaskReviewSessionRequest {
@@ -14,6 +15,7 @@ export interface TaskReviewSessionRequest {
   readonly effort?: string;
   readonly dryRun?: boolean;
   readonly configureMcp?: boolean;
+  readonly promptInjections?: readonly CicloPromptInjection[];
 }
 
 export interface TaskReviewSessionResult {
@@ -40,7 +42,7 @@ function validationLines(values: readonly ValidationEvidence[]): string {
 }
 
 export function buildTaskReviewPrompt(input: TaskReviewSessionRequest): string {
-  return [
+  const prompt = [
     `Review finished Beads task ${input.beadId} for loop ${input.loopId}.`,
     "",
     "You are a bounded review worker launched by Ciclo after the implementation task closed.",
@@ -60,6 +62,7 @@ export function buildTaskReviewPrompt(input: TaskReviewSessionRequest): string {
     "",
     validationLines(input.validationEvidence)
   ].join("\n");
+  return applyPromptInjections(prompt, input.promptInjections, "review").prompt;
 }
 
 export function launchTaskReviewSession(input: TaskReviewSessionRequest): TaskReviewSessionResult {
@@ -98,7 +101,8 @@ export function launchTaskReviewSession(input: TaskReviewSessionRequest): TaskRe
       "review.session.reason:task_finished",
       `review.session.harness:${record.harnessId}`,
       `review.session.state:${record.state}`,
-      ...record.evidence
+      ...record.evidence,
+      ...promptInjectionEvidence(input.promptInjections, "review")
     ]
   };
 }

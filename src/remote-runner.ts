@@ -10,8 +10,9 @@ import {
   type CicloMcpSecretEnvInstall
 } from "./mcp-install.js";
 import type { CicloMcpAdditionalServerSecretEnvInstall } from "./mcp-secret-placeholders.js";
-import { encodeRuntimeSecretEnvBindings, type RuntimeSecretEnvBinding } from "./secret-env-runtime.js";
+import { applyPromptInjections, type CicloPromptInjection } from "./prompt-injection.js";
 import { repoSessionName } from "./repo-session-name.js";
+import { encodeRuntimeSecretEnvBindings, type RuntimeSecretEnvBinding } from "./secret-env-runtime.js";
 
 export type BuiltinRemoteRunnerKind = "kubernetes" | "aws-lambda" | "cloudflare";
 export type RemoteRunnerKind = string;
@@ -153,6 +154,7 @@ export interface RemoteRunnerLaunchRequest {
   readonly mcpSecretEnv?: readonly CicloMcpSecretEnvBinding[];
   readonly workerSecretEnv?: readonly CicloMcpSecretEnvBinding[];
   readonly mcpClaudeChannel?: boolean;
+  readonly promptInjections?: readonly CicloPromptInjection[];
   readonly preflightOnly?: boolean;
   readonly repoBootstrap?: RemoteRunnerRepoBootstrapRequest;
   readonly egress?: RemoteRunnerEgressPolicyRequest;
@@ -1533,7 +1535,8 @@ export function buildRemoteRunnerLaunchPlan(
   imageResolverRegistry = createDefaultRemoteRunnerImageResolverRegistry()
 ): RemoteRunnerLaunchPlan {
   const repoPath = required(input.repoPath, "repo_path");
-  const prompt = required(input.prompt, "prompt");
+  const injectedPrompt = applyPromptInjections(required(input.prompt, "prompt"), input.promptInjections, "worker");
+  const prompt = injectedPrompt.prompt;
   const herdrSession = clean(input.herdrSession) ?? repoSessionName();
   const imageResolution = resolveRemoteRunnerImage(input, imageResolverRegistry);
   const image = imageResolution.image;
@@ -1582,6 +1585,7 @@ export function buildRemoteRunnerLaunchPlan(
     ...attach.evidence,
     ...(mcpConfig?.evidence ?? []),
     ...(workerSecretEnv?.evidence ?? []),
+    ...injectedPrompt.evidence,
     ...runnerArtifacts.evidence,
     ...(input.dryRun === false ? ["remote.runner.launch:intent"] : ["remote.runner.launch:planned"])
   ];

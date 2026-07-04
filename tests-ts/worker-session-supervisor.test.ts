@@ -129,15 +129,49 @@ test("Codex worker launch plan includes model cwd approval sandbox and prompt", 
       "--cd",
       "/repo",
       "--ask-for-approval",
-      "on-request",
+      "never",
       "--sandbox",
-      "workspace-write",
+      "danger-full-access",
       "--profile",
       "review",
       "Use Ciclo MCP and implement the task."
     ]);
     assert.deepEqual(plan.extraArgs, ["--profile", "review"]);
     assert.equal(plan.sessionName, "repo-loop-1-ciclo-1-codex");
+  });
+});
+
+test("worker launch plan appends configured guidance to harness prompt", () => {
+  withHerdrReuseDisabled(() => {
+    const plan = buildWorkerLaunchPlan(
+      {
+        harnessId: "codex",
+        loopId: "loop-1",
+        cwd: "/repo",
+        prompt: "Use Ciclo MCP and implement the task.",
+        promptInjections: [
+          {
+            id: "worker-help",
+            scope: "worker",
+            text: "Run the repository validation command before reporting done."
+          },
+          {
+            id: "brain-only",
+            scope: "brain",
+            text: "This belongs to the brain only."
+          }
+        ]
+      },
+      "/fallback",
+      "worker-prompt-test"
+    );
+
+    assert.match(plan.prompt, /Configured Ciclo guidance:/);
+    assert.match(plan.prompt, /\[worker-help\] Run the repository validation command/);
+    assert.doesNotMatch(plan.prompt, /brain-only/);
+    assert.equal(plan.args.at(-1), plan.prompt);
+    assert.ok(plan.evidence.includes("prompt.injections.worker:1"));
+    assert.ok(plan.evidence.includes("prompt.injection.worker:worker-help"));
   });
 });
 
@@ -166,12 +200,15 @@ test("Claude worker launch plan starts background named session with effort", ()
       "claude-fable-5",
       "--effort",
       "high",
+      "--permission-mode",
+      "bypassPermissions",
       "--allowedTools",
       "mcp__ciclo__ciclo_status",
       "Review through Ciclo."
     ]);
     assert.equal(plan.model, "claude-fable-5");
     assert.ok(plan.evidence.includes("worker.session.model:claude-fable-5"));
+    assert.ok(plan.evidence.includes("worker.session.permission_mode:bypassPermissions"));
   });
 });
 
@@ -191,6 +228,25 @@ test("Claude worker launch plan passes only explicit valid permission mode", () 
     assert.ok(plan.args.includes("--permission-mode"));
     assert.ok(plan.args.includes("manual"));
     assert.ok(!plan.args.includes("default"));
+    assert.ok(plan.evidence.includes("worker.session.permission_mode:manual"));
+  });
+});
+
+test("Claude worker launch plan can explicitly omit permission mode", () => {
+  withHerdrReuseDisabled(() => {
+    const plan = buildWorkerLaunchPlan(
+      {
+        harnessId: "claude-code",
+        loopId: "loop-permissions",
+        permissionMode: "default",
+        prompt: "Review through Ciclo."
+      },
+      "/repo",
+      "worker-claude-default-permissions"
+    );
+
+    assert.ok(!plan.args.includes("--permission-mode"));
+    assert.ok(plan.evidence.includes("worker.session.permission_mode:default"));
   });
 });
 
@@ -218,7 +274,7 @@ test("worker launch plan can create an isolated worktree cwd", () => {
     assert.equal(plan.worktree?.branch, "ciclo-worker");
     assert.equal(plan.worktree?.base, "main");
     assert.equal(plan.cwd, plan.worktree?.path);
-    assert.deepEqual(plan.args.slice(0, 4), ["--cd", plan.worktree?.path, "--ask-for-approval", "on-request"]);
+    assert.deepEqual(plan.args.slice(0, 6), ["--cd", plan.worktree?.path, "--ask-for-approval", "never", "--sandbox", "danger-full-access"]);
     assert.ok(plan.evidence.includes(`worker.worktree.path:${plan.worktree?.path}`));
   });
 });
@@ -247,11 +303,12 @@ test("worker launch plan can configure MCP clients in the worker cwd", () => {
     );
 
     assert.equal(plan.mcpConfig?.enabled, true);
-    assert.deepEqual(plan.mcpConfig?.clients, ["codex"]);
+    assert.deepEqual(plan.mcpConfig?.clients, ["claude", "codex"]);
     assert.equal(plan.mcpConfig?.serverName, "ciclo_local");
     assert.equal(plan.mcpConfig?.command, "ciclo-dev");
     assert.deepEqual(plan.mcpConfig?.additionalServerNames, ["filesystem"]);
-    assert.equal(plan.mcpConfig?.install.targets[0]?.client, "codex");
+    assert.deepEqual(plan.mcpConfig?.install.targets.map((target) => target.client), ["claude", "codex"]);
+    assert.equal(existsSync(join(root, ".mcp.json")), false);
     assert.equal(existsSync(join(root, ".codex", "config.toml")), false);
     assert.ok(plan.evidence.includes("worker.mcp_config:planned"));
   });
@@ -503,7 +560,11 @@ test("worker session supervisor installs MCP config before launching", () => {
 
     assert.equal(running.state, "running");
     assert.equal(running.mcpConfig?.install.installed, true);
+    assert.deepEqual(running.mcpConfig?.clients, ["claude", "codex"]);
     assert.ok(running.evidence.includes("worker.mcp_config:installed"));
+    const claudeConfig = readFileSync(join(root, ".mcp.json"), "utf8");
+    assert.match(claudeConfig, /"ciclo_local"/u);
+    assert.match(claudeConfig, /"ciclo-dev"/u);
     const config = readFileSync(join(root, ".codex", "config.toml"), "utf8");
     assert.match(config, /\[mcp_servers\.ciclo_local\]/u);
     assert.match(config, /command = "ciclo-dev"/u);
@@ -546,6 +607,8 @@ test("worker launch defaults to Herdr pane inside active Herdr session", () => {
     assert.ok(claudePlan.args.includes("--name"));
     assert.ok(claudePlan.args.includes("--model"));
     assert.ok(claudePlan.args.includes("claude-fable-5"));
+    assert.ok(claudePlan.args.includes("--permission-mode"));
+    assert.ok(claudePlan.args.includes("bypassPermissions"));
     assert.ok(!claudePlan.args.includes("--bg"));
     assert.equal(claudePlan.model, "claude-fable-5");
     assert.ok(claudePlan.evidence.includes("worker.session.launch_mode:herdr_pane"));
@@ -566,6 +629,12 @@ test("worker launch defaults to Herdr pane inside active Herdr session", () => {
     assert.equal(codexPlan.launchMode, "herdr_pane");
     assert.equal(codexPlan.trackingMode, "herdr_agent");
     assert.equal(codexPlan.agentRef?.kind, "herdr_agent");
+    assert.ok(codexPlan.args.includes("--ask-for-approval"));
+    assert.ok(codexPlan.args.includes("never"));
+    assert.ok(codexPlan.args.includes("--sandbox"));
+    assert.ok(codexPlan.args.includes("danger-full-access"));
+    assert.ok(codexPlan.evidence.includes("worker.session.approval_policy:never"));
+    assert.ok(codexPlan.evidence.includes("worker.session.sandbox:danger-full-access"));
     assert.deepEqual(codexPlan.args.slice(0, 10), [
       "--session",
       "operator-main",

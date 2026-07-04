@@ -42,6 +42,7 @@ const expectedResources = [
   "ciclo://loops",
   "ciclo://loops/{loop_id}",
   "ciclo://events",
+  "ciclo://heartbeat",
   "ciclo://board",
   "ciclo://work/ready",
   "ciclo://work/{bead_id}",

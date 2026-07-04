@@ -1308,6 +1308,17 @@ async function liveStatus(service: CicloMcpReadService, runtime: CicloMcpRuntime
     runtime: runtimeDecision.runtime,
     brain: runtime.openAiBrain?.status() ?? openAiBrainPolicy,
     live: true,
+    heartbeat: runtime.internalHeartbeat?.status() ?? {
+      running: false,
+      intervalMs: 0,
+      claudeChannel: {
+        enabled: runtime.claudeChannel?.enabled === true,
+        communicationReady: false,
+        connectedWorkers: 0
+      },
+      monologue: [],
+      evidence: ["heartbeat.internal:unavailable"]
+    },
     loops: loopIds.map((loopId) => liveLoop(loopId, runtime)).filter((loop): loop is LoopStatus => loop !== undefined),
     workers: {
       total: workers.length,
@@ -1429,7 +1440,7 @@ export function createLocalMcpRuntimeContext(root = process.cwd()): CicloMcpRunt
     workerSupervisor: new WorkerSessionSupervisor(root, undefined, undefined, eventStore),
     remoteRunnerRegistry: new RemoteRunnerRegistry(),
     secretProviderRegistry: createDefaultSecretProviderRegistry(),
-    openAiBrain: new PiSdkOpenAiBrain(),
+    openAiBrain: new PiSdkOpenAiBrain({ promptInjections: loadedConfig.config.prompts?.systemInjections }),
     repoBoardProvider: new GitHubCliRepoBoardProvider(),
     repoBoardEventKeys: new Set<string>()
   };
@@ -1449,12 +1460,18 @@ export async function createLocalMcpRuntimeContextWithPlugins(root = process.cwd
   const imageResolverRegistry = createDefaultRemoteRunnerImageResolverRegistry();
   const secretProviderRegistry = createSecretProviderRegistryFromConfig(loadedConfig.config);
   await activateConfiguredPlugins(pluginRegistry, defaultPluginPaths(root), secretProviderRegistry, imageResolverRegistry);
-  return {
-    ...createLocalMcpRuntimeContext(root),
+  const base = createLocalMcpRuntimeContext(root);
+  const runtime: CicloMcpRuntimeContext = {
+    ...base,
     projectConfig: loadedConfig.found ? loadedConfig.config : undefined,
     projectConfigEvidence: loadedConfig.evidence,
     remoteRunnerRegistry: new RemoteRunnerRegistry(pluginRegistry, imageResolverRegistry),
-    secretProviderRegistry
+    secretProviderRegistry,
+    openAiBrain: new PiSdkOpenAiBrain({ promptInjections: loadedConfig.config.prompts?.systemInjections })
+  };
+  return {
+    ...runtime,
+    internalHeartbeat: new CicloInternalHeartbeat(runtime)
   };
 }
 
@@ -1496,7 +1513,8 @@ async function callTool(
       beadId: stringParam(params, "bead_id") || undefined,
       harnessId: stringParam(params, "harness_id") || undefined,
       remoteSessionId: stringParam(params, "remote_session_id") || undefined,
-      workerSessionId: stringParam(params, "worker_session_id") || undefined
+      workerSessionId: stringParam(params, "worker_session_id") || undefined,
+      promptInjections: runtime.projectConfig?.prompts?.systemInjections
     });
     auditMutation({
       runtime,
@@ -1516,6 +1534,8 @@ async function callTool(
         purpose,
         provider: decision.provider,
         adapter: decision.adapter,
+        intelligence: decision.intelligence,
+        model_family: decision.modelFamily,
         model: decision.model,
         thinking: decision.thinking
       }
@@ -1524,6 +1544,8 @@ async function callTool(
       decision: decision.text,
       provider: decision.provider,
       adapter: decision.adapter,
+      intelligence: decision.intelligence,
+      model_family: decision.modelFamily,
       model: decision.model,
       thinking: decision.thinking,
       purpose: decision.purpose,
@@ -2251,7 +2273,8 @@ async function callTool(
             model: stringParam(params, "review_model") || undefined,
             effort: stringParam(params, "review_effort") || undefined,
             dryRun: booleanParam(params, "review_dry_run", false),
-            configureMcp: booleanParam(params, "review_configure_mcp", true)
+            configureMcp: booleanParam(params, "review_configure_mcp", true),
+            promptInjections: runtime.projectConfig?.prompts?.systemInjections
           });
         }
         auditMutation({
@@ -2396,6 +2419,20 @@ async function readResource(
   } else if (uri === "ciclo://events") {
     const poll = runtime.eventStore?.poll(0) ?? runtime.workerSupervisor?.pollEvents(0) ?? { cursor: 0, nextCursor: 0, events: [] };
     payload = { cursor: poll.cursor, next_cursor: poll.nextCursor, events: poll.events };
+  } else if (uri === "ciclo://heartbeat") {
+    payload = {
+      heartbeat: runtime.internalHeartbeat?.status() ?? {
+        running: false,
+        intervalMs: 0,
+        claudeChannel: {
+          enabled: runtime.claudeChannel?.enabled === true,
+          communicationReady: false,
+          connectedWorkers: 0
+        },
+        monologue: [],
+        evidence: ["heartbeat.internal:unavailable"]
+      }
+    };
   } else if (uri === "ciclo://board") {
     payload = await liveBoard(service, runtime);
   } else if (uri === "ciclo://work/ready") {

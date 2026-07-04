@@ -1,6 +1,6 @@
 # Getting Started With Ciclo
 
-Ciclo is a standalone orchestrator agent. It uses Pi as an internal brain provider, Herdr for harness state, Beads for durable work memory, and MCP for coordination with Claude, Codex, and generic clients.
+Ciclo is a standalone orchestrator agent. It uses model-backed OpenAI intelligence through the Pi SDK as its internal decision layer, Herdr for harness state, Beads for durable work memory, and MCP for coordination with Claude, Codex, and generic clients.
 
 This guide is for a local development checkout.
 
@@ -52,7 +52,7 @@ node dist/src/cli.js runtime
 npm run demo
 ```
 
-`status` returns the current standalone Ciclo status. `runtime` reports the product boundary: Ciclo is the standalone orchestrator agent, while OpenAI is the default orchestration brain reached through the Pi SDK adapter.
+`status` returns the current standalone Ciclo status. `runtime` reports the product boundary: Ciclo is the standalone orchestrator agent, while model-backed OpenAI intelligence is the default orchestration brain reached through the Pi SDK adapter.
 
 ### Benchmarks
 
@@ -72,7 +72,7 @@ Use stdio MCP for local Claude, Codex, or generic MCP clients:
 node dist/src/cli.js mcp stdio
 ```
 
-MCP starts Ciclo's internal heartbeat. That heartbeat periodically checks Ciclo-owned worker and remote sessions, marks silent sessions stalled or stale, and invokes the OpenAI brain for follow-up decisions about monitoring, context insertion, answerable worker questions, and controlling-session feedback. Workers should still call `ciclo_heartbeat_worker_session`; the internal heartbeat is Ciclo's independent supervisor loop, not a replacement for worker liveness reports.
+MCP starts Ciclo's internal heartbeat. On startup, its first wake records that Ciclo should analyze repo, Beads, Herdr, PR/CI, remote, context, and worker state before choosing the first work to start. After that, the heartbeat periodically checks Ciclo-owned worker and remote sessions, marks silent sessions stalled or stale, keeps a bounded monologue of what Ciclo is watching, and invokes the model-backed OpenAI brain for follow-up decisions about monitoring, context insertion, answerable worker questions, and controlling-session feedback. Read `ciclo://heartbeat`, `ciclo://events`, or `ciclo_status` to inspect heartbeat state. Workers should still call `ciclo_heartbeat_worker_session`; the internal heartbeat is Ciclo's independent supervisor loop, not a replacement for worker liveness reports.
 
 Legacy package script:
 
@@ -93,7 +93,7 @@ ciclo mcp install --client claude --project /path/to/project --claude-channel
 
 Claude installs write `.mcp.json`. Codex installs write `.codex/config.toml`. The generated server config runs `ciclo mcp stdio` and sets `CICLO_PROJECT_ROOT` to the target project.
 
-Use `--claude-channel` when a Claude Code session should load Ciclo as a channel-capable MCP server. The install response includes the Claude launch selector, such as `--dangerously-load-development-channels server:ciclo`.
+Use `--claude-channel` when a Claude Code session should load Ciclo as a channel-capable MCP server. The install response includes the Claude launch selector, such as `--dangerously-load-development-channels server:ciclo`. When Claude channels are active, Ciclo's heartbeat reports whether Claude Code worker communication is ready through `ciclo://heartbeat`.
 
 Install the companion project skills so Claude or Codex knows how to use Ciclo once the MCP tools are available:
 
@@ -142,9 +142,9 @@ ciclo launch claude --dry-run --compact
 ciclo launch codex --terminal
 ```
 
-`ciclo launch` installs the selected client MCP config for the current project first, including the Ciclo server, project `mcp.additionalServers`, `mcp.secretBindings`, and additional-server `${secret://provider-id/ref}` placeholders. Non-dry-run launches write `.mcp.json` or `.codex/config.toml`, start the selected harness as the first pane in a named Herdr session, and attach to that session. Secret-backed entries are written as `ciclo secret exec` runtime wrappers that resolve provider references only when the intended child process starts, so generated config files do not contain resolved secret values. By default the Herdr session and first pane are named after the project directory; use `--session`, `--pane-name`, or `--no-attach` to tune the wrapper, and use `--terminal` only when you explicitly want the harness process in the current terminal. Use dry-run to inspect the redacted MCP install plan, Herdr command, and exact harness command without writing files or starting Claude/Codex.
+`ciclo launch` installs the selected client MCP config for the current project first, including the Ciclo server, project `mcp.additionalServers`, `mcp.secretBindings`, and additional-server `${secret://provider-id/ref}` placeholders. Non-dry-run launches write `.mcp.json` or `.codex/config.toml`, start the selected harness as the first pane in a named Herdr session, and attach to that session. Secret-backed entries are written as `ciclo secret exec` runtime wrappers that resolve provider references only when the intended child process starts, so generated config files do not contain resolved secret values. By default the Herdr session and first pane are named after the project directory; use `--session`, `--pane-name`, or `--no-attach` to tune the wrapper, and use `--terminal` only when you explicitly want the harness process in the current terminal. Ciclo starts launched harnesses in bypass mode by default: Claude Code receives `--permission-mode bypassPermissions`, and Codex receives `--ask-for-approval never --sandbox danger-full-access`; pass explicit launch fields when a session needs a narrower mode. Use dry-run to inspect the redacted MCP install plan, Herdr command, and exact harness command without writing files or starting Claude/Codex.
 
-A launch request includes the harness, loop, prompt, optional Beads issue, model, effort, cwd, `extra_args`, `isolation`, worktree options, MCP config options, and `dry_run`. Use `dry_run: true` to inspect the launch command, planned worktree, and planned MCP client config without starting a process. Use `isolation: "worktree"` for bead-level fan-out; Ciclo defaults the branch to `ciclo/<bead-id>` unless `worktree_branch` is set. When running inside Herdr, Ciclo uses fresh `herdr worktree create` workspaces and starts the local worker inside the returned Herdr workspace id; outside Herdr, it uses `git worktree add`. Ciclo never passes the old `cli:worktree:create` placement sentinel to `herdr agent start`. Existing Herdr worktree paths fail instead of reopening stale workspace state. Use `configure_mcp: true` when the worker should receive Ciclo MCP config in its cwd or worktree before launch.
+A launch request includes the harness, loop, prompt, optional Beads issue, model, effort, cwd, `extra_args`, `isolation`, worktree options, MCP config options, permission fields, and `dry_run`. Use `dry_run: true` to inspect the launch command, planned worktree, and planned MCP client config without starting a process. Use `isolation: "worktree"` for bead-level fan-out; Ciclo defaults the branch to `ciclo/<bead-id>` unless `worktree_branch` is set. When running inside Herdr, Ciclo uses fresh `herdr worktree create` workspaces and starts the local worker inside the returned Herdr workspace id; outside Herdr, it uses `git worktree add`. Ciclo never passes the old `cli:worktree:create` placement sentinel to `herdr agent start`. Existing Herdr worktree paths fail instead of reopening stale workspace state. Use `configure_mcp: true` when the worker should receive Ciclo MCP config in its cwd or worktree before launch. Unless `mcp_clients` is explicitly supplied, launched workers get the same Ciclo MCP server installed for both Claude and Codex so either harness sees the same control plane. Worker launch records include the effective Claude `permission_mode` or Codex `approval_policy` and `sandbox` so status and board views can explain why a session was started bypassed.
 
 For Claude Code sessions, `model` accepts `claude-fable-5` directly and normalizes `fable 5`, `Fable 5`, or `claude fable 5` to `claude-fable-5`. Other model ids remain pass-through so new Claude models can be used without a Ciclo release.
 
@@ -176,17 +176,36 @@ The config supports:
 - `secrets.providers`: OpenBao and 1Password provider ids, display names, and CLI commands.
 - `mcp`: default clients, server name, Ciclo command, non-secret `vars`, secret provider bindings for Ciclo MCP server subprocesses, `workerSecretBindings` for spawned worker shells, and Claude channel mode for generated MCP configs.
 - `remote`: default runner kind, image resolver or static image, repository URL/path, repo bootstrap/devenv behavior, SSH user, WireGuard settings, provider-specific Kubernetes/AWS Lambda MicroVM/Cloudflare settings, and non-secret `vars`.
+- `prompts.systemInjections`: non-secret project goals or helper guidance that Ciclo appends to matching prompt surfaces after its built-in ground rules.
 
-Precedence is simple: inline CLI flags and MCP tool payload fields win for the current operation; `.ciclo/config.json` fills any omitted values; Ciclo's built-in defaults apply last. That means the shared config can define the normal Claude/Codex MCP setup, secret provider aliases, and remote runner defaults while a single launch can still override the model, worktree, remote runner kind, or provider-specific field.
+Precedence is simple: inline CLI flags and MCP tool payload fields win for the current operation; `.ciclo/config.json` fills any omitted values; Ciclo's built-in defaults apply last. That means the shared config can define the normal Claude/Codex MCP setup, secret provider aliases, prompt guidance, and remote runner defaults while a single launch can still override the model, worktree, remote runner kind, or provider-specific field.
+
+Prompt guidance entries look like this:
+
+```json
+{
+  "prompts": {
+    "systemInjections": [
+      {
+        "id": "project-goals",
+        "scope": "all",
+        "text": "Prefer small, demoable changes. Keep Beads memory current and surface blockers promptly."
+      }
+    ]
+  }
+}
+```
+
+`scope` can be `all`, `brain`, `worker`, `review`, or `beads`. Ciclo applies matching entries to OpenAI brain decisions, launched worker prompts, remote worker prompts, post-close review sessions, and Beads-derived harness prompts. These injections are append-only; they do not replace Ciclo's safety rules. Keep them non-secret: config parsing rejects secret references and secret-like values such as `${secret://...}`, `op://...`, or token/password assignments.
 
 Use provider references in `mcp.secretBindings` and `mcp.workerSecretBindings`; do not store raw secret values. Ciclo redacts secret references from `ciclo config show --compact`, launch responses, worker-session listings, audit records, events, and board rows. `vars` are only for non-secret strings. For secrets needed by the generated Ciclo MCP server, bind a `name` to a configured provider and reference under `secretBindings`; for secrets needed by the launched agent shell, use `workerSecretBindings`. Ciclo writes runtime wrappers that resolve the value only when the intended process starts. Add `format` only when the generated variable needs a prefix, suffix, or wrapper string. For additional MCP servers, keep raw environment values non-secret or use `${secret://provider-id/ref}` placeholders that Ciclo turns into runtime wrappers.
 
 The same file is read in four places:
 
 - `ciclo mcp install` merges `mcp` defaults into Claude and Codex client config generation.
-- `ciclo mcp stdio` and HTTP MCP startup register configured secret providers.
-- `ciclo_launch_worker_session` applies `mcp` defaults when `configure_mcp` is enabled.
-- `ciclo_launch_remote_runner` applies `remote` defaults before building the runner, WireGuard, remote MCP config, and Herdr attach plan.
+- `ciclo mcp stdio` and HTTP MCP startup register configured secret providers and pass prompt guidance to the OpenAI brain.
+- `ciclo_launch_worker_session` applies `mcp` defaults when `configure_mcp` is enabled and appends matching prompt guidance.
+- `ciclo_launch_remote_runner` applies `remote` defaults before building the runner, WireGuard, remote MCP config, Herdr attach plan, and remote prompt guidance.
 
 Example launch payload:
 

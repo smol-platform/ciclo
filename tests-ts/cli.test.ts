@@ -349,6 +349,10 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
     assert.equal(codexPlan.command, "herdr");
     assert.equal(codexPlan.harnessCommand, "codex");
     assert.ok(codexPlan.harnessArgs?.includes("--cd"));
+    assert.ok(codexPlan.harnessArgs?.includes("--ask-for-approval"));
+    assert.ok(codexPlan.harnessArgs?.includes("never"));
+    assert.ok(codexPlan.harnessArgs?.includes("--sandbox"));
+    assert.ok(codexPlan.harnessArgs?.includes("danger-full-access"));
     assert.ok(codexPlan.projectRoot);
     assert.ok(codexPlan.harnessArgs?.includes(codexPlan.projectRoot));
     assert.ok(codexPlan.harnessArgs?.includes("Review the repo"));
@@ -402,7 +406,8 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
     assert.equal(claudePlan.harnessCommand, "claude");
     assert.ok(claudePlan.harnessArgs?.includes("--dangerously-load-development-channels"));
     assert.ok(claudePlan.harnessArgs?.includes("server:ciclo_launch"));
-    assert.ok(!claudePlan.harnessArgs?.includes("--permission-mode"));
+    assert.ok(claudePlan.harnessArgs?.includes("--permission-mode"));
+    assert.ok(claudePlan.harnessArgs?.includes("bypassPermissions"));
     assert.ok(!claudePlan.harnessArgs?.includes("default"));
     assert.ok(claudePlan.args?.includes("claude"));
     assert.deepEqual(claudePlan.mcpInstall?.targets?.map((target) => target.client), ["claude"]);
@@ -423,11 +428,16 @@ test("CLI launch dry-run prepares MCP config and Herdr harness command", async (
       launchMode?: string;
       command?: string;
       harnessCommand?: string;
+      harnessArgs?: readonly string[];
       herdr?: unknown;
     };
     assert.equal(terminalPlan.launchMode, "terminal");
     assert.equal(terminalPlan.command, "codex");
     assert.equal(terminalPlan.harnessCommand, "codex");
+    assert.ok(terminalPlan.harnessArgs?.includes("--ask-for-approval"));
+    assert.ok(terminalPlan.harnessArgs?.includes("never"));
+    assert.ok(terminalPlan.harnessArgs?.includes("--sandbox"));
+    assert.ok(terminalPlan.harnessArgs?.includes("danger-full-access"));
     assert.equal(terminalPlan.herdr, undefined);
   } finally {
     process.chdir(before);

@@ -94,3 +94,24 @@ test("builds Claude Code prompt with fallback spec validation and blocker contex
   assert.match(result.prompt, /Do not approve permission prompts/);
   assert.match(result.prompt, /Known blockers\/dependencies/);
 });
+
+test("appends configured Beads guidance to task harness prompts", () => {
+  const result = buildBeadsHarnessPrompt({
+    task,
+    loop,
+    observation,
+    plugin: codexPlugin,
+    promptInjections: [
+      {
+        id: "beads-memory",
+        scope: "beads",
+        text: "Record durable progress in the Beads task before closeout."
+      }
+    ]
+  });
+
+  assert.match(result.prompt, /Configured Ciclo guidance:/);
+  assert.match(result.prompt, /\[beads-memory\] Record durable progress/);
+  assert.ok(result.evidence.includes("prompt.injections.beads:1"));
+  assert.ok(result.evidence.includes("prompt.injection.beads:beads-memory"));
+});

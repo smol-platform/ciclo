@@ -6,8 +6,12 @@ import {
   SettingsManager
 } from "@earendil-works/pi-coding-agent";
 
+import { applyPromptInjections, promptInjectionEvidence, type CicloPromptInjection } from "./prompt-injection.js";
+
 export const defaultOpenAiBrainModel = "openai-codex/gpt-5.5";
 export const defaultOpenAiBrainThinking = "high";
+export const openAiBrainModelFamily = "openai";
+export const openAiBrainIntelligence = "model_backed";
 
 export const openAiDecisionPurposes = [
   "remote_session_monitoring",
@@ -32,11 +36,14 @@ export interface OpenAiBrainDecisionInput extends OpenAiBrainRouteContext {
   readonly prompt: string;
   readonly context?: readonly string[];
   readonly evidence?: readonly string[];
+  readonly promptInjections?: readonly CicloPromptInjection[];
 }
 
 export interface OpenAiBrainDecision {
   readonly provider: "openai";
   readonly adapter: "pi-sdk";
+  readonly intelligence: typeof openAiBrainIntelligence;
+  readonly modelFamily: typeof openAiBrainModelFamily;
   readonly model: string;
   readonly thinking: string;
   readonly purpose: OpenAiDecisionPurpose;
@@ -47,6 +54,8 @@ export interface OpenAiBrainDecision {
 export interface OpenAiBrainStatus {
   readonly provider: "openai";
   readonly adapter: "pi-sdk";
+  readonly intelligence: typeof openAiBrainIntelligence;
+  readonly modelFamily: typeof openAiBrainModelFamily;
   readonly model: string;
   readonly thinking: string;
   readonly required_for: readonly OpenAiDecisionPurpose[];
@@ -67,6 +76,8 @@ export type OpenAiPromptRunner = (prompt: string, options: {
 export const openAiBrainPolicy: OpenAiBrainStatus = {
   provider: "openai",
   adapter: "pi-sdk",
+  intelligence: openAiBrainIntelligence,
+  modelFamily: openAiBrainModelFamily,
   model: defaultOpenAiBrainModel,
   thinking: defaultOpenAiBrainThinking,
   required_for: openAiDecisionPurposes,
@@ -149,8 +160,8 @@ function line(label: string, value: string | undefined): string | undefined {
 }
 
 function promptForDecision(input: OpenAiBrainDecisionInput): string {
-  return [
-    "You are Ciclo's OpenAI-backed orchestration brain.",
+  const prompt = [
+    "You are Ciclo's model-backed OpenAI orchestration brain.",
     `Decision purpose: ${input.purpose}`,
     line("Loop", input.loopId),
     line("Beads task", input.beadId),
@@ -171,6 +182,7 @@ function promptForDecision(input: OpenAiBrainDecisionInput): string {
   ]
     .filter((item): item is string => item !== undefined)
     .join("\n");
+  return applyPromptInjections(prompt, input.promptInjections, "brain").prompt;
 }
 
 export class PiSdkOpenAiBrain implements OpenAiBrain {
@@ -179,6 +191,7 @@ export class PiSdkOpenAiBrain implements OpenAiBrain {
       readonly model?: string;
       readonly thinking?: string;
       readonly runner?: OpenAiPromptRunner;
+      readonly promptInjections?: readonly CicloPromptInjection[];
     } = {}
   ) {}
 
@@ -193,13 +206,16 @@ export class PiSdkOpenAiBrain implements OpenAiBrain {
   async decide(input: OpenAiBrainDecisionInput): Promise<OpenAiBrainDecision> {
     const status = this.status();
     const runner = this.options.runner ?? completeWithPiSdk;
-    const text = await runner(promptForDecision(input), {
+    const promptInjections = input.promptInjections ?? this.options.promptInjections;
+    const text = await runner(promptForDecision({ ...input, promptInjections }), {
       model: status.model,
       thinking: status.thinking
     });
     return {
       provider: "openai",
       adapter: "pi-sdk",
+      intelligence: openAiBrainIntelligence,
+      modelFamily: openAiBrainModelFamily,
       model: status.model,
       thinking: status.thinking,
       purpose: input.purpose,
@@ -207,10 +223,13 @@ export class PiSdkOpenAiBrain implements OpenAiBrain {
       evidence: [
         "brain.provider:openai",
         "brain.adapter:pi-sdk",
+        `brain.intelligence:${openAiBrainIntelligence}`,
+        `brain.model_family:${openAiBrainModelFamily}`,
         `brain.model:${status.model}`,
         `brain.thinking:${status.thinking}`,
         `brain.purpose:${input.purpose}`,
         "brain.fallback:fail_closed",
+        ...promptInjectionEvidence(promptInjections, "brain"),
         ...(input.evidence ?? [])
       ]
     };

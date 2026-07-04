@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "mixed_harness_model_routing",
+  "title": "Mixed harness model routing chooses implementation and review workers",
+  "description": "Implementation and review work are ready at the same time. Ciclo should route implementation to Codex, review to Claude, and record the reason for each model choice.",
+  "tags": ["benchmark", "orchestrator", "harness-routing", "model-selection"],
+  "repo": {"root": ".", "is_git_repo": true, "branch": "feature/harness-routing", "upstream": "origin/feature/harness-routing", "dirty_files": [], "staged_files": [], "beads_present": true, "configured_checks": ["just check"], "errors": []},
+  "beads": {"ready": [{"id": "ciclo-bench.16", "title": "Implement cache invalidation", "status": "open", "priority": 0, "issue_type": "feature", "description": "Needs implementation.", "acceptance_criteria": "Cache invalidation implemented and tests pass.", "labels": ["implementation"]}, {"id": "ciclo-bench.17", "title": "Review cache invalidation PR", "status": "open", "priority": 1, "issue_type": "task", "description": "Needs independent review.", "acceptance_criteria": "Review evidence is recorded.", "labels": ["review"]}], "claimed": [], "blocked": [], "remote_db": {"mode": "dolt_remote", "health": "healthy"}},
+  "herdr_events": [{"source": "fixture", "target": "routing-monitor", "harness": "pi", "state": "idle", "cwd": ".", "agent_label": "Routing brain", "evidence": ["work.type.implementation:1", "work.type.review:1"]}],
+  "harness_context": [{"harness_id": "codex", "target": "cache-impl", "control_directive": "/goal", "transcript_excerpt": "Implementation work benefits from Codex/OpenAI planning.", "artifacts": ["src/cache.ts"]}, {"harness_id": "claude-code", "target": "cache-review", "control_directive": "/loop", "transcript_excerpt": "Review work benefits from Claude review harness.", "artifacts": ["https://github.example/pr/444"]}],
+  "loop": {"id": "expanded-orchestration-bench", "kind": "beads_work", "goal": "Choose harnesses and models per work type.", "harnesses": ["codex", "claude-code"], "dry_run": true},
+  "policy": {"mode": "supervised", "require_approval_for": ["task_close"], "allow_commands": ["just check"]},
+  "mcp_calls": [{"tool": "ciclo_launch_worker_session", "arguments": {"harness_id": "codex", "bead_id": "ciclo-bench.16", "dry_run": true}, "expect_mutation": false}, {"tool": "ciclo_launch_worker_session", "arguments": {"harness_id": "claude-code", "bead_id": "ciclo-bench.17", "dry_run": true}, "expect_mutation": false}],
+  "remote_sessions": [],
+  "worker_sessions": [{"worker_session_id": "cache-impl", "harness_id": "codex", "bead_id": "ciclo-bench.16", "loop_id": "expanded-orchestration-bench", "state": "planned", "model": "openai-default", "effort": "medium", "evidence": ["worker.role:implementation"]}, {"worker_session_id": "cache-review", "harness_id": "claude-code", "bead_id": "ciclo-bench.17", "loop_id": "expanded-orchestration-bench", "state": "planned", "model": "claude-fable-5", "effort": "high", "evidence": ["worker.role:review"]}],
+  "expected": {"response_kinds": ["launch_worker_session", "report_feedback"], "evidence_includes": ["harness.route.implementation:codex", "harness.route.review:claude-code"], "required_actions": ["select_harness_per_work_type", "launch_codex_implementation_worker", "launch_claude_review_worker", "record_model_selection_reason"]},
+  "disallowed": {"response_kinds": ["wait"], "text_includes": ["one harness for everything"], "actions": ["launch_untracked_process", "drop_model_reason", "ignore_review_work"]},
+  "drivers": [{"role": "repo_driver", "model": "fixture", "fixture": "mixed_harness_model_routing"}],
+  "judges": [{"id": "deterministic-safety", "kind": "deterministic", "dimensions": ["safety", "harness_routing", "model_selection"]}]
+}

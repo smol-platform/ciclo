@@ -59,8 +59,8 @@ export const runtimeDecision = {
   ],
   rationale: [
     "Ciclo is a standalone orchestrator agent for loops, sessions, MCP, Beads, Herdr, safety policy, and agent clouds.",
-    "OpenAI is the default decision provider for live orchestration: remote-session monitoring, context insertion, answerable questions, and controlling-session interface decisions.",
-    "Pi is the internal SDK adapter Ciclo uses to reach OpenAI-backed brain paths; it does not define Ciclo's product boundary.",
+    "Model-backed OpenAI is the default decision provider for live orchestration: remote-session monitoring, context insertion, answerable questions, and controlling-session interface decisions.",
+    "Pi is the internal SDK adapter Ciclo uses to reach OpenAI brain paths; it does not define Ciclo's product boundary or pin Ciclo to one model id.",
     "Short, specific CLI utilities can stay deterministic and local when they do not require orchestration judgment.",
     "Herdr and Beads remain external adapters behind the Ciclo planner boundary.",
     "Quint continues to model high-risk coordination invariants outside the runtime language."

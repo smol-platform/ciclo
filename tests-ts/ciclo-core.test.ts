@@ -16,7 +16,7 @@ test("runtime decision is standalone Ciclo orchestrator agent with OpenAI brain 
   assert.equal(runtimeDecision.runtime, "Standalone TypeScript Ciclo orchestrator agent");
   assert.ok(runtimeDecision.entrypoints.includes("standalone CLI: ./src/cli.ts"));
   assert.ok(runtimeDecision.entrypoints.includes("Pi brain adapter: ./src/pi-extension.ts"));
-  assert.ok(runtimeDecision.rationale.some((item) => item.includes("OpenAI is the default decision provider")));
+  assert.ok(runtimeDecision.rationale.some((item) => item.includes("Model-backed OpenAI is the default decision provider")));
   assert.ok(runtimeDecision.rationale.some((item) => item.includes("orchestrator agent")));
 });
 
@@ -28,6 +28,8 @@ test("standalone status exposes Ciclo as orchestrator agent and OpenAI as brain 
   assert.equal(status.brain.provider, "openai");
   assert.equal(status.brain.adapter, "pi-sdk");
   assert.equal(status.brain.role, "primary_orchestration_brain");
+  assert.equal(status.brain.routing.intelligence, "model_backed");
+  assert.equal(status.brain.routing.modelFamily, "openai");
   assert.ok(status.brain.routing.required_for.includes("remote_session_monitoring"));
   assert.equal(status.plan.loopId, "review-demo");
 });

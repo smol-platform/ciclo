@@ -76,6 +76,20 @@
     ],
     "claudeChannel": false
   },
+  "prompts": {
+    "systemInjections": [
+      {
+        "id": "project-goals",
+        "scope": "all",
+        "text": "Prefer small, demoable changes. Keep project memory current in Beads and surface blockers promptly."
+      },
+      {
+        "id": "brain-monitoring-help",
+        "scope": "brain",
+        "text": "When sessions stall, compare model fit, context size, validation state, PR status, and whether operator feedback is needed."
+      }
+    ]
+  },
   "remote": {
     "runnerKind": "kubernetes",
     "imageResolver": {

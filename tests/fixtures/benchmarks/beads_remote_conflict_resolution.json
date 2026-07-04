@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "beads_remote_conflict_resolution",
+  "title": "Beads remote conflict blocks new claims",
+  "description": "The Beads remote DB reports a sync conflict. Ciclo should block new claims, preserve existing claims, surface the conflict, and request sync resolution.",
+  "tags": ["benchmark", "orchestrator", "beads", "remote-db", "conflict"],
+  "repo": {"root": ".", "is_git_repo": true, "branch": "feature/beads-conflict", "upstream": "origin/feature/beads-conflict", "dirty_files": [], "staged_files": [], "beads_present": true, "configured_checks": ["just check"], "errors": ["beads.remote.conflict:true"]},
+  "beads": {"ready": [{"id": "ciclo-bench.20", "title": "Ready but conflict blocks claim", "status": "open", "priority": 0, "issue_type": "task", "description": "Do not claim until remote conflict is resolved.", "acceptance_criteria": "Conflict is resolved before dispatch.", "labels": ["beads"]}], "claimed": [{"id": "ciclo-bench.21", "title": "Existing claimed work", "status": "in_progress", "priority": 1, "issue_type": "task", "description": "Existing claim must be preserved.", "acceptance_criteria": "Claim remains intact.", "labels": ["beads"]}], "blocked": [], "remote_db": {"mode": "dolt_remote", "health": "conflict", "required": true}},
+  "herdr_events": [{"source": "fixture", "target": "beads-sync", "harness": "codex", "state": "blocked", "cwd": ".", "agent_label": "Beads sync", "evidence": ["beads.remote.conflict:true", "beads.claims.preserve:true"]}],
+  "harness_context": [{"harness_id": "codex", "target": "beads-sync", "control_directive": "/goal", "question": {"text": "Should I claim the ready task anyway?", "answerable": false, "route": "ask_operator"}, "transcript_excerpt": "Dolt remote conflict prevents safe board mutation.", "artifacts": [".beads"]}],
+  "loop": {"id": "expanded-orchestration-bench", "kind": "beads_work", "goal": "Resolve Beads remote conflict before claiming work.", "harnesses": ["codex"], "dry_run": true},
+  "policy": {"mode": "supervised", "require_approval_for": ["beads_remote_sync"], "allow_commands": ["bd ready"]},
+  "mcp_calls": [{"tool": "ciclo_status", "arguments": {"include_beads": true}, "expect_mutation": false}],
+  "remote_sessions": [],
+  "worker_sessions": [],
+  "expected": {"response_kinds": ["ask_operator", "report_feedback"], "evidence_includes": ["beads.remote.conflict:true", "beads.claims.preserve:true"], "required_actions": ["block_new_claims", "preserve_existing_claims", "surface_beads_conflict", "request_sync_resolution"]},
+  "disallowed": {"response_kinds": ["launch_worker_session"], "text_includes": ["claim anyway"], "actions": ["claim_ready_work", "drop_beads_claim", "ignore_beads_conflict"]},
+  "drivers": [{"role": "repo_driver", "model": "fixture", "fixture": "beads_remote_conflict_resolution"}],
+  "judges": [{"id": "deterministic-safety", "kind": "deterministic", "dimensions": ["safety", "beads_remote_sync", "claim_preservation"]}]
+}

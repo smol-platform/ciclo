@@ -19,6 +19,7 @@ import {
   type CicloMcpSecretEnvInstall
 } from "./mcp-install.js";
 import type { CicloMcpAdditionalServerSecretEnvInstall } from "./mcp-secret-placeholders.js";
+import { applyPromptInjections, type CicloPromptInjection } from "./prompt-injection.js";
 import { activeHerdrSessionName, repoSessionName } from "./repo-session-name.js";
 import { secretExecArgs, type RuntimeSecretEnvBinding } from "./secret-env-runtime.js";
 
@@ -34,6 +35,10 @@ export type WorkerSessionState =
   | "completed";
 export type WorkerTrackingMode = "process" | "detached_agent" | "herdr_agent";
 export type WorkerLaunchMode = "process" | "herdr_pane";
+
+const defaultClaudePermissionMode = "bypassPermissions";
+const defaultCodexApprovalPolicy = "never";
+const defaultCodexSandbox = "danger-full-access";
 
 export interface WorkerSessionLaunchRequest {
   readonly harnessId: WorkerHarnessId;
@@ -62,6 +67,7 @@ export interface WorkerSessionLaunchRequest {
   readonly mcpSecretEnv?: readonly CicloMcpSecretEnvBinding[];
   readonly workerSecretEnv?: readonly CicloMcpSecretEnvBinding[];
   readonly mcpClaudeChannel?: boolean;
+  readonly promptInjections?: readonly CicloPromptInjection[];
 }
 
 export type WorkerIsolationMode = "none" | "worktree";
@@ -353,15 +359,27 @@ function codexArgs(input: WorkerSessionLaunchRequest, cwd: string, extraArgs: re
   const args: string[] = [];
   appendIfValue(args, "--model", input.model);
   args.push("--cd", cwd);
-  args.push("--ask-for-approval", clean(input.approvalPolicy) ?? "on-request");
-  args.push("--sandbox", clean(input.sandbox) ?? "workspace-write");
+  args.push("--ask-for-approval", effectiveCodexApprovalPolicy(input));
+  args.push("--sandbox", effectiveCodexSandbox(input));
   args.push(...extraArgs);
   args.push(input.prompt);
   return args;
 }
 
-function appendClaudePermissionMode(args: string[], value: string | undefined): void {
-  const mode = clean(value);
+function effectiveClaudePermissionMode(input: WorkerSessionLaunchRequest): string {
+  return clean(input.permissionMode) ?? defaultClaudePermissionMode;
+}
+
+function effectiveCodexApprovalPolicy(input: WorkerSessionLaunchRequest): string {
+  return clean(input.approvalPolicy) ?? defaultCodexApprovalPolicy;
+}
+
+function effectiveCodexSandbox(input: WorkerSessionLaunchRequest): string {
+  return clean(input.sandbox) ?? defaultCodexSandbox;
+}
+
+function appendClaudePermissionMode(args: string[], input: WorkerSessionLaunchRequest): void {
+  const mode = effectiveClaudePermissionMode(input);
   if (mode === undefined || mode === "default") return;
   args.push("--permission-mode", mode);
 }
@@ -370,7 +388,7 @@ function claudeArgs(input: WorkerSessionLaunchRequest, name: string, extraArgs: 
   const args: string[] = ["--bg", "--name", name];
   appendIfValue(args, "--model", input.model);
   appendIfValue(args, "--effort", input.effort);
-  appendClaudePermissionMode(args, input.permissionMode);
+  appendClaudePermissionMode(args, input);
   args.push(...extraArgs);
   args.push(input.prompt);
   return args;
@@ -380,7 +398,7 @@ function claudePaneArgs(input: WorkerSessionLaunchRequest, name: string, extraAr
   const args: string[] = ["--name", name];
   appendIfValue(args, "--model", input.model);
   appendIfValue(args, "--effort", input.effort);
-  appendClaudePermissionMode(args, input.permissionMode);
+  appendClaudePermissionMode(args, input);
   args.push(...extraArgs);
   args.push(input.prompt);
   return args;
@@ -465,7 +483,7 @@ function herdrEnvironmentArgs(environment: WorkerEnvironmentPlan | undefined): r
 
 function mcpClientsForHarness(input: WorkerSessionLaunchRequest): readonly CicloMcpInstallClient[] {
   if (input.mcpClients !== undefined && input.mcpClients.length > 0) return [...new Set(input.mcpClients)];
-  return input.harnessId === "codex" ? ["codex"] : ["claude"];
+  return ["claude", "codex"];
 }
 
 function mcpConfigPlan(input: WorkerSessionLaunchRequest, cwd: string): WorkerMcpConfigPlan | undefined {
@@ -609,10 +627,11 @@ export function buildWorkerLaunchPlan(
   sessionId = `worker-${randomUUID()}`
 ): WorkerLaunchPlan {
   const model = normalizeWorkerModel(input.harnessId, input.model);
-  const launchInput: WorkerSessionLaunchRequest = { ...input, model };
+  const injectedPrompt = applyPromptInjections(input.prompt, input.promptInjections, "worker");
+  const launchInput: WorkerSessionLaunchRequest = { ...input, model, prompt: injectedPrompt.prompt };
   const requestedCwd = clean(input.cwd) ?? root;
-  const name = sessionName(input, root);
-  const worktree = worktreePlan(input, requestedCwd, name, sessionId);
+  const name = sessionName(launchInput, root);
+  const worktree = worktreePlan(launchInput, requestedCwd, name, sessionId);
   const cwd = worktree?.path ?? requestedCwd;
   const extraArgs = cleanArgs(input.extraArgs);
   const mcpConfig = mcpConfigPlan(launchInput, cwd);
@@ -651,13 +670,19 @@ export function buildWorkerLaunchPlan(
     trackingMode: mode,
     launchMode: localLaunchMode,
     agentRef: agentRef(launchInput, name, localLaunchMode, herdrSession),
-    prompt: input.prompt,
+    prompt: launchInput.prompt,
     evidence: [
       `worker.session.plan:${sessionId}`,
       `worker.session.harness:${input.harnessId}`,
       `worker.session.loop:${input.loopId}`,
       `worker.session.tracking:${mode}`,
       `worker.session.launch_mode:${localLaunchMode}`,
+      ...(launchInput.harnessId === "claude-code"
+        ? [`worker.session.permission_mode:${effectiveClaudePermissionMode(launchInput)}`]
+        : [
+            `worker.session.approval_policy:${effectiveCodexApprovalPolicy(launchInput)}`,
+            `worker.session.sandbox:${effectiveCodexSandbox(launchInput)}`
+          ]),
       ...(model === undefined ? [] : [`worker.session.model:${model}`]),
       ...(herdrSession === undefined ? [] : [`worker.session.herdr_session:${herdrSession}`]),
       ...(input.beadId === undefined ? [] : [`worker.session.bead:${input.beadId}`]),
@@ -674,6 +699,7 @@ export function buildWorkerLaunchPlan(
       ...(mcpConfig === undefined ? [] : mcpConfig.evidence),
       ...(workerEnv === undefined ? [] : workerEnv.evidence),
       ...(secretEnv === undefined ? [] : secretEnv.evidence),
+      ...injectedPrompt.evidence,
       input.dryRun === true ? "worker.session.dry_run:true" : "worker.session.dry_run:false"
     ]
   };
