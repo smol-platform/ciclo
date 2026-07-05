@@ -1,6 +1,6 @@
 {
   "name": "ciclo",
-  "version": "0.1.15",
+  "version": "0.1.17",
   "private": true,
   "type": "module",
   "description": "Standalone Ciclo orchestrator agent using Pi as an internal brain provider.",
