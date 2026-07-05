@@ -26,6 +26,10 @@ import type {
   WorkerSessionSupervisor,
   WorkerWorktreeRequest
 } from "./worker-session-supervisor.js";
+import {
+  selectWorkerModelForProblem,
+  type WorkerProblemModelSelection
+} from "./worker-model-selection.js";
 
 export interface CicloInternalHeartbeatRuntime {
   readonly auth?: {
@@ -555,6 +559,32 @@ export class CicloInternalHeartbeat {
     return leastBusy[stableHash(beadId) % leastBusy.length] ?? policy.harnesses[0]!;
   }
 
+  private selectPreemptiveModel(
+    policy: PreemptiveWorkPolicy,
+    workers: readonly WorkerSessionRecord[],
+    task: BeadsTaskSnapshot
+  ): WorkerProblemModelSelection {
+    const activeCounts = new Map<WorkerHarnessId, number>();
+    for (const worker of workers.filter(activeWorker)) {
+      activeCounts.set(worker.harnessId, (activeCounts.get(worker.harnessId) ?? 0) + 1);
+    }
+    const fallback = this.selectPreemptiveHarness(policy, workers, task.id);
+    const selection = selectWorkerModelForProblem({
+      task,
+      profiles: policy.harnesses,
+      activeCounts,
+      fallbackModel: policy.model,
+      fallbackEffort: policy.effort
+    });
+    return {
+      ...selection,
+      evidence: [
+        ...selection.evidence,
+        `model.selection.fallback_harness:${fallback.harnessId}`
+      ]
+    };
+  }
+
   private async dispatchReadyBeadsWork(
     checkedAt: string,
     workers: readonly WorkerSessionRecord[]
@@ -603,7 +633,7 @@ export class CicloInternalHeartbeat {
           }
         },
         limit: 20,
-        harnessForTask: (task) => this.selectPreemptiveHarness(policy, workers, task.id).harnessId,
+        harnessForTask: (task) => this.selectPreemptiveModel(policy, workers, task).harness.harnessId,
         principalId: this.runtime.auth?.session.ownerPrincipalId,
         sessionId: this.runtime.auth?.session.id
       }).catch((error: unknown) => {
@@ -665,27 +695,35 @@ export class CicloInternalHeartbeat {
       }
       const result = claimedResult;
       const claimedTask = claimedResult.after;
+      const modelSelection = this.selectPreemptiveModel(policy, workers, claimedTask);
+      const selectedHarness = modelSelection.harness;
+      const selectedModel = modelSelection.model;
+      const selectedEffort = modelSelection.effort;
 
       this.runtime.eventStore?.append({
       type: "bead.claimed",
       at: checkedAt,
       loopId: policy.loopId,
         beadId: claimedTask.id,
-        evidence: result.evidence,
+        evidence: [...result.evidence, ...modelSelection.evidence],
         data: {
           title: claimedTask.title,
           issue_type: claimedTask.issueType,
-          harness_id: result.selectedHarness,
+          harness_id: selectedHarness.harnessId,
+          model: selectedModel,
+          effort: selectedEffort,
+          model_selection: {
+            complexity: modelSelection.classification.complexity,
+            reason: modelSelection.reason,
+            traits: modelSelection.classification.traits
+          },
           harness_pool: policy.harnesses.map((profile) => profile.harnessId),
           selection_stage: claimedStage,
           preemptive: true
         }
       });
 
-      const selectedHarness = this.selectPreemptiveHarness(policy, workers, claimedTask.id);
-      const selectedModel = selectedHarness.model ?? policy.model;
-      const selectedEffort = selectedHarness.effort ?? policy.effort;
-    const brainDecision = await this.decideReadyWorkLaunch(claimedTask, policy, selectedHarness, claimedStage, checkedAt);
+    const brainDecision = await this.decideReadyWorkLaunch(claimedTask, policy, modelSelection, claimedStage, checkedAt);
       const prompt = this.readyWorkPrompt(claimedTask, brainDecision, claimedStage);
     const launchRequest = mergeWorkerLaunchWithConfig(
       {
@@ -712,10 +750,17 @@ export class CicloInternalHeartbeat {
           at: checkedAt,
           loopId: policy.loopId,
             beadId: claimedTask.id,
-          evidence: ["heartbeat.preemptive_work:launch_failed", ...result.evidence],
+          evidence: ["heartbeat.preemptive_work:launch_failed", ...result.evidence, ...modelSelection.evidence],
           data: {
             reason,
             harness_id: selectedHarness.harnessId,
+            model: selectedModel,
+            effort: selectedEffort,
+            model_selection: {
+              complexity: modelSelection.classification.complexity,
+              reason: modelSelection.reason,
+              traits: modelSelection.classification.traits
+            },
             preemptive: true
           }
         });
@@ -736,13 +781,18 @@ export class CicloInternalHeartbeat {
       beadId: claimedTask.id,
       workerSessionId: launched.sessionId,
       state: launched.state,
-      evidence: [...result.evidence, ...launched.evidence],
+      evidence: [...result.evidence, ...modelSelection.evidence, ...launched.evidence],
       data: {
         title: claimedTask.title,
         issue_type: claimedTask.issueType,
         harness_id: launched.harnessId,
         model: launched.model,
         effort: launched.effort,
+        model_selection: {
+          complexity: modelSelection.classification.complexity,
+          reason: modelSelection.reason,
+          traits: modelSelection.classification.traits
+        },
         harness_pool: policy.harnesses.map((profile) => profile.harnessId),
         selection_stage: claimedStage,
         launch_mode: launched.launchMode,
@@ -762,7 +812,7 @@ export class CicloInternalHeartbeat {
   private async decideReadyWorkLaunch(
     task: BeadsTaskSnapshot,
     policy: PreemptiveWorkPolicy,
-    selectedHarness: PreemptiveHarnessProfile,
+    modelSelection: WorkerProblemModelSelection,
     selectionStage: "primary" | "fallback",
     checkedAt: string
   ): Promise<string | undefined> {
@@ -772,7 +822,7 @@ export class CicloInternalHeartbeat {
       purpose: "remote_session_monitoring",
       loopId: policy.loopId,
       beadId: task.id,
-      harnessId: selectedHarness.harnessId,
+      harnessId: modelSelection.harness.harnessId,
       prompt: selectionStage === "primary"
         ? "Ciclo discovered ready Beads planning work while idle. Decide whether launching a worker is appropriate, what context that worker needs first, what model/effort is suitable, what should be kept in Beads memory, and what operator feedback should be surfaced before risky actions."
         : "Ciclo found no primary planning work and discovered concrete ready Beads task, bug, or decision work while idle. Decide whether launching a worker is appropriate, what context that worker needs first, what model/effort is suitable, what should be kept in Beads memory, and what operator feedback should be surfaced before risky actions.",
@@ -785,13 +835,18 @@ export class CicloInternalHeartbeat {
         `description=${compactText(task.description, 600) || "none"}`,
         `acceptance=${compactText(task.acceptanceCriteria, 600) || "none"}`,
         `harness_pool=${policy.harnesses.map((profile) => profile.harnessId).join(",")}`,
-        `selected_harness=${selectedHarness.harnessId}`,
+        `selected_harness=${modelSelection.harness.harnessId}`,
         `selection_stage=${selectionStage}`,
-        `configured_model=${selectedHarness.model ?? policy.model ?? "unspecified"}`,
-        `configured_effort=${selectedHarness.effort ?? policy.effort ?? "unspecified"}`
+        `configured_model=${modelSelection.harness.model ?? policy.model ?? "unspecified"}`,
+        `configured_effort=${modelSelection.harness.effort ?? policy.effort ?? "unspecified"}`,
+        `selected_model=${modelSelection.model ?? "default"}`,
+        `selected_effort=${modelSelection.effort ?? "default"}`,
+        `problem_complexity=${modelSelection.classification.complexity}`,
+        `model_selection_reason=${modelSelection.reason}`,
+        `model_selection_traits=${modelSelection.classification.traits.join(",") || "none"}`
       ],
-      evidence: [`beads.ready.selected:${task.id}`, "heartbeat.preemptive_work:brain_decision"],
-      toolExecutor: this.brainToolExecutor(checkedAt)
+      evidence: [`beads.ready.selected:${task.id}`, "heartbeat.preemptive_work:brain_decision", ...modelSelection.evidence],
+      toolExecutor: this.decisionToolExecutor(checkedAt)
     });
     this.runtime.eventStore?.append({
       type: "brain.decision",
@@ -812,8 +867,8 @@ export class CicloInternalHeartbeat {
     });
     this.remember({
       kind: "decision",
-      content: `Ready work ${task.id} selected for ${selectedHarness.harnessId}. Brain guidance: ${compactText(decision.text, 1000)}`,
-      tags: ["ready-work", "brain-decision", selectedHarness.harnessId],
+      content: `Ready work ${task.id} selected for ${modelSelection.harness.harnessId} using ${modelSelection.model ?? "default model"} (${modelSelection.classification.complexity}). Brain guidance: ${compactText(decision.text, 1000)}`,
+      tags: ["ready-work", "brain-decision", modelSelection.harness.harnessId, `model:${modelSelection.model ?? "default"}`, `complexity:${modelSelection.classification.complexity}`],
       importance: "normal",
       confidence: 0.8,
       loopId: policy.loopId,
@@ -987,7 +1042,7 @@ export class CicloInternalHeartbeat {
         context: Array.isArray(params.context) ? params.context.filter((item): item is string => typeof item === "string") : [],
         evidence: ["cron.task.brain_decision"],
         loopId: typeof params.loop_id === "string" ? params.loop_id : undefined,
-        toolExecutor: this.brainToolExecutor(now)
+        toolExecutor: this.decisionToolExecutor(now)
       });
       this.runtime.eventStore?.append({
         type: "brain.decision",
@@ -1076,7 +1131,7 @@ export class CicloInternalHeartbeat {
     }
   }
 
-  private brainToolExecutor(now: string): OpenAiBrainToolExecutor | undefined {
+  decisionToolExecutor(now: string): OpenAiBrainToolExecutor | undefined {
     if (
       this.runtime.workerSupervisor === undefined &&
       this.runtime.eventStore === undefined &&
@@ -1088,8 +1143,13 @@ export class CicloInternalHeartbeat {
     return {
       availableTools: () => [
         {
+          name: "ciclo_list_workers",
+          description: "List Ciclo worker sessions with state, harness, model, tracking, heartbeat, and recovery metadata before selecting one to inspect.",
+          mutates: false
+        },
+        {
           name: "ciclo_observe_worker",
-          description: "Read normalized state, Herdr pane id, agent status, and recent transcript for a Ciclo worker session.",
+          description: "Read normalized state, Herdr pane id, agent status, recent transcript, visible pending prompt text, and stuck classification for a Ciclo worker session.",
           mutates: false
         },
         {
@@ -1146,6 +1206,45 @@ export class CicloInternalHeartbeat {
     const params = request.params;
     const workerSessionId = paramString(params, "worker_session_id");
     try {
+      if (request.name === "ciclo_list_workers") {
+        if (supervisor === undefined) {
+          return finish({
+            name: request.name,
+            ok: false,
+            summary: "worker supervisor unavailable",
+            evidence: ["brain.tool.list_workers:unavailable"]
+          });
+        }
+        const state = paramString(params, "state");
+        const limit = Math.max(1, Math.min(100, paramNumber(params, "limit", 50)));
+        const workers = supervisor.list()
+          .filter((worker) => state === undefined || worker.state === state)
+          .slice(0, limit)
+          .map((worker) => ({
+            worker_session_id: worker.sessionId,
+            session_name: worker.sessionName,
+            state: worker.state,
+            harness_id: worker.harnessId,
+            loop_id: worker.loopId,
+            bead_id: worker.beadId,
+            launch_mode: worker.launchMode,
+            tracking_mode: worker.trackingMode,
+            model: worker.model,
+            effort: worker.effort,
+            last_heartbeat_at: worker.lastHeartbeatAt,
+            last_recovery_at: worker.lastRecoveryAt,
+            recovery_attempts: worker.recoveryAttempts ?? 0,
+            evidence: worker.evidence.slice(-8)
+          }));
+        return finish({
+          name: request.name,
+          ok: true,
+          summary: `listed ${workers.length} worker session(s)`,
+          data: { workers },
+          evidence: ["brain.tool.list_workers", `brain.tool.list_workers.count:${workers.length}`]
+        });
+      }
+
       if (request.name === "ciclo_observe_worker") {
         if (supervisor === undefined || workerSessionId === undefined) {
           return finish({
@@ -1162,11 +1261,19 @@ export class CicloInternalHeartbeat {
           summary: observation.reason,
           data: {
             worker_session_id: observation.sessionId,
+            session_state: observation.sessionState,
             pane_id: observation.paneId,
             herdr_session: observation.herdrSession,
             agent_status: observation.agentStatus,
             transcript_source: observation.transcriptSource,
-            transcript: observation.transcript
+            transcript: observation.transcript,
+            prompt_pending: observation.promptPending,
+            pending_prompt: observation.pendingPrompt,
+            pending_prompt_source: observation.pendingPromptSource,
+            stuck_kind: observation.stuckKind,
+            last_heartbeat_at: observation.lastHeartbeatAt,
+            last_recovery_at: observation.lastRecoveryAt,
+            recovery_attempts: observation.recoveryAttempts ?? 0
           },
           evidence: ["brain.tool.observe_worker", ...observation.evidence]
         });
@@ -1264,7 +1371,7 @@ export class CicloInternalHeartbeat {
           beadId: paramString(params, "bead_id"),
           prompt,
           cwd: this.runtime.auth?.session.projectRoot,
-          dryRun: paramBoolean(params, "dry_run", false),
+          dryRun: paramBoolean(params, "dry_run", true),
           isolation: "worktree",
           configureMcp: true,
           ...(paramString(params, "model") === undefined ? {} : { model: paramString(params, "model") }),
@@ -1435,6 +1542,13 @@ export class CicloInternalHeartbeat {
         context: [
           `observation.available=${observation.observed}`,
           `observation.reason=${observation.reason}`,
+          `session_state=${observation.sessionState}`,
+          `stuck_kind=${observation.stuckKind}`,
+          `prompt_pending=${observation.promptPending === true}`,
+          observation.pendingPrompt === undefined ? "pending_prompt=unavailable" : `pending_prompt=${observation.pendingPrompt}`,
+          observation.lastHeartbeatAt === undefined ? "last_heartbeat_at=unavailable" : `last_heartbeat_at=${observation.lastHeartbeatAt}`,
+          observation.lastRecoveryAt === undefined ? "last_recovery_at=unavailable" : `last_recovery_at=${observation.lastRecoveryAt}`,
+          `recovery_attempts=${observation.recoveryAttempts ?? 0}`,
           observation.paneId === undefined ? "pane_id=unavailable" : `pane_id=${observation.paneId}`,
           observation.herdrSession === undefined ? "herdr_session=unavailable" : `herdr_session=${observation.herdrSession}`,
           observation.agentStatus === undefined ? "agent_status=unknown" : `agent_status=${observation.agentStatus}`,
@@ -1490,7 +1604,7 @@ export class CicloInternalHeartbeat {
   ): string | undefined {
     const supervisor = this.runtime.workerSupervisor;
     if (supervisor === undefined) return undefined;
-    if (decision.action === undefined && (decision.toolResults?.length ?? 0) > 0) {
+    if (decision.action === undefined && (decision.toolResults?.some((result) => result.ok) ?? false)) {
       return `verified_tools:${worker.sessionId}`;
     }
     const action = decision.action ?? this.defaultWorkerAction(worker, decision.text);
@@ -1682,7 +1796,7 @@ export class CicloInternalHeartbeat {
           ...observation.context
         ],
         evidence: [...worker.evidence, ...observation.evidence],
-        toolExecutor: this.brainToolExecutor(now)
+        toolExecutor: this.decisionToolExecutor(now)
       });
       decisions.push(decision.text);
       this.remember({
@@ -1736,7 +1850,7 @@ export class CicloInternalHeartbeat {
           `project_path=${remote.projectPath}`
         ],
         evidence: remote.evidence,
-        toolExecutor: this.brainToolExecutor(now)
+        toolExecutor: this.decisionToolExecutor(now)
       });
       decisions.push(decision.text);
       this.remember({

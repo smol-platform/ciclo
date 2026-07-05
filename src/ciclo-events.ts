@@ -41,6 +41,7 @@ export type CicloEventType =
   | "cron.ran"
   | "memory.recorded"
   | "memory.compacted"
+  | "mcp.leadership"
   | "brain.decision"
   | "brain.action"
   | "brain.tool_call"

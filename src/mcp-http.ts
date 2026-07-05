@@ -3,6 +3,7 @@ import http, { type IncomingMessage, type Server, type ServerResponse } from "no
 import type { CicloMcpAuditEntry, CicloMcpReadService, CicloMcpRuntimeContext, JsonRpcRequest } from "./mcp-stdio.js";
 import { createLocalMcpReadService, createLocalMcpRuntimeContext, handleMcpRequest } from "./mcp-stdio.js";
 import { cicloMcpTools } from "./mcp-contract.js";
+import { mcpLeadershipView, ownsMcpAutomation } from "./mcp-leadership.js";
 import type { SessionAccessAction } from "./session-access.js";
 
 export interface McpHttpConfig {
@@ -255,8 +256,19 @@ export function runMcpHttpServer(
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(config.port, config.host, () => {
-      runtime.internalHeartbeat?.start();
-      server.once("close", () => runtime.internalHeartbeat?.stop());
+      if (ownsMcpAutomation(runtime.mcpLeadership)) {
+        runtime.internalHeartbeat?.start();
+      } else {
+        runtime.eventStore?.append({
+          type: "mcp.leadership",
+          evidence: ["mcp.leadership:follower", "mcp.automation:skipped"],
+          data: mcpLeadershipView(runtime.mcpLeadership)
+        });
+      }
+      server.once("close", () => {
+        if (ownsMcpAutomation(runtime.mcpLeadership)) runtime.internalHeartbeat?.stop();
+        runtime.mcpLeadership?.release();
+      });
       resolve(server);
     });
   });

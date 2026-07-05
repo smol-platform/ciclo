@@ -431,6 +431,48 @@ test("worker supervisor reads visible Herdr pane and submits pending Codex promp
   });
 });
 
+test("worker supervisor observation reports visible pending prompt as stuck state", () => {
+  withHerdrSessionEnv("infra-blocks", () => {
+    const root = mkdtempSync(join(tmpdir(), "ciclo-observe-prompt-root-"));
+    const launcher = new FakeLauncher();
+    const runner = new FakeCommandRunner([
+      {
+        status: 0,
+        stdout: JSON.stringify({ result: { agent: { pane_id: "wF:p2", agent_status: "idle" } } }),
+        stderr: ""
+      },
+      {
+        status: 0,
+        stdout: "• Previous worker output\n\nNo command submitted yet.\n",
+        stderr: ""
+      },
+      {
+        status: 0,
+        stdout: "• Previous worker output\n\n› Continue fixing the failing test\n\n  gpt-5.5 high · ~/repo\n",
+        stderr: ""
+      }
+    ]);
+    const supervisor = new WorkerSessionSupervisor(root, launcher, { now: () => "2026-07-04T00:00:00.000Z" }, undefined, undefined, runner);
+    const running = supervisor.launch({
+      harnessId: "codex",
+      loopId: "loop-1",
+      beadId: "infra-1",
+      prompt: "Work through Ciclo."
+    });
+
+    const observed = supervisor.observe(running.sessionId, 80);
+
+    assert.equal(observed.observed, true);
+    assert.equal(observed.sessionState, "running");
+    assert.equal(observed.promptPending, true);
+    assert.equal(observed.pendingPrompt, "Continue fixing the failing test");
+    assert.equal(observed.pendingPromptSource, "herdr:agent:visible");
+    assert.equal(observed.stuckKind, "pending_prompt");
+    assert.ok(observed.evidence.includes("worker.session.observe.prompt_pending:true"));
+    assert.ok(observed.evidence.includes("worker.session.observe.stuck_kind:pending_prompt"));
+  });
+});
+
 test("worker launch isolation worktree defaults to bead branch", () => {
   withHerdrReuseDisabled(() => {
     const root = mkdtempSync(join(tmpdir(), "ciclo-root-"));

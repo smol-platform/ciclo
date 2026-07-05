@@ -91,6 +91,7 @@ Use `id` in `ciclo_request_secret`; `pluginProviderId` is the provider id regist
 - Work control: `ciclo_list_ready_work`, `ciclo_claim_work`, `ciclo_update_work`, `ciclo_close_work`; use `launch_review: false` only when the operator explicitly does not want post-close review.
 - Worker sessions: `ciclo_launch_worker_session`, `ciclo_heartbeat_worker_session`, `ciclo_list_worker_sessions`, `ciclo_stop_worker_session`.
 - Worker launch options: use `configure_mcp: true`, `mcp_clients`, `extra_args`, `isolation: "worktree"`, model/effort/sandbox/approval settings, and dry-run first.
+- Autonomous heartbeat launches choose model and effort from the Beads problem when no explicit model is provided. Small docs/chore work can use a smaller Codex model, standard bug/test work uses a standard Codex model, and hard orchestration/security/remote/review work prefers Claude Fable high effort when available. Check `bead.claimed`, `work.started`, and brain-decision context for `model_selection` evidence before overriding it.
 - Claude Code model aliases: `fable 5`, `Fable 5`, and `claude fable 5` normalize to `claude-fable-5`.
 - Monitoring: `ciclo_poll_events`, `ciclo_board`, `ciclo://events`, `ciclo://board`; tell terminal operators to use `ciclo events --follow`; use `expected_pr_after_ms` for PR-producing work.
 - Cron and memory: `ciclo_remember`, `ciclo_list_memories`, `ciclo_compact_memories`, `ciclo_list_cron_jobs`, `ciclo_run_due_cron`, `ciclo://memory`, and `ciclo://cron`. Use memory for durable project learnings, model fit, PR review needs, blockers, and cross-session handoff context; do not store secrets or raw transcripts.
@@ -98,6 +99,10 @@ Use `id` in `ciclo_request_secret`; `pluginProviderId` is the provider id regist
 - Secrets: `ciclo_list_secret_providers`, `ciclo_request_secret`, `ciclo://secret-providers`.
 - Remote runners: `ciclo_launch_remote_runner`, `ciclo_list_remote_runners`, `ciclo_attach_plan`, `ciclo://remote-runners`.
 - Tracker sync: `ciclo_sync_remote_trackers` only when Beads-native Jira/Linear sync is configured and authorized.
+
+## MCP Leadership
+
+A project may have multiple Claude, Codex, or generic clients with Ciclo MCP configured. Ciclo elects one project/session MCP process as the automation leader using `.ciclo/runtime/mcp/*.lock`; followers still expose normal tools and status, but they do not run the internal heartbeat, preemptive work loop, cron execution, or autonomous cleanup. Check `ciclo_status.mcp`: `mode: "leader"` means that process owns automation, `mode: "follower"` means another live MCP process owns it, and `heartbeat_owner` is the boolean gate. `ciclo_run_due_cron` is leader-only so two client MCP subprocesses cannot double-launch workers or double-run scheduled jobs.
 
 ## Worker Pattern
 

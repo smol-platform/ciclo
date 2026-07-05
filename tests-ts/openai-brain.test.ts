@@ -149,6 +149,14 @@ test("Pi SDK Ciclo tool adapter executes bounded tool calls and records results"
 
   const result = await tool?.execute("tool-1", { cursor: 4 }, undefined, undefined, {} as never);
 
+  assert.deepEqual(tool?.parameters, {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      cursor: { type: "number", minimum: 0 },
+      limit: { type: "number", minimum: 1, maximum: 100 }
+    }
+  });
   assert.equal(result?.content[0]?.type, "text");
   assert.deepEqual(results, [{
     name: "ciclo_poll_events",

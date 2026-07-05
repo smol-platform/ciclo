@@ -136,9 +136,9 @@ test("MCP brain decisions are visible through ciclo events CLI", async () => {
         evidence?: readonly string[];
       }[];
     };
-    assert.equal(payload.next_cursor, 1);
-    assert.equal(payload.events?.length, 1);
-    const event = payload.events[0];
+    assert.ok((payload.next_cursor ?? 0) >= 1);
+    const event = payload.events?.find((candidate) => candidate.type === "brain.decision");
+    assert.ok(event, JSON.stringify(payload.events));
     assert.equal(event?.type, "brain.decision");
     assert.equal(event?.loopId, "integration-loop");
     assert.equal(event?.workerSessionId, "worker-integration");

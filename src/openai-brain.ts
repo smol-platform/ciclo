@@ -48,6 +48,7 @@ export interface OpenAiControlAction {
 }
 
 export const openAiBrainToolNames = [
+  "ciclo_list_workers",
   "ciclo_observe_worker",
   "ciclo_nudge_worker",
   "ciclo_ask_operator",
@@ -273,24 +274,85 @@ function promptForDecision(input: OpenAiBrainDecisionInput): string {
   return applyPromptInjections(prompt, input.promptInjections, "brain").prompt;
 }
 
-const openAiBrainToolParameters = {
-  type: "object",
-  additionalProperties: true,
-  properties: {
-    worker_session_id: { type: "string" },
-    loop_id: { type: "string" },
-    bead_id: { type: "string" },
-    harness_id: { type: "string" },
-    message: { type: "string" },
-    prompt: { type: "string" },
-    reason: { type: "string" },
-    model: { type: "string" },
-    effort: { type: "string" },
-    cursor: { type: "number" },
-    limit: { type: "number" },
-    dry_run: { type: "boolean" }
-  }
-} as unknown as ToolDefinition["parameters"];
+const openAiBrainToolParameterSchemas: Record<OpenAiBrainToolName, ToolDefinition["parameters"]> = {
+  ciclo_list_workers: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      state: {
+        type: "string",
+        enum: ["planned", "running", "waiting_on_operator", "stalled", "stopped", "failed", "completed"]
+      },
+      limit: { type: "number", minimum: 1, maximum: 100 }
+    }
+  } as unknown as ToolDefinition["parameters"],
+  ciclo_observe_worker: {
+    type: "object",
+    additionalProperties: false,
+    required: ["worker_session_id"],
+    properties: {
+      worker_session_id: { type: "string" },
+      lines: { type: "number", minimum: 1, maximum: 200 }
+    }
+  } as unknown as ToolDefinition["parameters"],
+  ciclo_nudge_worker: {
+    type: "object",
+    additionalProperties: false,
+    required: ["worker_session_id", "message"],
+    properties: {
+      worker_session_id: { type: "string" },
+      message: { type: "string" }
+    }
+  } as unknown as ToolDefinition["parameters"],
+  ciclo_ask_operator: {
+    type: "object",
+    additionalProperties: false,
+    required: ["message"],
+    properties: {
+      worker_session_id: { type: "string" },
+      loop_id: { type: "string" },
+      bead_id: { type: "string" },
+      message: { type: "string" },
+      reason: { type: "string" }
+    }
+  } as unknown as ToolDefinition["parameters"],
+  ciclo_stop_worker: {
+    type: "object",
+    additionalProperties: false,
+    required: ["worker_session_id", "reason"],
+    properties: {
+      worker_session_id: { type: "string" },
+      reason: { type: "string" }
+    }
+  } as unknown as ToolDefinition["parameters"],
+  ciclo_launch_worker: {
+    type: "object",
+    additionalProperties: false,
+    required: ["prompt"],
+    properties: {
+      loop_id: { type: "string" },
+      bead_id: { type: "string" },
+      harness_id: { type: "string", enum: ["claude-code", "codex"] },
+      prompt: { type: "string" },
+      model: { type: "string" },
+      effort: { type: "string" },
+      dry_run: { type: "boolean", default: true }
+    }
+  } as unknown as ToolDefinition["parameters"],
+  ciclo_poll_events: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      cursor: { type: "number", minimum: 0 },
+      limit: { type: "number", minimum: 1, maximum: 100 }
+    }
+  } as unknown as ToolDefinition["parameters"],
+  ciclo_heartbeat_status: {
+    type: "object",
+    additionalProperties: false,
+    properties: {}
+  } as unknown as ToolDefinition["parameters"]
+};
 
 export function createOpenAiBrainPiTools(
   executor: OpenAiBrainToolExecutor,
@@ -305,7 +367,7 @@ export function createOpenAiBrainPiTools(
       "Use this Ciclo control-plane tool only for the current heartbeat or cron decision.",
       "Prefer read-only verification after mutating state."
     ],
-    parameters: openAiBrainToolParameters,
+    parameters: openAiBrainToolParameterSchemas[spec.name],
     executionMode: "sequential" as const,
     execute: async (_toolCallId, params) => {
       const result = await executor.execute({

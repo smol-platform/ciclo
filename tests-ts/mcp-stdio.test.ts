@@ -36,6 +36,7 @@ import {
 } from "../src/worker-session-supervisor.js";
 import { UserControlPaneNotifier } from "../src/user-pane-notifier.js";
 import {
+  createLocalMcpRuntimeContext,
   createLocalMcpRuntimeContextWithPlugins,
   handleMcpRequest,
   runMcpStdioServer,
@@ -302,6 +303,7 @@ test("local MCP tools answer status loop status and ready work without mutations
   assert.equal(status.app, "ciclo");
   assert.equal(status.live, true);
   assert.equal((status.brain as { provider?: string }).provider, "openai");
+  assert.equal((status.mcp as { mode?: string }).mode, "unmanaged");
 
   const loop = structuredContent(
     await handleMcpRequest(
@@ -337,12 +339,50 @@ test("local MCP tools answer status loop status and ready work without mutations
   assert.deepEqual(ready.evidence, ["fixture:ready"]);
 });
 
+test("local MCP runtime elects one automation leader per project session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ciclo-mcp-leader-"));
+  const first = createLocalMcpRuntimeContext(root);
+  const second = createLocalMcpRuntimeContext(root);
+  try {
+    assert.equal(first.mcpLeadership?.mode, "leader");
+    assert.equal(first.mcpLeadership?.heartbeatOwner, true);
+    assert.equal(second.mcpLeadership?.mode, "follower");
+    assert.equal(second.mcpLeadership?.heartbeatOwner, false);
+    assert.equal(second.mcpLeadership?.leaderPid, process.pid);
+
+    const status = structuredContent(
+      await handleMcpRequest(
+        { jsonrpc: "2.0", id: 66, method: "tools/call", params: { name: "ciclo_status", arguments: {} } },
+        service,
+        second
+      )
+    );
+    assert.equal((status.mcp as { mode?: string }).mode, "follower");
+    assert.equal((status.mcp as { heartbeat_owner?: boolean }).heartbeat_owner, false);
+
+    const cron = await handleMcpRequest(
+      { jsonrpc: "2.0", id: 67, method: "tools/call", params: { name: "ciclo_run_due_cron", arguments: {} } },
+      service,
+      second
+    );
+    assert.ok(cron);
+    assert.ok("error" in cron);
+    assert.match(JSON.stringify(cron), /automation leader/u);
+  } finally {
+    second.mcpLeadership?.release();
+    first.mcpLeadership?.release();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("MCP brain decision tool routes control-plane decisions through OpenAI brain", async () => {
   const eventStore = new CicloEventStore();
   const brain = new FakeOpenAiBrain();
-  const runtime: CicloMcpRuntimeContext = {
+  const workerSupervisor = new WorkerSessionSupervisor("/repo", new FakeWorkerLauncher(), undefined, eventStore);
+  const runtimeBase: CicloMcpRuntimeContext = {
     ...singleRuntime,
     eventStore,
+    workerSupervisor,
     openAiBrain: brain,
     projectConfig: {
       prompts: {
@@ -355,6 +395,10 @@ test("MCP brain decision tool routes control-plane decisions through OpenAI brai
         ]
       }
     }
+  };
+  const runtime: CicloMcpRuntimeContext = {
+    ...runtimeBase,
+    internalHeartbeat: new CicloInternalHeartbeat(runtimeBase)
   };
 
   const decision = structuredContent(
@@ -388,6 +432,8 @@ test("MCP brain decision tool routes control-plane decisions through OpenAI brai
   assert.equal(brain.inputs[0]?.purpose, "context_insertion");
   assert.equal(brain.inputs[0]?.prompt, "Worker is missing repository context.");
   assert.equal(brain.inputs[0]?.promptInjections?.[0]?.id, "brain-help");
+  assert.ok(brain.inputs[0]?.toolExecutor);
+  assert.ok(brain.inputs[0]?.toolExecutor?.availableTools().some((tool) => tool.name === "ciclo_poll_events"));
   const events = eventStore.poll(0);
   assert.ok(events.events.some((event) => event.type === "brain.decision"));
 });

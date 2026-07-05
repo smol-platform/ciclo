@@ -230,8 +230,11 @@ export interface WorkerPromptSubmitResult {
   readonly evidence: readonly string[];
 }
 
+export type WorkerSessionStuckKind = "pending_prompt" | "stalled" | "waiting_on_operator" | "not_stuck" | "unknown";
+
 export interface WorkerSessionObservation {
   readonly sessionId: string;
+  readonly sessionState: WorkerSessionState;
   readonly observed: boolean;
   readonly reason: string;
   readonly paneId?: string;
@@ -239,6 +242,13 @@ export interface WorkerSessionObservation {
   readonly agentStatus?: string;
   readonly transcript?: string;
   readonly transcriptSource?: string;
+  readonly promptPending?: boolean;
+  readonly pendingPrompt?: string;
+  readonly pendingPromptSource?: string;
+  readonly stuckKind: WorkerSessionStuckKind;
+  readonly lastHeartbeatAt?: string;
+  readonly lastRecoveryAt?: string;
+  readonly recoveryAttempts?: number;
   readonly evidence: readonly string[];
 }
 
@@ -669,6 +679,14 @@ function pendingAgentPromptText(visibleText: string, harnessId: WorkerHarnessId)
     }
   }
   return undefined;
+}
+
+function stuckKindForObservation(session: WorkerSessionRecord, promptPending: boolean, observed: boolean): WorkerSessionStuckKind {
+  if (promptPending) return "pending_prompt";
+  if (session.state === "waiting_on_operator") return "waiting_on_operator";
+  if (session.state === "stalled") return "stalled";
+  if (observed) return "not_stuck";
+  return "unknown";
 }
 
 function herdrSessionArgs(session: WorkerSessionRecord): readonly string[] {
@@ -1507,12 +1525,23 @@ export class WorkerSessionSupervisor {
     if (session === undefined) throw new Error(`worker session not found: ${sessionId}`);
     const pane = this.resolveHerdrPane(session);
     if (pane.paneId === undefined) {
+      const stuckKind = stuckKindForObservation(session, false, false);
       return {
         sessionId,
+        sessionState: session.state,
         observed: false,
         reason: pane.reason ?? "worker pane could not be resolved",
         ...(pane.status === undefined ? {} : { agentStatus: pane.status }),
-        evidence: pane.evidence
+        promptPending: false,
+        stuckKind,
+        ...(session.lastHeartbeatAt === undefined ? {} : { lastHeartbeatAt: session.lastHeartbeatAt }),
+        ...(session.lastRecoveryAt === undefined ? {} : { lastRecoveryAt: session.lastRecoveryAt }),
+        ...(session.recoveryAttempts === undefined ? {} : { recoveryAttempts: session.recoveryAttempts }),
+        evidence: [
+          "worker.session.observe.prompt_pending:false",
+          `worker.session.observe.stuck_kind:${stuckKind}`,
+          ...pane.evidence
+        ]
       };
     }
     const read = this.commandRunner.run("herdr", [
@@ -1528,19 +1557,60 @@ export class WorkerSessionSupervisor {
       "text"
     ], { cwd: session.cwd });
     const observed = read.status === 0;
+    const agentTarget = session.agentRef?.kind === "herdr_agent" ? (session.agentRef.target ?? session.agentRef.id) : undefined;
+    const visibleRead = agentTarget === undefined
+      ? undefined
+      : this.commandRunner.run("herdr", [
+        ...herdrSessionArgs(session),
+        "agent",
+        "read",
+        agentTarget,
+        "--source",
+        "visible",
+        "--lines",
+        "40",
+        "--format",
+        "text"
+      ], { cwd: session.cwd });
+    const pendingPrompt = visibleRead?.status === 0 ? pendingAgentPromptText(visibleRead.stdout, session.harnessId) : undefined;
+    const promptPending = pendingPrompt !== undefined;
+    const stuckKind = stuckKindForObservation(session, promptPending, observed);
     const reason = observed
-      ? "worker pane observed"
+      ? promptPending
+        ? "worker pane observed with pending prompt text"
+        : "worker pane observed"
       : compactReason(read.stderr || read.stdout || "worker pane read failed");
     return {
       sessionId,
+      sessionState: session.state,
       observed,
       reason,
       paneId: pane.paneId,
       ...(session.agentRef?.herdrSession === undefined ? {} : { herdrSession: session.agentRef.herdrSession }),
       ...(pane.status === undefined ? {} : { agentStatus: pane.status }),
       ...(observed ? { transcript: compactReason(read.stdout, 4000), transcriptSource: "herdr:pane:recent-unwrapped" } : {}),
+      promptPending,
+      ...(pendingPrompt === undefined ? {} : {
+        pendingPrompt: compactReason(pendingPrompt, 1000),
+        pendingPromptSource: "herdr:agent:visible"
+      }),
+      stuckKind,
+      ...(session.lastHeartbeatAt === undefined ? {} : { lastHeartbeatAt: session.lastHeartbeatAt }),
+      ...(session.lastRecoveryAt === undefined ? {} : { lastRecoveryAt: session.lastRecoveryAt }),
+      ...(session.recoveryAttempts === undefined ? {} : { recoveryAttempts: session.recoveryAttempts }),
       evidence: [
         observed ? "worker.session.observe:read" : "worker.session.observe:failed",
+        visibleRead === undefined
+          ? "worker.session.observe.visible_read:unavailable"
+          : visibleRead.status === 0
+            ? "worker.session.observe.visible_read"
+            : "worker.session.observe.visible_failed",
+        promptPending ? "worker.session.observe.prompt_pending:true" : "worker.session.observe.prompt_pending:false",
+        ...(pendingPrompt === undefined ? [] : [
+          "worker.session.pending_prompt:detected",
+          `worker.session.pending_prompt.characters:${pendingPrompt.length}`
+        ]),
+        `worker.session.observe.stuck_kind:${stuckKind}`,
         ...pane.evidence
       ]
     };

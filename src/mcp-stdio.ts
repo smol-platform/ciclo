@@ -27,6 +27,12 @@ import {
 } from "./client-auth.js";
 import type { AccessScope } from "./access-grants.js";
 import { cicloMcpPrompts, cicloMcpResources, cicloMcpTools, type McpPromptContract } from "./mcp-contract.js";
+import {
+  acquireMcpSessionLeadership,
+  mcpLeadershipView,
+  ownsMcpAutomation,
+  type McpSessionLeadership
+} from "./mcp-leadership.js";
 import type { CicloMcpAdditionalServerConfig, CicloMcpInstallClient, CicloMcpSecretEnvBinding } from "./mcp-install.js";
 import {
   resolveMcpAdditionalServerSecretPlaceholders,
@@ -171,6 +177,7 @@ export interface CicloMcpRuntimeContext {
   readonly secretProviderRegistry?: SecretProviderRegistry;
   readonly openAiBrain?: OpenAiBrain;
   readonly internalHeartbeat?: CicloInternalHeartbeat;
+  readonly mcpLeadership?: McpSessionLeadership;
   readonly userPaneNotifier?: UserControlPaneNotifier;
   readonly repoBoardProvider?: RepoBoardProvider;
   readonly repoBoardEventKeys?: Set<string>;
@@ -1164,6 +1171,10 @@ function pendingQuestions(runtime: CicloMcpRuntimeContext): readonly PendingQues
   return runtime.operatorRouting?.listQuestions() ?? [];
 }
 
+function runtimeOwnsAutomation(runtime: CicloMcpRuntimeContext): boolean {
+  return ownsMcpAutomation(runtime.mcpLeadership);
+}
+
 function loopIdsFromRuntime(runtime: CicloMcpRuntimeContext, workers: readonly ReturnType<WorkerSessionSupervisor["list"]>[number][]): readonly string[] {
   return [...new Set([
     ...(runtime.loop === undefined ? [] : [runtime.loop.id]),
@@ -1330,6 +1341,7 @@ async function liveStatus(service: CicloMcpReadService, runtime: CicloMcpRuntime
     ok: true,
     app: "ciclo",
     runtime: runtimeDecision.runtime,
+    mcp: mcpLeadershipView(runtime.mcpLeadership),
     brain: runtime.openAiBrain?.status() ?? openAiBrainPolicy,
     live: true,
     heartbeat: runtime.internalHeartbeat?.status() ?? {
@@ -1456,19 +1468,30 @@ export function createLocalMcpReadService(root = process.cwd()): CicloMcpReadSer
 export function createLocalMcpRuntimeContext(root = process.cwd()): CicloMcpRuntimeContext {
   const loadedConfig = loadCicloProjectConfig(root);
   const tokenRegistry = new TokenRegistry();
+  const auth = {
+    ...defaultClientAuthContext(root),
+    tokenRegistry
+  };
+  const leadership = acquireMcpSessionLeadership({
+    projectRoot: auth.session.projectRoot,
+    sessionId: auth.session.id,
+    sessionName: auth.session.name
+  });
   const userPaneTarget = userControlPaneTargetFromEnv();
   const userPaneNotifier = userPaneTarget === undefined ? undefined : new UserControlPaneNotifier(userPaneTarget);
   const eventStore = new CicloEventStore({
     persistPath: cicloEventLogPath(root),
     ...(userPaneNotifier === undefined ? {} : { onAppend: (event) => { userPaneNotifier.notify(event); } })
   });
+  eventStore.append({
+    type: "mcp.leadership",
+    evidence: leadership.evidence,
+    data: mcpLeadershipView(leadership)
+  });
   const cronScheduler = new CicloCronScheduler({ projectRoot: root });
   const memoryStore = new CicloMemoryStore({ projectRoot: root, eventSink: eventStore });
   const runtime: CicloMcpRuntimeContext = {
-    auth: {
-      ...defaultClientAuthContext(root),
-      tokenRegistry
-    },
+    auth,
     projectConfig: loadedConfig.found ? loadedConfig.config : undefined,
     projectConfigEvidence: loadedConfig.evidence,
     claudeChannel: {
@@ -1486,6 +1509,7 @@ export function createLocalMcpRuntimeContext(root = process.cwd()): CicloMcpRunt
     remoteRunnerRegistry: new RemoteRunnerRegistry(),
     secretProviderRegistry: createDefaultSecretProviderRegistry(),
     openAiBrain: new PiSdkOpenAiBrain({ promptInjections: loadedConfig.config.prompts?.systemInjections }),
+    mcpLeadership: leadership,
     ...(userPaneNotifier === undefined ? {} : { userPaneNotifier }),
     repoBoardProvider: new GitHubCliRepoBoardProvider(),
     repoBoardEventKeys: new Set<string>()
@@ -1582,11 +1606,12 @@ async function callTool(
       evidence: stringListParam(params, "evidence"),
       loopId: stringParam(params, "loop_id") || undefined,
       beadId: stringParam(params, "bead_id") || undefined,
-      harnessId: stringParam(params, "harness_id") || undefined,
-      remoteSessionId: stringParam(params, "remote_session_id") || undefined,
-      workerSessionId: stringParam(params, "worker_session_id") || undefined,
-      promptInjections: runtime.projectConfig?.prompts?.systemInjections
-    });
+	      harnessId: stringParam(params, "harness_id") || undefined,
+	      remoteSessionId: stringParam(params, "remote_session_id") || undefined,
+	      workerSessionId: stringParam(params, "worker_session_id") || undefined,
+	      promptInjections: runtime.projectConfig?.prompts?.systemInjections,
+	      toolExecutor: runtime.internalHeartbeat?.decisionToolExecutor(new Date().toISOString())
+	    });
     auditMutation({
       runtime,
       tool: name,
@@ -1606,22 +1631,34 @@ async function callTool(
         provider: decision.provider,
         adapter: decision.adapter,
         intelligence: decision.intelligence,
-        model_family: decision.modelFamily,
-        model: decision.model,
-        thinking: decision.thinking
-      }
-    });
+	        model_family: decision.modelFamily,
+	        model: decision.model,
+	        thinking: decision.thinking,
+	        tool_results: decision.toolResults?.map((result) => ({
+	          name: result.name,
+	          ok: result.ok,
+	          summary: result.summary,
+	          evidence: result.evidence
+	        })) ?? []
+	      }
+	    });
     return textContent({
       decision: decision.text,
       provider: decision.provider,
       adapter: decision.adapter,
       intelligence: decision.intelligence,
       model_family: decision.modelFamily,
-      model: decision.model,
-      thinking: decision.thinking,
-      purpose: decision.purpose,
-      evidence: decision.evidence
-    });
+	      model: decision.model,
+	      thinking: decision.thinking,
+	      purpose: decision.purpose,
+	      tool_results: decision.toolResults?.map((result) => ({
+	        name: result.name,
+	        ok: result.ok,
+	        summary: result.summary,
+	        evidence: result.evidence
+	      })) ?? [],
+	      evidence: decision.evidence
+	    });
   }
 
   if (name === "ciclo_poll_events") {
@@ -1708,6 +1745,7 @@ async function callTool(
 
   if (name === "ciclo_run_due_cron") {
     if (runtime.internalHeartbeat === undefined) throw new Error("Ciclo internal heartbeat is unavailable");
+    if (!runtimeOwnsAutomation(runtime)) throw new Error("Ciclo due cron can only run in the MCP automation leader");
     const result = await runtime.internalHeartbeat.tick();
     auditMutation({
       runtime,
@@ -2958,7 +2996,15 @@ export async function runMcpStdioServer(
 ): Promise<void> {
   input.setEncoding("utf8");
   let buffer = "";
-  runtime.internalHeartbeat?.start();
+  if (runtimeOwnsAutomation(runtime)) {
+    runtime.internalHeartbeat?.start();
+  } else {
+    runtime.eventStore?.append({
+      type: "mcp.leadership",
+      evidence: ["mcp.leadership:follower", "mcp.automation:skipped"],
+      data: mcpLeadershipView(runtime.mcpLeadership)
+    });
+  }
   try {
     for await (const chunk of input) {
       buffer += chunk;
@@ -2985,6 +3031,7 @@ export async function runMcpStdioServer(
       }
     }
   } finally {
-    runtime.internalHeartbeat?.stop();
+    if (runtimeOwnsAutomation(runtime)) runtime.internalHeartbeat?.stop();
+    runtime.mcpLeadership?.release();
   }
 }

@@ -144,6 +144,37 @@ class ToolUsingFakeBrain implements OpenAiBrain {
   }
 }
 
+class FailingToolFakeBrain implements OpenAiBrain {
+  readonly inputs: OpenAiBrainDecisionInput[] = [];
+
+  status(): OpenAiBrainStatus {
+    return openAiBrainPolicy;
+  }
+
+  async decide(input: OpenAiBrainDecisionInput): Promise<OpenAiBrainDecision> {
+    this.inputs.push(input);
+    const result = await input.toolExecutor?.execute({
+      name: "ciclo_observe_worker",
+      params: {
+        worker_session_id: "missing-worker",
+        lines: 20
+      }
+    });
+    return {
+      provider: "openai",
+      adapter: "pi-sdk",
+      intelligence: openAiBrainIntelligence,
+      modelFamily: openAiBrainModelFamily,
+      model: openAiBrainPolicy.model,
+      thinking: openAiBrainPolicy.thinking,
+      purpose: input.purpose,
+      text: "The tool call failed; fall back to a bounded status nudge.",
+      ...(result === undefined ? {} : { toolResults: [result] }),
+      evidence: ["brain.provider:openai", `brain.purpose:${input.purpose}`]
+    };
+  }
+}
+
 test("internal heartbeat marks stalled workers and asks OpenAI brain for follow-up", async () => {
   let now = "2026-07-02T00:00:00.000Z";
   const events = new CicloEventStore(() => now);
@@ -162,6 +193,11 @@ test("internal heartbeat marks stalled workers and asks OpenAI brain for follow-
     {
       status: 0,
       stdout: JSON.stringify({ result: { agent: { pane_id: "wA:p2", agent_status: "idle" } } }),
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: "• Worker transcript\n\nthinking about next step\n",
       stderr: ""
     },
     {
@@ -229,6 +265,9 @@ test("internal heartbeat marks stalled workers and asks OpenAI brain for follow-
     assert.match(brain.inputs[0]?.prompt ?? "", /project memory/u);
     assert.match(brain.inputs[0]?.prompt ?? "", /escalated to a stronger model/u);
     assert.ok((brain.inputs[0]?.context ?? []).includes("model=unspecified"));
+    assert.ok((brain.inputs[0]?.context ?? []).includes("session_state=stalled"));
+    assert.ok((brain.inputs[0]?.context ?? []).includes("stuck_kind=stalled"));
+    assert.ok((brain.inputs[0]?.context ?? []).includes("prompt_pending=false"));
     assert.ok((brain.inputs[0]?.context ?? []).includes("pane_id=wA:p2"));
     assert.ok((brain.inputs[0]?.context ?? []).includes("agent_status=idle"));
     assert.ok((brain.inputs[0]?.context ?? []).some((item) => item.includes("transcript_recent=• Worker transcript")));
@@ -262,6 +301,11 @@ test("internal heartbeat executes structured brain ask-operator actions", async 
     {
       status: 0,
       stdout: JSON.stringify({ result: { agent: { pane_id: "wB:p3", agent_status: "idle" } } }),
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: "Need a deploy approval before continuing.\n",
       stderr: ""
     },
     {
@@ -313,7 +357,87 @@ test("internal heartbeat executes structured brain ask-operator actions", async 
   const poll = events.poll(0);
   assert.ok(poll.events.some((event) => event.type === "brain.action" && event.data?.kind === "ask_operator"));
   assert.ok(poll.events.some((event) => event.type === "question.asked" && event.data?.question === "Should the worker proceed with the deploy validation?"));
-  assert.equal(commandRunner.runs.length, 4);
+  assert.equal(commandRunner.runs.length, 5);
+});
+
+test("internal heartbeat tells the brain when a visible prompt was not submitted", async () => {
+  let now = "2026-07-02T00:44:00.000Z";
+  const events = new CicloEventStore(() => now);
+  const commandRunner = new FakeCommandRunner([
+    {
+      status: 0,
+      stdout: JSON.stringify({ result: { agent: { pane_id: "wP:p7", agent_status: "idle" } } }),
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: "• Worker output\n\n› Continue the review loop\n",
+      stderr: ""
+    },
+    {
+      status: 1,
+      stdout: "",
+      stderr: "pane rejected input"
+    },
+    {
+      status: 0,
+      stdout: JSON.stringify({ result: { agent: { pane_id: "wP:p7", agent_status: "idle" } } }),
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: "• Worker output\n\nNo new transcript after prompt draft.\n",
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: "• Worker output\n\n› Continue the review loop\n",
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: JSON.stringify({ result: { agent: { pane_id: "wP:p7", agent_status: "idle" } } }),
+      stderr: ""
+    },
+    { status: 0, stdout: "", stderr: "" }
+  ]);
+  const supervisor = new WorkerSessionSupervisor("/repo", new FakeLauncher(), { now: () => now }, events, undefined, commandRunner);
+  const brain = new FakeBrain();
+  const beforeHerdr = process.env.HERDR_SESSION_NAME;
+  process.env.HERDR_SESSION_NAME = "prompt-session";
+  try {
+    supervisor.launch({
+      harnessId: "codex",
+      loopId: "prompt-loop",
+      beadId: "ciclo-prompt",
+      prompt: "Wait for Ciclo."
+    });
+  } finally {
+    if (beforeHerdr === undefined) delete process.env.HERDR_SESSION_NAME;
+    else process.env.HERDR_SESSION_NAME = beforeHerdr;
+  }
+
+  now = "2026-07-02T00:55:00.000Z";
+  const heartbeat = new CicloInternalHeartbeat(
+    {
+      workerSupervisor: supervisor,
+      openAiBrain: brain,
+      eventStore: events
+    },
+    {
+      workerStaleAfterMs: 10 * 60 * 1000,
+      now: () => now
+    }
+  );
+
+  const result = await heartbeat.tick();
+
+  assert.equal(result.workersStalled.length, 1);
+  assert.ok((brain.inputs[0]?.context ?? []).includes("prompt_pending=true"));
+  assert.ok((brain.inputs[0]?.context ?? []).includes("pending_prompt=Continue the review loop"));
+  assert.ok((brain.inputs[0]?.context ?? []).includes("stuck_kind=pending_prompt"));
+  const poll = events.poll(0);
+  assert.ok(poll.events.some((event) => event.type === "worker.prompt_submitted" && event.data?.submitted === false));
 });
 
 test("internal heartbeat lets the brain call Ciclo tools and verifies results without duplicate fallback action", async () => {
@@ -342,7 +466,17 @@ test("internal heartbeat lets the brain call Ciclo tools and verifies results wi
     },
     {
       status: 0,
+      stdout: "Worker has not printed a prompt yet.\n",
+      stderr: ""
+    },
+    {
+      status: 0,
       stdout: JSON.stringify({ result: { agent: { pane_id: "wC:p4", agent_status: "idle" } } }),
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: "Worker observed by brain tool.\n",
       stderr: ""
     },
     {
@@ -389,6 +523,142 @@ test("internal heartbeat lets the brain call Ciclo tools and verifies results wi
   assert.ok(poll.events.some((event) => event.type === "brain.tool_call" && event.data?.tool === "ciclo_observe_worker"));
   assert.ok(poll.events.some((event) => event.type === "brain.verification" && event.data?.results instanceof Array));
   assert.equal(poll.events.some((event) => event.type === "worker.nudged"), false);
+});
+
+test("internal heartbeat falls back when brain tool calls all fail", async () => {
+  let now = "2026-07-02T00:55:00.000Z";
+  const events = new CicloEventStore(() => now);
+  const commandRunner = new FakeCommandRunner([
+    {
+      status: 0,
+      stdout: JSON.stringify({ result: { agent: { pane_id: "wD:p5", agent_status: "idle" } } }),
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: "Worker is quiet.\n",
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: "Worker is quiet.\n",
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: JSON.stringify({ result: { agent: { pane_id: "wD:p5", agent_status: "idle" } } }),
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: "Worker is quiet.\n",
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: JSON.stringify({ result: { agent: { pane_id: "wD:p5", agent_status: "idle" } } }),
+      stderr: ""
+    },
+    { status: 0, stdout: "", stderr: "" }
+  ]);
+  const supervisor = new WorkerSessionSupervisor("/repo", new FakeLauncher(), { now: () => now }, events, undefined, commandRunner);
+  const brain = new FailingToolFakeBrain();
+  const beforeHerdr = process.env.HERDR_SESSION_NAME;
+  process.env.HERDR_SESSION_NAME = "failed-tool-session";
+  try {
+    supervisor.launch({
+      harnessId: "claude-code",
+      loopId: "tool-loop",
+      beadId: "ciclo-tool-fail",
+      prompt: "Wait for Ciclo."
+    });
+  } finally {
+    if (beforeHerdr === undefined) delete process.env.HERDR_SESSION_NAME;
+    else process.env.HERDR_SESSION_NAME = beforeHerdr;
+  }
+
+  now = "2026-07-02T01:06:00.000Z";
+  const heartbeat = new CicloInternalHeartbeat(
+    {
+      workerSupervisor: supervisor,
+      openAiBrain: brain,
+      eventStore: events
+    },
+    {
+      workerStaleAfterMs: 10 * 60 * 1000,
+      now: () => now
+    }
+  );
+
+  const result = await heartbeat.tick();
+  const sessionId = result.workersStalled[0]?.sessionId;
+
+  assert.equal(result.workersStalled.length, 1);
+  assert.deepEqual(result.workerRecoveryActions, [`nudged:${sessionId}`]);
+  const poll = events.poll(0);
+  assert.ok(poll.events.some((event) => event.type === "brain.tool_call" && event.data?.ok === false));
+  assert.ok(poll.events.some((event) => event.type === "brain.verification" && event.evidence.includes("brain.tools.failed:1")));
+  assert.ok(poll.events.some((event) => event.type === "worker.nudged" && event.workerSessionId === sessionId));
+});
+
+test("internal heartbeat brain launch tool defaults to dry-run", async () => {
+  const now = "2026-07-02T00:58:00.000Z";
+  const events = new CicloEventStore(() => now);
+  const supervisor = new WorkerSessionSupervisor("/repo", new FakeLauncher(), { now: () => now }, events);
+  const heartbeat = new CicloInternalHeartbeat(
+    {
+      workerSupervisor: supervisor,
+      eventStore: events
+    },
+    { now: () => now }
+  );
+
+  const result = await heartbeat.decisionToolExecutor(now)?.execute({
+    name: "ciclo_launch_worker",
+    params: {
+      harness_id: "codex",
+      loop_id: "brain-tool",
+      prompt: "Inspect the stalled worker and report findings."
+    }
+  });
+  const launched = supervisor.list()[0];
+
+  assert.equal(result?.ok, true);
+  assert.equal(launched?.state, "planned");
+  assert.ok(launched?.evidence.includes("worker.session.dry_run:true"));
+});
+
+test("internal heartbeat exposes worker listing to the brain tool executor", async () => {
+  const now = "2026-07-02T00:59:00.000Z";
+  const events = new CicloEventStore(() => now);
+  const supervisor = new WorkerSessionSupervisor("/repo", new FakeLauncher(), { now: () => now }, events);
+  const launched = supervisor.launch({
+    harnessId: "codex",
+    loopId: "brain-list",
+    beadId: "ciclo-list",
+    prompt: "Wait for Ciclo.",
+    dryRun: true
+  });
+  const heartbeat = new CicloInternalHeartbeat(
+    {
+      workerSupervisor: supervisor,
+      eventStore: events
+    },
+    { now: () => now }
+  );
+
+  const executor = heartbeat.decisionToolExecutor(now);
+  const result = await executor?.execute({
+    name: "ciclo_list_workers",
+    params: {}
+  });
+  const workers = result?.data?.workers as Array<Record<string, unknown>> | undefined;
+
+  assert.ok(executor?.availableTools().some((tool) => tool.name === "ciclo_list_workers"));
+  assert.equal(result?.ok, true);
+  assert.equal(workers?.[0]?.worker_session_id, launched.sessionId);
+  assert.equal(workers?.[0]?.state, "planned");
+  assert.equal(workers?.[0]?.harness_id, "codex");
 });
 
 test("internal heartbeat claims ready epic or feature work and launches an isolated worker when idle", async () => {
@@ -528,13 +798,19 @@ test("internal heartbeat falls back to concrete ready Beads work after planning 
   assert.equal(result.readyWorkChecked, 2);
   assert.equal(result.idleWorkersLaunched.length, 1);
   assert.equal(result.idleWorkersLaunched[0]?.beadId, "ciclo-task");
+  assert.equal(result.idleWorkersLaunched[0]?.harnessId, "codex");
+  assert.equal(result.idleWorkersLaunched[0]?.model, "gpt-5.5");
+  assert.equal(result.idleWorkersLaunched[0]?.effort, "high");
   assert.deepEqual(beads.claims, ["ciclo-task"]);
   assert.match(brain.inputs[0]?.prompt ?? "", /concrete ready Beads task, bug, or decision/u);
   assert.ok((brain.inputs[0]?.context ?? []).includes("selection_stage=fallback"));
+  assert.ok((brain.inputs[0]?.context ?? []).includes("selected_model=gpt-5.5"));
+  assert.ok((brain.inputs[0]?.context ?? []).includes("problem_complexity=hard"));
   const poll = events.poll(0);
   assert.ok(poll.events.some((event) => event.type === "work.ready_listed" && event.data?.selection_stage === "primary" && event.data?.selected === null));
   assert.ok(poll.events.some((event) => event.type === "work.ready_listed" && event.data?.selection_stage === "fallback" && event.beadId === "ciclo-task"));
-  assert.ok(poll.events.some((event) => event.type === "work.started" && event.data?.selection_stage === "fallback"));
+  assert.ok(poll.events.some((event) => event.type === "work.started" && event.data?.selection_stage === "fallback" && event.data?.model === "gpt-5.5"));
+  assert.ok(poll.events.some((event) => event.type === "bead.claimed" && event.data?.model_selection instanceof Object));
 });
 
 test("internal heartbeat default preemptive pool can route ready work to Claude Fable", async () => {
