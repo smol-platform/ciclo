@@ -193,6 +193,17 @@ function conflictEvidence(owners: readonly RemoteSessionRecord[]): readonly stri
   return owners.map((owner) => `beads.claim.conflict:${owner.activeBeadId}:session=${owner.id}:state=${owner.state}`);
 }
 
+function appendUniqueSkip(skipped: BeadsWorkSkip[], skip: BeadsWorkSkip): void {
+  if (skipped.some((existing) => existing.id === skip.id && existing.reason === skip.reason)) return;
+  skipped.push(skip);
+}
+
+function mergeSkips(left: readonly BeadsWorkSkip[], right: readonly BeadsWorkSkip[]): readonly BeadsWorkSkip[] {
+  const merged: BeadsWorkSkip[] = [];
+  for (const skip of [...left, ...right]) appendUniqueSkip(merged, skip);
+  return merged;
+}
+
 export async function selectAndClaimBeadsWork(
   client: BeadsWorkClaimClient,
   request: BeadsWorkClaimRequest
@@ -211,8 +222,11 @@ export async function selectAndClaimBeadsWork(
   }
 
   const ready = await client.ready(request.limit);
-  const selection = selectBeadsWork(ready, request.selector);
-  if (selection.selected === undefined) {
+  let remaining = [...ready];
+  let skippedAfterRecheck: BeadsWorkSkip[] = [];
+  let recheckEvidence: string[] = [];
+  if (remaining.length === 0) {
+    const selection = selectBeadsWork(remaining, request.selector);
     return {
       claimed: false,
       selection,
@@ -221,90 +235,124 @@ export async function selectAndClaimBeadsWork(
     };
   }
 
-  const before = await client.show(selection.selected.id);
-  const recheckReason = eligible(before, request.selector);
-  if (recheckReason !== undefined) {
-    return {
-      claimed: false,
-      before,
-      selection,
-      reason: `selected Beads work failed recheck: ${recheckReason}`,
-      evidence: [...selection.evidence, `beads.claim.recheck_failed:${before.id}`]
+  while (remaining.length > 0) {
+    const selection = selectBeadsWork(remaining, request.selector);
+    const aggregateSelection: BeadsWorkSelection = {
+      selected: selection.selected,
+      skipped: mergeSkips(skippedAfterRecheck, selection.skipped),
+      evidence: [...selection.evidence, ...recheckEvidence]
     };
-  }
+    if (selection.selected === undefined) {
+      return {
+        claimed: false,
+        selection: aggregateSelection,
+        reason: "no eligible Beads work matched the selector",
+        evidence: aggregateSelection.evidence
+      };
+    }
 
-  const conflicts = conflictingOwners(before.id, request.sessionId, request.activeOwners);
-  if (conflicts.length > 0) {
-    return {
-      claimed: false,
-      before,
-      selection,
-      reason: `selected Beads work is already owned by active session ${conflicts[0]?.id ?? "unknown"}`,
-      evidence: [
-        ...selection.evidence,
-        `beads.claim.rechecked:${before.id}`,
-        "beads.claim:block:duplicate_active_session",
-        ...conflictEvidence(conflicts),
-        `operator.feedback:duplicate_claim:${before.id}`
-      ]
-    };
-  }
+    const before = await client.show(selection.selected.id);
+    const recheckReason = eligible(before, request.selector);
+    if (recheckReason !== undefined) {
+      appendUniqueSkip(skippedAfterRecheck, { id: before.id, reason: `recheck failed: ${recheckReason}` });
+      recheckEvidence = [...recheckEvidence, `beads.claim.recheck_failed:${before.id}`];
+      remaining = remaining.filter((task) => task.id !== before.id);
+      if (remaining.length === 0) {
+        const failedSelection: BeadsWorkSelection = {
+          skipped: skippedAfterRecheck,
+          evidence: [...selection.evidence, ...recheckEvidence, "beads.select:none:no_claimable_after_recheck"]
+        };
+        return {
+          claimed: false,
+          before,
+          selection: failedSelection,
+          reason: `selected Beads work failed recheck: ${recheckReason}`,
+          evidence: failedSelection.evidence
+        };
+      }
+      continue;
+    }
 
-  const selectedHarness = request.harnessForTask?.(before) ?? harnessFor(request.selector.loop, request.harnessId);
-  const after = await client.claim(before.id);
-  const remoteSession = request.remoteSession ?? request.activeOwners?.find((owner) => owner.id === request.sessionId);
-  const ownership =
-    request.sessionId === undefined || request.recordSessionOwnership === undefined
-      ? undefined
-      : request.recordSessionOwnership({
-          sessionId: request.sessionId,
-          beadId: after.id,
-          loopId: request.selector.loop.id
-        });
-  if (ownership !== undefined && !ownership.accepted) {
+    const conflicts = conflictingOwners(before.id, request.sessionId, request.activeOwners);
+    if (conflicts.length > 0) {
+      return {
+        claimed: false,
+        before,
+        selection: aggregateSelection,
+        reason: `selected Beads work is already owned by active session ${conflicts[0]?.id ?? "unknown"}`,
+        evidence: [
+          ...aggregateSelection.evidence,
+          `beads.claim.rechecked:${before.id}`,
+          "beads.claim:block:duplicate_active_session",
+          ...conflictEvidence(conflicts),
+          `operator.feedback:duplicate_claim:${before.id}`
+        ]
+      };
+    }
+
+    const selectedHarness = request.harnessForTask?.(before) ?? harnessFor(request.selector.loop, request.harnessId);
+    const after = await client.claim(before.id);
+    const remoteSession = request.remoteSession ?? request.activeOwners?.find((owner) => owner.id === request.sessionId);
+    const ownership =
+      request.sessionId === undefined || request.recordSessionOwnership === undefined
+        ? undefined
+        : request.recordSessionOwnership({
+            sessionId: request.sessionId,
+            beadId: after.id,
+            loopId: request.selector.loop.id
+          });
+    if (ownership !== undefined && !ownership.accepted) {
+      return {
+        claimed: false,
+        before,
+        after,
+        selection: aggregateSelection,
+        selectedHarness,
+        reason: ownership.reason,
+        evidence: [
+          ...aggregateSelection.evidence,
+          `beads.claim.rechecked:${before.id}`,
+          `beads.claim.claimed:${after.id}`,
+          "beads.claim:block:ownership_record_failed",
+          ...ownership.evidence
+        ]
+      };
+    }
+    await client.note(
+      after.id,
+      metadataNote({
+        beadId: after.id,
+        loop: request.selector.loop,
+        harnessId: selectedHarness,
+        sessionId: request.sessionId,
+        principalId: request.principalId,
+        remoteSession
+      })
+    );
+
     return {
-      claimed: false,
+      claimed: true,
       before,
       after,
-      selection,
+      selection: aggregateSelection,
       selectedHarness,
-      reason: ownership.reason,
+      reason: "selected Beads work was rechecked claimed and annotated",
       evidence: [
-        ...selection.evidence,
+        ...aggregateSelection.evidence,
         `beads.claim.rechecked:${before.id}`,
         `beads.claim.claimed:${after.id}`,
-        "beads.claim:block:ownership_record_failed",
-        ...ownership.evidence
+        `beads.claim.harness:${selectedHarness}`,
+        "beads.claim.metadata:standard",
+        ...(request.sessionId === undefined ? [] : [`beads.claim.session:${request.sessionId}`]),
+        ...(ownership?.evidence ?? [])
       ]
     };
   }
-  await client.note(
-    after.id,
-    metadataNote({
-      beadId: after.id,
-      loop: request.selector.loop,
-      harnessId: selectedHarness,
-      sessionId: request.sessionId,
-      principalId: request.principalId,
-      remoteSession
-    })
-  );
 
   return {
-    claimed: true,
-    before,
-    after,
-    selection,
-    selectedHarness,
-    reason: "selected Beads work was rechecked claimed and annotated",
-    evidence: [
-      ...selection.evidence,
-      `beads.claim.rechecked:${before.id}`,
-      `beads.claim.claimed:${after.id}`,
-      `beads.claim.harness:${selectedHarness}`,
-      "beads.claim.metadata:standard",
-      ...(request.sessionId === undefined ? [] : [`beads.claim.session:${request.sessionId}`]),
-      ...(ownership?.evidence ?? [])
-    ]
+    claimed: false,
+    selection: { skipped: skippedAfterRecheck, evidence: ["beads.select:none:no_ready_work"] },
+    reason: "no eligible Beads work matched the selector",
+    evidence: ["beads.select:none:no_ready_work"]
   };
 }

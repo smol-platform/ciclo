@@ -21,8 +21,10 @@ import type {
 import type {
   WorkerHarnessId,
   WorkerIsolationMode,
+  WorkerSessionLaunchRequest,
   WorkerSessionRecord,
-  WorkerSessionSupervisor
+  WorkerSessionSupervisor,
+  WorkerWorktreeRequest
 } from "./worker-session-supervisor.js";
 
 export interface CicloInternalHeartbeatRuntime {
@@ -61,6 +63,7 @@ export interface CicloInternalHeartbeatTickResult {
   readonly firstWake: boolean;
   readonly workersRefreshed: number;
   readonly workerPromptSubmissions: number;
+  readonly workersCleanedUp: readonly WorkerSessionRecord[];
   readonly workersStalled: readonly WorkerSessionRecord[];
   readonly workerRecoveryActions: readonly string[];
   readonly workerChecked: number;
@@ -86,6 +89,64 @@ export interface CicloInternalHeartbeatMonologueEntry {
   readonly at: string;
   readonly message: string;
   readonly evidence: readonly string[];
+}
+
+function cronStringParam(params: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = params[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
+
+function cronBooleanParam(params: Record<string, unknown>, keys: readonly string[]): boolean | undefined {
+  for (const key of keys) {
+    const value = params[key];
+    if (typeof value === "boolean") return value;
+  }
+  return undefined;
+}
+
+function cronStringListParam(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
+}
+
+function cronStringRecordParam(value: unknown): Record<string, string> | undefined {
+  if (value === undefined || value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const output: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === "string") output[key] = entry;
+  }
+  return Object.keys(output).length === 0 ? undefined : output;
+}
+
+function cronWorkerHarnessId(value: string | undefined): WorkerHarnessId {
+  return value === "claude-code" ? "claude-code" : "codex";
+}
+
+function cronIsolationMode(value: string | undefined): WorkerIsolationMode | undefined {
+  if (value === "none" || value === "worktree") return value;
+  return undefined;
+}
+
+function cronWorktreeRequest(value: unknown): WorkerWorktreeRequest | undefined {
+  if (value === undefined || value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const create = typeof record.create === "boolean" ? record.create : undefined;
+  const path = typeof record.path === "string" && record.path.trim().length > 0 ? record.path.trim() : undefined;
+  const branch = typeof record.branch === "string" && record.branch.trim().length > 0 ? record.branch.trim() : undefined;
+  const base = typeof record.base === "string" && record.base.trim().length > 0 ? record.base.trim() : undefined;
+  const force = typeof record.force === "boolean" ? record.force : undefined;
+  if (create === undefined && path === undefined && branch === undefined && base === undefined && force === undefined) return undefined;
+  return {
+    ...(create === undefined ? {} : { create }),
+    ...(path === undefined ? {} : { path }),
+    ...(branch === undefined ? {} : { branch }),
+    ...(base === undefined ? {} : { base }),
+    ...(force === undefined ? {} : { force })
+  };
 }
 
 export interface CicloInternalHeartbeatStatus {
@@ -275,6 +336,7 @@ export class CicloInternalHeartbeat {
       this.options.workerStaleAfterMs ?? defaultWorkerStaleAfterMs,
       checkedAt
     ) ?? [];
+    const workersCleanedUp = this.runtime.workerSupervisor?.cleanupCompleted("heartbeat cleaned up completed worker session") ?? [];
 
     const workersBeforeRecovery = this.runtime.workerSupervisor?.list() ?? [];
     const claudeCodeWorkers = workersBeforeRecovery.filter((worker) => worker.harnessId === "claude-code").length;
@@ -292,6 +354,7 @@ export class CicloInternalHeartbeat {
       `heartbeat.worker.checked:${workersBeforeRecovery.length}`,
       `heartbeat.worker.refreshed:${workersRefreshed.length}`,
       `heartbeat.worker.prompt_submissions:${workerPromptSubmissions.length}`,
+      `heartbeat.worker.cleaned_up:${workersCleanedUp.length}`,
       `heartbeat.worker.stalled:${workersStalled.length}`,
       `heartbeat.worker.recovery_actions:${followUps.recoveryActions.length}`,
       `heartbeat.ready_work.checked:${idleDispatch.readyWorkChecked}`,
@@ -308,6 +371,7 @@ export class CicloInternalHeartbeat {
     const monologue = this.tickMonologue(checkedAt, {
       firstWake,
       workerChecked: workersBeforeRecovery.length,
+      workersCleanedUp: workersCleanedUp.length,
       workersStalled: workersStalled.length,
       workerPromptSubmissions: workerPromptSubmissions.length,
       remoteChanged: remoteChanged.length,
@@ -327,6 +391,7 @@ export class CicloInternalHeartbeat {
         workers_checked: workersBeforeRecovery.length,
         workers_refreshed: workersRefreshed.length,
         worker_prompt_submissions: workerPromptSubmissions.length,
+        workers_cleaned_up: workersCleanedUp.length,
         workers_stalled: workersStalled.length,
         worker_recovery_actions: followUps.recoveryActions.length,
         ready_work_checked: idleDispatch.readyWorkChecked,
@@ -346,6 +411,7 @@ export class CicloInternalHeartbeat {
       firstWake,
       workersRefreshed: workersRefreshed.length,
       workerPromptSubmissions: workerPromptSubmissions.length,
+      workersCleanedUp,
       workersStalled,
       workerRecoveryActions: followUps.recoveryActions,
       workerChecked: workersBeforeRecovery.length,
@@ -398,6 +464,7 @@ export class CicloInternalHeartbeat {
     input: {
       readonly firstWake: boolean;
       readonly workerChecked: number;
+      readonly workersCleanedUp: number;
       readonly workersStalled: number;
       readonly workerPromptSubmissions: number;
       readonly remoteChanged: number;
@@ -415,7 +482,7 @@ export class CicloInternalHeartbeat {
             "First wake should analyze repo, Beads, Herdr, PR/CI, remote, context, and worker state before choosing the first work to start."
           ]
         : []),
-      `Heartbeat checked ${input.workerChecked} worker session(s); ${input.workersStalled} stalled, ${input.workerPromptSubmissions} pending prompt submission(s), ${input.remoteChanged} remote update(s), ${input.readyWorkChecked} ready Beads candidate(s), ${input.idleWorkersLaunched} worker launch(es), ${input.brainDecisions} brain decision(s), ${input.cronRuns} cron run(s).`,
+      `Heartbeat checked ${input.workerChecked} worker session(s); ${input.workersCleanedUp} completed session cleanup(s), ${input.workersStalled} stalled, ${input.workerPromptSubmissions} pending prompt submission(s), ${input.remoteChanged} remote update(s), ${input.readyWorkChecked} ready Beads candidate(s), ${input.idleWorkersLaunched} worker launch(es), ${input.brainDecisions} brain decision(s), ${input.cronRuns} cron run(s).`,
       `Heartbeat memory pass should keep Beads open/closed state, PR review needs, model fit or escalation decisions current, and compact durable memory when needed; ${input.memoryCompactions} memory compaction(s) ran.`,
       input.claudeChannel.enabled
         ? `Claude channel communication is enabled for ${input.claudeChannel.connectedWorkers} Claude Code worker session(s).`
@@ -881,17 +948,29 @@ export class CicloInternalHeartbeat {
       const supervisor = this.runtime.workerSupervisor;
       if (supervisor === undefined) return { status: "skipped", reason: "worker supervisor unavailable", evidence: ["cron.task.worker_launch:skipped"] };
       const params = task.params ?? {};
-      const harnessId = params.harness_id === "claude-code" ? "claude-code" : "codex";
-      const loopId = typeof params.loop_id === "string" ? params.loop_id : dueJob.job.id;
-      const prompt = typeof params.prompt === "string" ? params.prompt : `Run scheduled Ciclo task ${dueJob.job.id}.`;
-      const launched = supervisor.launch(mergeWorkerLaunchWithConfig({
-        harnessId,
-        loopId,
-        prompt,
-        cwd: this.runtime.auth?.session.projectRoot,
-        dryRun: params.dry_run !== false,
-        configureMcp: params.configure_mcp !== false
-      }, this.runtime.projectConfig ?? {}));
+      const workerEnv = cronStringRecordParam(params.worker_env ?? params.workerEnv);
+      const mcpEnv = cronStringRecordParam(params.mcp_env ?? params.mcpEnv);
+      const launchRequest: WorkerSessionLaunchRequest = {
+        harnessId: cronWorkerHarnessId(cronStringParam(params, ["harness_id", "harnessId"])),
+        loopId: cronStringParam(params, ["loop_id", "loopId"]) ?? dueJob.job.id,
+        prompt: cronStringParam(params, ["prompt"]) ?? `Run scheduled Ciclo task ${dueJob.job.id}.`,
+        cwd: cronStringParam(params, ["cwd"]) ?? this.runtime.auth?.session.projectRoot,
+        dryRun: cronBooleanParam(params, ["dry_run", "dryRun"]) ?? true,
+        configureMcp: cronBooleanParam(params, ["configure_mcp", "configureMcp"]) ?? true,
+        ...(cronStringParam(params, ["bead_id", "beadId"]) === undefined ? {} : { beadId: cronStringParam(params, ["bead_id", "beadId"]) }),
+        ...(cronStringParam(params, ["model"]) === undefined ? {} : { model: cronStringParam(params, ["model"]) }),
+        ...(cronStringParam(params, ["effort"]) === undefined ? {} : { effort: cronStringParam(params, ["effort"]) }),
+        ...(cronStringParam(params, ["session_name", "sessionName"]) === undefined ? {} : { sessionName: cronStringParam(params, ["session_name", "sessionName"]) }),
+        ...(cronStringParam(params, ["permission_mode", "permissionMode"]) === undefined ? {} : { permissionMode: cronStringParam(params, ["permission_mode", "permissionMode"]) }),
+        ...(cronStringParam(params, ["approval_policy", "approvalPolicy"]) === undefined ? {} : { approvalPolicy: cronStringParam(params, ["approval_policy", "approvalPolicy"]) }),
+        ...(cronStringParam(params, ["sandbox"]) === undefined ? {} : { sandbox: cronStringParam(params, ["sandbox"]) }),
+        ...(cronIsolationMode(cronStringParam(params, ["isolation"])) === undefined ? {} : { isolation: cronIsolationMode(cronStringParam(params, ["isolation"])) }),
+        ...(cronWorktreeRequest(params.worktree) === undefined ? {} : { worktree: cronWorktreeRequest(params.worktree) }),
+        ...(cronStringListParam(params.extra_args ?? params.extraArgs) === undefined ? {} : { extraArgs: cronStringListParam(params.extra_args ?? params.extraArgs) }),
+        ...(workerEnv === undefined ? {} : { workerEnv }),
+        ...(mcpEnv === undefined ? {} : { mcpEnv })
+      };
+      const launched = supervisor.launch(mergeWorkerLaunchWithConfig(launchRequest, this.runtime.projectConfig ?? {}));
       return {
         status: "ran",
         reason: `worker launched:${launched.sessionId}`,

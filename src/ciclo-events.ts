@@ -11,6 +11,7 @@ export type CicloEventType =
   | "work.updated"
   | "worker.state_change"
   | "worker.launcher_exit"
+  | "worker.cleaned_up"
   | "worker.listed"
   | "worker.stalled"
   | "worker.nudged"

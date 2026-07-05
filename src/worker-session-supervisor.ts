@@ -1038,7 +1038,7 @@ export class WorkerSessionSupervisor {
     this.events = eventSink ?? new CicloEventStore(() => this.clock.now());
   }
 
-  private emit(record: WorkerSessionRecord, type: "worker.state_change" | "worker.launcher_exit", evidence: readonly string[] = []): void {
+  private emit(record: WorkerSessionRecord, type: "worker.state_change" | "worker.launcher_exit" | "worker.cleaned_up", evidence: readonly string[] = []): void {
     this.events.append({
       type,
       workerSessionId: record.sessionId,
@@ -1359,6 +1359,24 @@ export class WorkerSessionSupervisor {
   get(sessionId: string): WorkerSessionRecord | undefined {
     const session = this.sessions.get(sessionId);
     return session === undefined ? undefined : this.refreshDetachedAgent(session);
+  }
+
+  cleanupCompleted(reason = "heartbeat cleaned up completed worker session"): readonly WorkerSessionRecord[] {
+    this.refreshDetachedAgents();
+    const cleaned: WorkerSessionRecord[] = [];
+    for (const session of [...this.sessions.values()]) {
+      if (session.state !== "completed") continue;
+      const updated: WorkerSessionRecord = {
+        ...session,
+        cleanupReason: reason,
+        evidence: [...session.evidence, "worker.session.cleanup:completed", `worker.session.cleanup.reason:${reason}`]
+      };
+      this.sessions.delete(session.sessionId);
+      this.handles.delete(session.sessionId);
+      this.emit(updated, "worker.cleaned_up", ["worker.session.cleanup:completed"]);
+      cleaned.push(updated);
+    }
+    return cleaned;
   }
 
   stop(sessionId: string, reason: string, signal: NodeJS.Signals = "SIGTERM"): WorkerSessionRecord {

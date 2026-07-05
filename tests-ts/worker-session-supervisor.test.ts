@@ -13,6 +13,7 @@ import {
   type WorkerProcessHandle,
   type WorkerProcessLauncher
 } from "../src/worker-session-supervisor.js";
+import { CicloEventStore } from "../src/ciclo-events.js";
 import type {
   ClaudeBackgroundAgentLookup,
   ClaudeBackgroundAgentRecord,
@@ -860,6 +861,32 @@ test("worker session supervisor records completed worker exits", () => {
     assert.equal(cleanedUp.state, "completed");
     assert.equal(cleanedUp.cleanupReason, "post-completion cleanup");
     assert.ok(cleanedUp.evidence.includes("worker.session.stop:not_running"));
+  });
+});
+
+test("worker session supervisor cleans completed sessions from the live registry", () => {
+  withHerdrReuseDisabled(() => {
+    const launcher = new FakeLauncher();
+    const events = new CicloEventStore(() => "2026-06-30T00:00:00.000Z");
+    const supervisor = new WorkerSessionSupervisor("/repo", launcher, {
+      now: () => "2026-06-30T00:00:00.000Z"
+    }, events);
+
+    const running = supervisor.launch({
+      harnessId: "codex",
+      loopId: "loop-1",
+      prompt: "Work through Ciclo."
+    });
+    launcher.handle.exit(0, null);
+
+    const cleaned = supervisor.cleanupCompleted("heartbeat cleanup");
+
+    assert.equal(cleaned.length, 1);
+    assert.equal(cleaned[0]?.sessionId, running.sessionId);
+    assert.equal(cleaned[0]?.cleanupReason, "heartbeat cleanup");
+    assert.equal(supervisor.get(running.sessionId), undefined);
+    assert.equal(supervisor.list().length, 0);
+    assert.ok(events.poll(0).events.some((event) => event.type === "worker.cleaned_up" && event.workerSessionId === running.sessionId));
   });
 });
 

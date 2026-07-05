@@ -150,6 +150,36 @@
         "task": {
           "kind": "dispatch_ready_work"
         }
+      },
+      {
+        "id": "review-open-prs",
+        "enabled": false,
+        "description": "Launch a visible Claude review worker in its own Herdr worktree workspace.",
+        "schedule": {
+          "cron": "0 */4 * * *"
+        },
+        "task": {
+          "kind": "worker_launch",
+          "params": {
+            "harness_id": "claude-code",
+            "loop_id": "scheduled-review",
+            "model": "claude-fable-5",
+            "effort": "high",
+            "dry_run": false,
+            "configure_mcp": true,
+            "isolation": "worktree",
+            "worktree": {
+              "base": "main",
+              "branch": "ciclo/scheduled-review",
+              "force": false
+            },
+            "extra_args": ["--verbose"],
+            "worker_env": {
+              "GIT_TERMINAL_PROMPT": "0"
+            },
+            "prompt": "Review open PRs, run the configured validation gates, and report risky changes back through Ciclo."
+          }
+        }
       }
     ]
   },

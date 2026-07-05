@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { CicloEventStore } from "../src/ciclo-events.js";
 import { CicloMemoryStore } from "../src/ciclo-memory.js";
+import { CicloCronScheduler } from "../src/ciclo-cron.js";
 import type { BeadsTaskSnapshot } from "../src/beads-adapter.js";
 import type { BeadsWorkClaimClient } from "../src/beads-work-queue.js";
 import { CicloInternalHeartbeat } from "../src/internal-heartbeat.js";
@@ -697,6 +698,115 @@ test("internal heartbeat defaults preemptive worker capacity to ten sessions", a
   const readyEvent = events.poll(0).events.find((event) => event.type === "work.ready_listed");
   assert.equal(readyEvent?.data?.active_workers, 10);
   assert.equal(readyEvent?.data?.max_concurrent, 10);
+});
+
+test("internal heartbeat cron worker launch forwards worktree isolation and harness params", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ciclo-heartbeat-cron-worker-"));
+  const now = "2026-07-02T02:45:00.000Z";
+  try {
+    const events = new CicloEventStore(() => now);
+    const scheduler = new CicloCronScheduler({ projectRoot: root });
+    const supervisor = new WorkerSessionSupervisor(root, new FakeLauncher(), { now: () => now }, events);
+    const heartbeat = new CicloInternalHeartbeat(
+      {
+        auth: {
+          session: {
+            id: "mcp-session",
+            projectRoot: root
+          }
+        },
+        projectConfig: {
+          mcp: {
+            clients: ["claude"],
+            vars: { CICLO_REUSE_HERDR_SESSION: "true" }
+          },
+          cron: {
+            jobs: [
+              {
+                id: "review-open-prs",
+                enabled: true,
+                schedule: { cron: "45 2 * * *" },
+                task: {
+                  kind: "worker_launch",
+                  params: {
+                    harness_id: "claude-code",
+                    loop_id: "infra-blocks-review",
+                    prompt: "Review open pull requests.",
+                    dry_run: true,
+                    configure_mcp: true,
+                    isolation: "worktree",
+                    worktree: {
+                      branch: "ciclo/review-open-prs",
+                      base: "main",
+                      force: true
+                    },
+                    model: "claude-fable-5",
+                    effort: "high",
+                    extra_args: ["--verbose"],
+                    worker_env: {
+                      GIT_TERMINAL_PROMPT: "0"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        workerSupervisor: supervisor,
+        eventStore: events,
+        cronScheduler: scheduler
+      },
+      { now: () => now }
+    );
+
+    const result = await heartbeat.tick();
+    const launched = supervisor.list().find((session) => session.loopId === "infra-blocks-review");
+
+    assert.equal(result.cronDue.length, 1);
+    assert.equal(result.cronRuns[0]?.status, "ran");
+    assert.equal(launched?.harnessId, "claude-code");
+    assert.equal(launched?.state, "planned");
+    assert.equal(launched?.model, "claude-fable-5");
+    assert.equal(launched?.effort, "high");
+    assert.equal(launched?.extraArgs[0], "--verbose");
+    assert.equal(launched?.worktree?.branch, "ciclo/review-open-prs");
+    assert.equal(launched?.worktree?.base, "main");
+    assert.equal(launched?.worktree?.force, true);
+    assert.equal(launched?.workerEnv?.values.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(launched?.workerEnv?.values.CICLO_REUSE_HERDR_SESSION, "true");
+    assert.ok(launched?.evidence.includes("worker.worktree:create:true"));
+    assert.ok(result.cronRuns[0]?.evidence.includes("cron.task.worker_launch:ran"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("internal heartbeat cleans completed worker sessions during tick", async () => {
+  const now = "2026-07-02T02:50:00.000Z";
+  const events = new CicloEventStore(() => now);
+  const supervisor = new WorkerSessionSupervisor("/repo", new FakeLauncher(), { now: () => now }, events);
+  const completed = supervisor.launch({
+    harnessId: "codex",
+    loopId: "done-loop",
+    prompt: "Complete this session."
+  });
+  supervisor.recordAgentExit(completed.sessionId, 0, null, "test completed");
+  const heartbeat = new CicloInternalHeartbeat(
+    {
+      workerSupervisor: supervisor,
+      eventStore: events
+    },
+    { now: () => now }
+  );
+
+  const result = await heartbeat.tick();
+
+  assert.equal(result.workersCleanedUp.length, 1);
+  assert.equal(result.workersCleanedUp[0]?.sessionId, completed.sessionId);
+  assert.equal(supervisor.get(completed.sessionId), undefined);
+  assert.ok(result.evidence.includes("heartbeat.worker.cleaned_up:1"));
+  assert.ok(result.monologue.some((entry) => /1 completed session cleanup/u.test(entry.message)));
+  assert.ok(events.poll(0).events.some((event) => event.type === "worker.cleaned_up" && event.workerSessionId === completed.sessionId));
 });
 
 test("internal heartbeat releases capacity when a nudged stalled worker remains silent", async () => {

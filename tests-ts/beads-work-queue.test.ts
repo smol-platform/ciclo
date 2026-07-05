@@ -247,6 +247,50 @@ test("claim flow avoids already claimed or blocked work on recheck", async () =>
   assert.deepEqual(calls, ["ready", "show:ciclo-1"]);
 });
 
+test("claim flow continues to the next ready candidate after a stale recheck failure", async () => {
+  const calls: string[] = [];
+  const client: BeadsWorkClaimClient = {
+    async ready() {
+      calls.push("ready");
+      return [
+        task({ id: "ciclo-blocked", labels: ["mvp"], priority: 0 }),
+        task({ id: "ciclo-next", labels: ["mvp"], priority: 1 })
+      ];
+    },
+    async show(id) {
+      calls.push(`show:${id}`);
+      if (id === "ciclo-blocked") {
+        return task({
+          id,
+          labels: ["mvp"],
+          priority: 0,
+          dependencies: [{ id: "ciclo-parent", status: "open" }]
+        });
+      }
+      return task({ id, labels: ["mvp"], priority: 1 });
+    },
+    async claim(id) {
+      calls.push(`claim:${id}`);
+      return task({ id, labels: ["mvp"], priority: 1, status: "in_progress" });
+    },
+    async note(id, message) {
+      calls.push(`note:${id}:${message}`);
+    }
+  };
+
+  const result = await selectAndClaimBeadsWork(client, {
+    selector: { loop, requiredLabels: ["mvp"] }
+  });
+
+  assert.equal(result.claimed, true);
+  assert.equal(result.before?.id, "ciclo-next");
+  assert.equal(result.after?.id, "ciclo-next");
+  assert.deepEqual(calls.slice(0, 4), ["ready", "show:ciclo-blocked", "show:ciclo-next", "claim:ciclo-next"]);
+  assert.ok(result.evidence.includes("beads.claim.recheck_failed:ciclo-blocked"));
+  assert.ok(result.evidence.includes("beads.select.selected:ciclo-next"));
+  assert.ok(result.selection.skipped.some((skip) => skip.id === "ciclo-blocked" && /unresolved dependency/u.test(skip.reason)));
+});
+
 test("claim flow stops before reading ready work when authorization denies", async () => {
   const calls: string[] = [];
   const client: BeadsWorkClaimClient = {
