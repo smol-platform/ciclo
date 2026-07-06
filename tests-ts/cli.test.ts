@@ -42,6 +42,7 @@ test("CLI prints top-level help and version", async () => {
   assert.match(help.stdout.join("\n"), /Usage: ciclo <command>/);
   assert.match(help.stdout.join("\n"), /attach/);
   assert.match(help.stdout.join("\n"), /launch/);
+  assert.match(help.stdout.join("\n"), /gc workspaces/);
   assert.match(help.stdout.join("\n"), /events/);
   assert.match(help.stdout.join("\n"), /mcp http/);
   assert.match(help.stdout.join("\n"), /mcp install/);
@@ -50,6 +51,11 @@ test("CLI prints top-level help and version", async () => {
   const version = captureIo();
   assert.equal(await main(["node", "ciclo", "--version"], version.io), 0);
   assert.equal(version.stdout[0], CICLO_VERSION);
+
+  const gcHelp = captureIo();
+  assert.equal(await main(["node", "ciclo", "help", "gc"], gcHelp.io), 0);
+  assert.match(gcHelp.stdout.join("\n"), /Usage: ciclo gc workspaces/);
+  assert.match(gcHelp.stdout.join("\n"), /skips working agents/);
 });
 
 test("CLI status and runtime commands emit machine-readable JSON", async () => {

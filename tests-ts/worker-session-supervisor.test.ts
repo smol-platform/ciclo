@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -52,6 +52,8 @@ function withHerdrReuseDisabled(run: () => void): void {
 
 class FakeHandle implements WorkerProcessHandle {
   private exitListener?: (code: number | null, signal: NodeJS.Signals | null) => void;
+  stopCount = 0;
+  stopSignal?: NodeJS.Signals;
 
   constructor(readonly pid = 4242) {}
 
@@ -59,7 +61,9 @@ class FakeHandle implements WorkerProcessHandle {
     this.exitListener = listener;
   }
 
-  stop(): boolean {
+  stop(signal?: NodeJS.Signals): boolean {
+    this.stopCount += 1;
+    this.stopSignal = signal;
     return true;
   }
 
@@ -1105,6 +1109,106 @@ test("worker session supervisor exposes cursor based worker events", () => {
     const secondPoll = supervisor.pollEvents(firstPoll.nextCursor);
     assert.ok(secondPoll.events.some((event) => event.state === stopped.state && event.workerSessionId === running.sessionId));
   });
+});
+
+test("worker session stop closes Herdr pane and workspace before removing worktree", () => {
+  withHerdrSessionEnv("infra-blocks", () => {
+    const root = mkdtempSync(join(tmpdir(), "ciclo-herdr-cleanup-root-"));
+    const worktreePath = join(dirname(root), ".ciclo-worktrees", basename(root), "worker-cleanup");
+    const launcher = new FakeLauncher();
+    const runner = new FakeCommandRunner([
+      { status: 0, stdout: JSON.stringify({ result: { workspace_id: "workspace-123" } }), stderr: "" },
+      { status: 0, stdout: JSON.stringify({ result: { worktrees: [{ path: worktreePath, open_workspace_id: "workspace-123" }] } }), stderr: "" },
+      { status: 0, stdout: JSON.stringify({ result: { agent: { pane_id: "wF:p2", agent_status: "idle" } } }), stderr: "" },
+      { status: 0, stdout: "", stderr: "" },
+      { status: 0, stdout: "", stderr: "" },
+      { status: 0, stdout: "", stderr: "" },
+      { status: 0, stdout: "", stderr: "" },
+      { status: 0, stdout: "", stderr: "" }
+    ]);
+    const supervisor = new WorkerSessionSupervisor(root, launcher, { now: () => "2026-07-05T00:00:00.000Z" }, undefined, undefined, runner);
+    const running = supervisor.launch({
+      harnessId: "codex",
+      loopId: "loop-cleanup",
+      beadId: "ciclo-cleanup",
+      prompt: "Work through Ciclo.",
+      isolation: "worktree",
+      worktree: { path: worktreePath, branch: "ciclo/cleanup" }
+    });
+    mkdirSync(worktreePath, { recursive: true });
+
+    const stopped = supervisor.stop(running.sessionId, "operator stopped cleanup test");
+
+    assert.equal(stopped.state, "stopped");
+    assert.equal(launcher.handle.stopCount, 0);
+    assert.deepEqual(runner.runs.slice(2).map((run) => run.args), [
+      ["--session", "infra-blocks", "agent", "get", running.sessionName],
+      ["--session", "infra-blocks", "pane", "close", "wF:p2"],
+      ["--session", "infra-blocks", "workspace", "close", "workspace-123"],
+      ["-C", worktreePath, "status", "--porcelain"],
+      ["-C", root, "worktree", "remove", "--force", worktreePath],
+      ["-C", root, "worktree", "prune"]
+    ]);
+    assert.ok(stopped.evidence.includes("worker.session.cleanup.herdr_pane:closed"));
+    assert.ok(stopped.evidence.includes("worker.session.cleanup.herdr_workspace:closed"));
+    assert.ok(stopped.evidence.includes("worker.worktree.cleanup:removed"));
+  });
+});
+
+test("worker workspace GC skips working and dirty orphans while cleaning safe ones", () => {
+  const root = mkdtempSync(join(tmpdir(), "ciclo-gc-root-"));
+  const base = join(dirname(root), ".ciclo-worktrees", basename(root));
+  const workingPath = join(base, "working");
+  const dirtyPath = join(base, "dirty");
+  const cleanPath = join(base, "clean");
+  const runner = new FakeCommandRunner([
+    {
+      status: 0,
+      stdout: JSON.stringify({
+        result: {
+          agents: [
+            { name: "working-agent", pane_id: "pane-working", agent_status: "working", cwd: workingPath },
+            { name: "dirty-agent", pane_id: "pane-dirty", agent_status: "idle", cwd: dirtyPath },
+            { name: "clean-agent", pane_id: "pane-clean", agent_status: "idle", cwd: cleanPath }
+          ]
+        }
+      }),
+      stderr: ""
+    },
+    {
+      status: 0,
+      stdout: JSON.stringify({
+        result: {
+          workspaces: [
+            { id: "workspace-working", checkout_path: workingPath },
+            { id: "workspace-dirty", checkout_path: dirtyPath },
+            { id: "workspace-clean", checkout_path: cleanPath }
+          ]
+        }
+      }),
+      stderr: ""
+    },
+    { status: 0, stdout: " M src/app.ts\n", stderr: "" },
+    { status: 0, stdout: "", stderr: "" },
+    { status: 0, stdout: "", stderr: "" },
+    { status: 0, stdout: "", stderr: "" },
+    { status: 0, stdout: "", stderr: "" },
+    { status: 0, stdout: "", stderr: "" }
+  ]);
+  const supervisor = new WorkerSessionSupervisor(root, new FakeLauncher(), { now: () => "2026-07-05T00:00:00.000Z" }, undefined, undefined, runner);
+
+  const gc = supervisor.gcOrphanedWorkspaces({ herdrSession: "infra-blocks", dryRun: false });
+
+  assert.equal(gc.candidates.length, 3);
+  assert.equal(gc.candidates.find((candidate) => candidate.name === "working-agent")?.skipped, true);
+  assert.equal(gc.candidates.find((candidate) => candidate.name === "dirty-agent")?.reason, "worktree has non-artifact changes");
+  assert.equal(gc.candidates.find((candidate) => candidate.name === "clean-agent")?.skipped, false);
+  assert.deepEqual(runner.runs.slice(4).map((run) => run.args), [
+    ["--session", "infra-blocks", "pane", "close", "pane-clean"],
+    ["--session", "infra-blocks", "workspace", "close", "workspace-clean"],
+    ["-C", root, "worktree", "remove", "--force", cleanPath],
+    ["-C", root, "worktree", "prune"]
+  ]);
 });
 
 test("worker session supervisor records waiting resume heartbeat usage and stalled state", () => {

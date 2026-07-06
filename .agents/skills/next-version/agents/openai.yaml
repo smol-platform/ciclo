@@ -1,0 +1,4 @@
+interface:
+  display_name: "Next Version"
+  short_description: "Bump SemVer before a release"
+  default_prompt: "Use $next-version to choose the next SemVer version, bump package metadata, and record the release-prep revision."

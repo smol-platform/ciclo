@@ -49,6 +49,7 @@ import {
 import { installCicloSkills, type CicloSkillInstallClient } from "./skill-install.js";
 import { userControlPaneEnv } from "./user-pane-notifier.js";
 import { CICLO_VERSION } from "./version.js";
+import { WorkerSessionSupervisor } from "./worker-session-supervisor.js";
 
 const DEFAULT_BENCHMARK_DIR = "tests/fixtures/benchmarks";
 const DEFAULT_CLAUDE_PERMISSION_MODE = "bypassPermissions";
@@ -170,6 +171,7 @@ function usage(): string {
     "  events [--follow]              Show Ciclo command and decision events.",
     "  memory <subcommand>            Record, list, and compact durable Ciclo memory.",
     "  cron <subcommand>              List or run due Ciclo cron jobs.",
+    "  gc workspaces                  Clean orphaned Ciclo Herdr workspaces/worktrees.",
     "  attach [options]               Attach to Ciclo's Herdr session.",
     "  launch [claude|codex]          Install MCP config and start a Herdr harness session.",
     "  secret exec [options] -- <cmd> Resolve secret env for one child process.",
@@ -316,6 +318,24 @@ function commandHelp(command: string): string {
       "  ciclo attach --session ciclo",
       "  ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo",
       "  ciclo attach --remote ciclo@10.44.0.2:/workspace/ciclo --session ciclo --target pane-1"
+    ].join("\n");
+  }
+  if (command === "gc") {
+    return [
+      "Usage: ciclo gc workspaces [options]",
+      "",
+      "Clean orphaned Ciclo Herdr workspaces and git worktrees after reconnects.",
+      "GC closes Herdr panes before workspaces, then removes clean worktrees.",
+      "It skips working agents and worktrees with non-artifact changes.",
+      "",
+      "Options:",
+      "  --project <dir>                Project root. Default: cwd.",
+      "  --session <name>               Herdr session name. Default: active Herdr session or repo name.",
+      "  --dry-run                      Report candidates without closing/removing anything.",
+      "",
+      "Examples:",
+      "  ciclo gc workspaces --dry-run",
+      "  ciclo gc workspaces --session infra-blocks"
     ].join("\n");
   }
   if (command === "launch") {
@@ -1593,6 +1613,44 @@ function runAttach(args: readonly string[], io: CliIo): number {
   return result.status ?? 1;
 }
 
+function runGc(args: readonly string[], io: CliIo): number {
+  const subcommand = args[0];
+  if (subcommand === undefined || subcommand === "--help" || subcommand === "-h") {
+    io.stdout(commandHelp("gc"));
+    return 0;
+  }
+  if (subcommand !== "workspaces") throw new Error(`unknown gc subcommand: ${subcommand}`);
+  let projectRoot: string | undefined;
+  let herdrSession: string | undefined;
+  let dryRun = false;
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--project") {
+      projectRoot = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--session") {
+      herdrSession = requireValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (arg === "--json" || arg === "--compact") continue;
+    throw new Error(`unknown gc workspaces option: ${arg}`);
+  }
+  const root = resolve(projectRoot ?? process.cwd());
+  const supervisor = new WorkerSessionSupervisor(root);
+  printJson(supervisor.gcOrphanedWorkspaces({
+    dryRun,
+    herdrSession: herdrSession ?? activeHerdrSessionName() ?? basename(root)
+  }), parseJsonMode(args), io);
+  return 0;
+}
+
 function parseProjectAndDryRun(args: readonly string[]): { readonly projectRoot?: string; readonly dryRun: boolean } {
   let projectRoot: string | undefined;
   let dryRun = false;
@@ -1941,6 +1999,10 @@ export async function main(argv: readonly string[] = process.argv, io: CliIo = d
 
     if (command === "attach") {
       return runAttach(args, io);
+    }
+
+    if (command === "gc") {
+      return runGc(args, io);
     }
 
     if (command === "launch") {

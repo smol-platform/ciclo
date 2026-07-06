@@ -35,6 +35,7 @@ const expectedTools = [
   "ciclo_heartbeat_worker_session",
   "ciclo_list_worker_sessions",
   "ciclo_stop_worker_session",
+  "ciclo_gc_worker_workspaces",
   "ciclo_auth_device_start",
   "ciclo_auth_device_poll",
   "ciclo_whoami",

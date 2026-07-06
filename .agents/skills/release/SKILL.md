@@ -35,6 +35,7 @@ Use this skill to publish a GitHub-backed repository release. A direct `/release
    Stop if either command finds the tag. Never delete or move an existing release tag unless the user explicitly asks for repair and approves the exact risk.
 
 4. Bump and commit canonical version files.
+   - If the canonical version files already equal the target version and the latest revision message is `Bump version to <tag>`, treat `/next-version` as having prepared the release metadata and skip directly to validation.
    - Update every canonical package version file that this repository uses. Common examples:
      - `package.json` and `package-lock.json`: `npm version "<version>" --no-git-tag-version`
      - `pyproject.toml`: use the repository's version helper if one exists; otherwise edit the project version field precisely.

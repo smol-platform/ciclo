@@ -798,6 +798,23 @@ export const cicloMcpTools: readonly McpToolContract[] = [
     audit: audit("mcp.worker_session_stopped", ["principal_id", "worker_session_id"], ["reason"])
   },
   {
+    name: "ciclo_gc_worker_workspaces",
+    description: "Reconcile orphaned Ciclo Herdr worker panes, workspaces, and git worktrees after reconnects.",
+    inputSchema: objectSchema("Worker workspace GC request.", {
+      herdr_session: stringSchema("Herdr session name. Defaults to the active or repository-named session in CLI surfaces."),
+      dry_run: booleanSchema("Report candidates without closing panes/workspaces or removing worktrees.")
+    }),
+    outputSchema: objectSchema("Worker workspace GC result.", {
+      dryRun: booleanSchema("Whether cleanup was only planned."),
+      herdrSession: stringSchema("Herdr session scanned."),
+      candidates: { type: "array", items: { type: "object" } },
+      evidence: arrayOfStrings("GC evidence.")
+    }),
+    permission: permission("send_prompt", "work.update"),
+    sideEffects: ["worker_session_update"],
+    audit: audit("mcp.worker_workspace_gc", ["principal_id", "herdr_session", "dry_run"])
+  },
+  {
     name: "ciclo_auth_device_start",
     description: "Start OAuth-style device login for a CLI, MCP HTTP client, or remote worker.",
     inputSchema: objectSchema("Device authorization request.", {

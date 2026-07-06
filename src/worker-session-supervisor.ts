@@ -252,6 +252,35 @@ export interface WorkerSessionObservation {
   readonly evidence: readonly string[];
 }
 
+export interface WorkerSessionCleanupResult {
+  readonly sessionId: string;
+  readonly safeToForget: boolean;
+  readonly evidence: readonly string[];
+}
+
+export interface WorkerWorkspaceGcOptions {
+  readonly herdrSession?: string;
+  readonly dryRun?: boolean;
+}
+
+export interface WorkerWorkspaceGcCandidate {
+  readonly name?: string;
+  readonly paneId?: string;
+  readonly workspaceId?: string;
+  readonly cwd?: string;
+  readonly status?: string;
+  readonly skipped: boolean;
+  readonly reason: string;
+  readonly evidence: readonly string[];
+}
+
+export interface WorkerWorkspaceGcResult {
+  readonly dryRun: boolean;
+  readonly herdrSession?: string;
+  readonly candidates: readonly WorkerWorkspaceGcCandidate[];
+  readonly evidence: readonly string[];
+}
+
 export interface WorkerProcessHandle {
   readonly pid?: number;
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
@@ -907,6 +936,70 @@ function canonicalExistingPath(path: string): string {
   }
 }
 
+function isPathInside(path: string, parent: string): boolean {
+  const child = canonicalExistingPath(path);
+  const root = canonicalExistingPath(parent);
+  return child === root || child.startsWith(`${root}/`);
+}
+
+function generatedArtifactPath(path: string): boolean {
+  const normalized = path.replace(/^"|"$/g, "").replace(/\\/g, "/");
+  return normalized === ".mcp.json" ||
+    normalized === ".claude/settings.local.json" ||
+    normalized === ".codex/config.toml";
+}
+
+function porcelainPath(line: string): string {
+  const raw = line.slice(3).trim();
+  const renameIndex = raw.indexOf(" -> ");
+  return renameIndex >= 0 ? raw.slice(renameIndex + 4).trim() : raw;
+}
+
+function hasNonArtifactChanges(statusOutput: string): boolean {
+  return statusOutput
+    .split(/\r?\n/u)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .some((line) => !generatedArtifactPath(porcelainPath(line)));
+}
+
+function worktreeRoot(root: string): string {
+  const resolved = resolve(root);
+  return join(dirname(resolved), ".ciclo-worktrees", basename(resolved));
+}
+
+function objectArrayField(value: unknown, ...keys: readonly string[]): readonly Record<string, unknown>[] {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    const field = record[key];
+    if (Array.isArray(field)) return field.filter((item): item is Record<string, unknown> => item !== null && typeof item === "object" && !Array.isArray(item));
+  }
+  const result = record.result;
+  if (result !== null && typeof result === "object" && !Array.isArray(result)) {
+    return objectArrayField(result, ...keys);
+  }
+  return [];
+}
+
+function jsonObjectArray(stdout: string, ...keys: readonly string[]): readonly Record<string, unknown>[] {
+  try {
+    return objectArrayField(JSON.parse(stdout) as unknown, ...keys);
+  } catch {
+    return [];
+  }
+}
+
+function workspaceIdForCwd(workspaces: readonly Record<string, unknown>[], cwd: string | undefined): string | undefined {
+  if (cwd === undefined) return undefined;
+  for (const workspace of workspaces) {
+    const id = stringField(workspace, "workspace_id", "workspaceId", "id");
+    const path = stringField(workspace, "checkout_path", "checkoutPath", "path", "cwd");
+    if (id !== undefined && path !== undefined && canonicalExistingPath(path) === canonicalExistingPath(cwd)) return id;
+  }
+  return undefined;
+}
+
 function parseHerdrWorktreeWorkspaceId(stdout: string, worktreePath: string): string | undefined {
   const trimmed = stdout.trim();
   if (trimmed.length === 0) return undefined;
@@ -1379,16 +1472,129 @@ export class WorkerSessionSupervisor {
     return session === undefined ? undefined : this.refreshDetachedAgent(session);
   }
 
+  private worktreeSafeToRemove(session: WorkerSessionRecord): {
+    readonly safe: boolean;
+    readonly evidence: readonly string[];
+  } {
+    const path = session.worktree?.path;
+    if (path === undefined) return { safe: true, evidence: [] };
+    if (!existsSync(path)) return { safe: true, evidence: ["worker.worktree.cleanup:missing"] };
+    const status = this.commandRunner.run("git", ["-C", path, "status", "--porcelain"], { cwd: this.root });
+    if (status.status !== 0) {
+      return {
+        safe: false,
+        evidence: ["worker.worktree.cleanup:status_failed", `worker.worktree.cleanup.reason:${compactReason(status.stderr || status.stdout || "git status failed")}`]
+      };
+    }
+    if (hasNonArtifactChanges(status.stdout)) {
+      return {
+        safe: false,
+        evidence: ["worker.worktree.cleanup:skipped_dirty_non_artifact"]
+      };
+    }
+    return {
+      safe: true,
+      evidence: status.stdout.trim().length === 0
+        ? ["worker.worktree.cleanup:clean"]
+        : ["worker.worktree.cleanup:artifact_only_changes"]
+    };
+  }
+
+  private cleanupSessionResources(session: WorkerSessionRecord, reason: string, options: {
+    readonly skipWorkingAgent?: boolean;
+    readonly closeProcessHandle?: boolean;
+    readonly signal?: NodeJS.Signals;
+  } = {}): WorkerSessionCleanupResult {
+    const evidence: string[] = [`worker.session.cleanup.reason:${reason}`];
+    let safeToForget = true;
+    let paneClosed = false;
+
+    if (session.agentRef?.kind === "herdr_agent") {
+      const pane = this.resolveHerdrPane(session);
+      evidence.push(...pane.evidence);
+      if (options.skipWorkingAgent === true && pane.status === "working") {
+        return {
+          sessionId: session.sessionId,
+          safeToForget: false,
+          evidence: [...evidence, "worker.session.cleanup:skipped_working_agent"]
+        };
+      }
+      if (pane.paneId !== undefined) {
+        const close = this.commandRunner.run("herdr", [
+          ...herdrSessionArgs(session),
+          "pane",
+          "close",
+          pane.paneId
+        ], { cwd: session.cwd });
+        if (close.status === 0) {
+          paneClosed = true;
+          evidence.push("worker.session.cleanup.herdr_pane:closed", `worker.session.cleanup.herdr_pane.id:${pane.paneId}`);
+        } else {
+          safeToForget = false;
+          evidence.push("worker.session.cleanup.herdr_pane:failed", `worker.session.cleanup.reason:${compactReason(close.stderr || close.stdout || "herdr pane close failed")}`);
+        }
+      }
+      const workspaceId = session.worktree?.herdrWorkspaceId;
+      if (workspaceId !== undefined) {
+        const close = this.commandRunner.run("herdr", [
+          ...herdrSessionArgs(session),
+          "workspace",
+          "close",
+          workspaceId
+        ], { cwd: session.cwd });
+        if (close.status === 0) {
+          evidence.push("worker.session.cleanup.herdr_workspace:closed", `worker.session.cleanup.herdr_workspace.id:${workspaceId}`);
+        } else {
+          safeToForget = false;
+          evidence.push("worker.session.cleanup.herdr_workspace:failed", `worker.session.cleanup.reason:${compactReason(close.stderr || close.stdout || "herdr workspace close failed")}`);
+        }
+      }
+      if (session.workerSecretEnv !== undefined && paneClosed) evidence.push("worker.secret_exec.cleanup:by_pane_close");
+    } else if (options.closeProcessHandle === true) {
+      const stopped = this.handles.get(session.sessionId)?.stop(options.signal ?? "SIGTERM") ?? false;
+      evidence.push(`worker.session.cleanup.process:${stopped ? "signal_sent" : "missing_handle"}`);
+      if (session.workerSecretEnv !== undefined && stopped) evidence.push("worker.secret_exec.cleanup:by_process_stop");
+    }
+
+    const worktree = session.worktree;
+    if (worktree !== undefined) {
+      const safety = this.worktreeSafeToRemove(session);
+      evidence.push(...safety.evidence);
+      if (!safety.safe) {
+        safeToForget = false;
+      } else if (existsSync(worktree.path)) {
+        const remove = this.commandRunner.run("git", ["-C", this.root, "worktree", "remove", "--force", worktree.path], { cwd: this.root });
+        if (remove.status === 0) {
+          evidence.push("worker.worktree.cleanup:removed", `worker.worktree.cleanup.path:${worktree.path}`);
+          const prune = this.commandRunner.run("git", ["-C", this.root, "worktree", "prune"], { cwd: this.root });
+          evidence.push(prune.status === 0 ? "worker.worktree.cleanup:pruned" : "worker.worktree.cleanup:prune_failed");
+          if (prune.status !== 0) safeToForget = false;
+        } else {
+          safeToForget = false;
+          evidence.push("worker.worktree.cleanup:remove_failed", `worker.worktree.cleanup.reason:${compactReason(remove.stderr || remove.stdout || "git worktree remove failed")}`);
+        }
+      }
+    }
+
+    return { sessionId: session.sessionId, safeToForget, evidence };
+  }
+
   cleanupCompleted(reason = "heartbeat cleaned up completed worker session"): readonly WorkerSessionRecord[] {
     this.refreshDetachedAgents();
     const cleaned: WorkerSessionRecord[] = [];
     for (const session of [...this.sessions.values()]) {
       if (session.state !== "completed") continue;
+      const cleanup = this.cleanupSessionResources(session, reason, { skipWorkingAgent: true });
       const updated: WorkerSessionRecord = {
         ...session,
         cleanupReason: reason,
-        evidence: [...session.evidence, "worker.session.cleanup:completed", `worker.session.cleanup.reason:${reason}`]
+        evidence: [...session.evidence, "worker.session.cleanup:completed", ...cleanup.evidence]
       };
+      if (!cleanup.safeToForget) {
+        this.sessions.set(session.sessionId, updated);
+        this.emit(updated, "worker.cleaned_up", ["worker.session.cleanup:deferred"]);
+        continue;
+      }
       this.sessions.delete(session.sessionId);
       this.handles.delete(session.sessionId);
       this.emit(updated, "worker.cleaned_up", ["worker.session.cleanup:completed"]);
@@ -1422,10 +1628,19 @@ export class WorkerSessionSupervisor {
       this.emit(updated, "worker.state_change", ["worker.session.stop:not_running"]);
       return updated;
     }
-    const stopped = this.handles.get(sessionId)?.stop(signal) ?? false;
+    const cleanup = this.cleanupSessionResources(session, reason, {
+      closeProcessHandle: true,
+      signal
+    });
+    const legacyStopEvidence = cleanup.evidence.includes("worker.session.cleanup.process:signal_sent")
+      ? "worker.session.stop:sent"
+      : cleanup.evidence.includes("worker.session.cleanup.process:missing_handle")
+        ? "worker.session.stop:missing_handle"
+        : "worker.session.stop:cleanup_requested";
     const updated = this.transition(session, "stopped", [
-      `worker.session.stop:${stopped ? "sent" : "missing_handle"}`,
-      `worker.session.stop.reason:${reason}`
+      legacyStopEvidence,
+      `worker.session.stop.reason:${reason}`,
+      ...cleanup.evidence
     ], {
       stoppedAt: this.clock.now(),
       cleanupReason: reason,
@@ -1735,6 +1950,133 @@ export class WorkerSessionSupervisor {
       });
     this.handles.delete(sessionId);
     return updated;
+  }
+
+  gcOrphanedWorkspaces(options: WorkerWorkspaceGcOptions = {}): WorkerWorkspaceGcResult {
+    const dryRun = options.dryRun === true;
+    const herdrSession = options.herdrSession;
+    const sessionArgs = herdrSession === undefined ? [] : ["--session", herdrSession];
+    const trackedNames = new Set(
+      [...this.sessions.values()].flatMap((session) => [
+        session.sessionName,
+        session.agentRef?.id,
+        session.agentRef?.target
+      ].filter((value): value is string => value !== undefined))
+    );
+    const trackedCwds = new Set([...this.sessions.values()].map((session) => canonicalExistingPath(session.cwd)));
+    const base = worktreeRoot(this.root);
+    const agentList = this.commandRunner.run("herdr", [...sessionArgs, "agent", "list", "--json"], { cwd: this.root });
+    const workspaceList = this.commandRunner.run("herdr", [...sessionArgs, "workspace", "list", "--json"], { cwd: this.root });
+    const evidence = [
+      "worker.workspace_gc:started",
+      `worker.workspace_gc.dry_run:${dryRun}`,
+      `worker.workspace_gc.root:${base}`,
+      agentList.status === 0 ? "worker.workspace_gc.agent_list:read" : "worker.workspace_gc.agent_list:failed",
+      workspaceList.status === 0 ? "worker.workspace_gc.workspace_list:read" : "worker.workspace_gc.workspace_list:failed"
+    ];
+    if (agentList.status !== 0) {
+      return {
+        dryRun,
+        ...(herdrSession === undefined ? {} : { herdrSession }),
+        candidates: [],
+        evidence: [...evidence, `worker.workspace_gc.reason:${compactReason(agentList.stderr || agentList.stdout || "herdr agent list failed")}`]
+      };
+    }
+    const agents = jsonObjectArray(agentList.stdout, "agents", "items");
+    const workspaces = workspaceList.status === 0 ? jsonObjectArray(workspaceList.stdout, "workspaces", "items") : [];
+    const candidates: WorkerWorkspaceGcCandidate[] = [];
+
+    for (const agent of agents) {
+      const name = stringField(agent, "name", "id", "target");
+      const cwd = stringField(agent, "cwd", "checkout_path", "checkoutPath", "path");
+      if (cwd === undefined || !isPathInside(cwd, base)) continue;
+      if ((name !== undefined && trackedNames.has(name)) || trackedCwds.has(canonicalExistingPath(cwd))) continue;
+      const status = stringField(agent, "agent_status", "agentStatus", "status", "state");
+      const paneId = stringField(agent, "pane_id", "paneId", "pane", "terminal_id", "terminalId", "terminal");
+      const workspaceId = stringField(agent, "workspace_id", "workspaceId", "open_workspace_id", "openWorkspaceId") ?? workspaceIdForCwd(workspaces, cwd);
+      const candidateEvidence = [
+        "worker.workspace_gc.candidate:orphan",
+        ...(name === undefined ? [] : [`worker.workspace_gc.agent:${name}`]),
+        `worker.workspace_gc.cwd:${cwd}`,
+        ...(paneId === undefined ? [] : [`worker.workspace_gc.pane:${paneId}`]),
+        ...(workspaceId === undefined ? [] : [`worker.workspace_gc.workspace:${workspaceId}`]),
+        ...(status === undefined ? [] : [`worker.workspace_gc.status:${status}`])
+      ];
+      if (status === "working") {
+        candidates.push({
+          ...(name === undefined ? {} : { name }),
+          ...(paneId === undefined ? {} : { paneId }),
+          ...(workspaceId === undefined ? {} : { workspaceId }),
+          cwd,
+          ...(status === undefined ? {} : { status }),
+          skipped: true,
+          reason: "agent is working",
+          evidence: [...candidateEvidence, "worker.workspace_gc:skipped_working_agent"]
+        });
+        continue;
+      }
+      const statusResult = this.commandRunner.run("git", ["-C", cwd, "status", "--porcelain"], { cwd: this.root });
+      if (statusResult.status !== 0 || hasNonArtifactChanges(statusResult.stdout)) {
+        candidates.push({
+          ...(name === undefined ? {} : { name }),
+          ...(paneId === undefined ? {} : { paneId }),
+          ...(workspaceId === undefined ? {} : { workspaceId }),
+          cwd,
+          ...(status === undefined ? {} : { status }),
+          skipped: true,
+          reason: statusResult.status !== 0 ? "worktree status failed" : "worktree has non-artifact changes",
+          evidence: [
+            ...candidateEvidence,
+            statusResult.status !== 0 ? "worker.workspace_gc:skipped_status_failed" : "worker.workspace_gc:skipped_dirty_non_artifact"
+          ]
+        });
+        continue;
+      }
+      const cleanupEvidence = [...candidateEvidence];
+      if (!dryRun && paneId !== undefined) {
+        const close = this.commandRunner.run("herdr", [...sessionArgs, "pane", "close", paneId], { cwd });
+        cleanupEvidence.push(close.status === 0 ? "worker.workspace_gc.pane:closed" : "worker.workspace_gc.pane:failed");
+      }
+      if (!dryRun && workspaceId !== undefined) {
+        const close = this.commandRunner.run("herdr", [...sessionArgs, "workspace", "close", workspaceId], { cwd });
+        cleanupEvidence.push(close.status === 0 ? "worker.workspace_gc.workspace:closed" : "worker.workspace_gc.workspace:failed");
+      }
+      if (!dryRun) {
+        const remove = this.commandRunner.run("git", ["-C", this.root, "worktree", "remove", "--force", cwd], { cwd: this.root });
+        cleanupEvidence.push(remove.status === 0 ? "worker.workspace_gc.worktree:removed" : "worker.workspace_gc.worktree:remove_failed");
+        if (remove.status === 0) {
+          const prune = this.commandRunner.run("git", ["-C", this.root, "worktree", "prune"], { cwd: this.root });
+          cleanupEvidence.push(prune.status === 0 ? "worker.workspace_gc.worktree:pruned" : "worker.workspace_gc.worktree:prune_failed");
+        }
+      }
+      candidates.push({
+        ...(name === undefined ? {} : { name }),
+        ...(paneId === undefined ? {} : { paneId }),
+        ...(workspaceId === undefined ? {} : { workspaceId }),
+        cwd,
+        ...(status === undefined ? {} : { status }),
+        skipped: false,
+        reason: dryRun ? "orphan would be cleaned" : "orphan cleaned",
+        evidence: cleanupEvidence
+      });
+    }
+
+    this.events.append({
+      type: "worker.workspace_gc",
+      evidence: [...evidence, `worker.workspace_gc.candidates:${candidates.length}`],
+      data: {
+        dry_run: dryRun,
+        herdr_session: herdrSession,
+        candidates: candidates.length,
+        skipped: candidates.filter((candidate) => candidate.skipped).length
+      }
+    });
+    return {
+      dryRun,
+      ...(herdrSession === undefined ? {} : { herdrSession }),
+      candidates,
+      evidence: [...evidence, `worker.workspace_gc.candidates:${candidates.length}`]
+    };
   }
 
   metrics(now = this.clock.now()): WorkerSessionMetrics {

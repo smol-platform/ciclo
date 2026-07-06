@@ -17,6 +17,7 @@ export type CicloEventType =
   | "worker.nudged"
   | "worker.prompt_submitted"
   | "worker.capacity_released"
+  | "worker.workspace_gc"
   | "bead.claimed"
   | "bead.closed"
   | "review_session.launched"

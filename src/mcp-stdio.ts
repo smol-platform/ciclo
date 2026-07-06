@@ -2385,6 +2385,33 @@ async function callTool(
     });
   }
 
+  if (name === "ciclo_gc_worker_workspaces") {
+    const supervisor = runtime.workerSupervisor ?? new WorkerSessionSupervisor(runtime.auth.session.projectRoot);
+    const result = supervisor.gcOrphanedWorkspaces({
+      herdrSession: stringParam(params, "herdr_session") || undefined,
+      dryRun: booleanParam(params, "dry_run", true)
+    });
+    auditMutation({
+      runtime,
+      tool: name,
+      action: "send_prompt",
+      authorization,
+      reason: result.dryRun ? "worker workspace GC planned" : "worker workspace GC executed",
+      evidence: result.evidence
+    });
+    appendRuntimeEvent(runtime, {
+      type: "worker.workspace_gc",
+      evidence: result.evidence,
+      data: {
+        dry_run: result.dryRun,
+        herdr_session: result.herdrSession,
+        candidates: result.candidates.length,
+        skipped: result.candidates.filter((candidate) => candidate.skipped).length
+      }
+    });
+    return textContent(result);
+  }
+
   if (name === "ciclo_start_work") {
     const loop = loopFromParams(params, runtime);
     const policy = evaluatePolicy({
